@@ -1,0 +1,249 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const { test } = require("node:test");
+const { State } = require("./state.js");
+const { ReviewService, configuration } = require("./service.js");
+const { createServer } = require("./server.js");
+const { createGitHub } = require("./github.js");
+const { childEnvironment } = require("./review.js");
+
+const repository = "owner/repo";
+const head = "b".repeat(40), base = "a".repeat(40);
+function pr(overrides = {}) {
+  return { number: 1, state: "open", draft: false, title: "Fix", head: { sha: head },
+    base: { sha: base, ref: "main", repo: { full_name: repository } }, ...overrides };
+}
+function setup(t, overrides = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ocr-service-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const current = { pr: pr() }, statuses = [];
+  const config = { stateDirectory: directory, repositories: [{ name: repository, baseBranches: ["main"] }] };
+  const github = { getToken: () => "test-token", rest: {
+    pulls: { get: async () => ({ data: current.pr }), list: async () => ({ data: [current.pr] }) },
+    repos: { createCommitStatus: async (p) => { statuses.push(p); return { data: {} }; } },
+  } };
+  const service = new ReviewService({ config, github, log: () => {},
+    prepare: async ({ core }) => { core.setOutput("should_review", "true"); core.setOutput("result_directory", directory); },
+    run: async () => {},
+    publish: async () => ({ summaryURL: "https://github.com/owner/repo/pull/1#issuecomment-1", comments: [], incomplete: false }),
+    ...overrides });
+  return { service, current, directory, statuses, github, config };
+}
+
+test("durable queue deduplicates head/base, coalesces updates and recovers an interrupted worker", (t) => {
+  const { service, directory } = setup(t);
+  const first = service.accept(repository, pr());
+  assert.equal(service.accept(repository, pr()), null);
+  first.state = "running"; first.attempt = 1; service.state.save();
+  const restarted = new State(directory);
+  assert.equal(restarted.next().id, first.id);
+  assert.equal(restarted.next().state, "queued");
+  const updated = restarted.enqueue(repository, pr({ head: { sha: "c".repeat(40) } }));
+  assert.equal(restarted.data.jobs[0].state, "superseded");
+  assert.equal(restarted.next().id, updated.id);
+  assert.equal(fs.statSync(path.join(directory, "state.json")).mode & 0o777, 0o600);
+  fs.writeFileSync(path.join(directory, "state.json"), "broken");
+  assert.throws(() => new State(directory), SyntaxError);
+});
+
+test("polling seeds existing heads only once and detects new commits without workflows", async (t) => {
+  const h = setup(t);
+  h.service.config.bootstrapExisting = false;
+  await h.service.poll();
+  assert.equal(h.service.state.data.jobs.length, 0);
+  h.current.pr = pr({ head: { sha: "c".repeat(40) } });
+  await h.service.poll();
+  assert.equal(h.service.state.data.jobs.length, 1);
+  await h.service.poll();
+  assert.equal(h.service.state.data.jobs.length, 1);
+  h.current.pr.draft = true;
+  await h.service.poll();
+  assert.equal(h.service.state.data.jobs[0].state, "superseded");
+  h.current.pr.draft = false;
+  await h.service.poll();
+  assert.equal(h.service.state.data.jobs.length, 2);
+  assert.ok(h.service.lastPoll);
+});
+
+test("complete reviews publish exact-head statuses and apply the configured severity policy", async (t) => {
+  const h = setup(t);
+  h.service.accept(repository, pr());
+  await h.service.tick();
+  assert.deepEqual(h.statuses.map((s) => s.state), ["pending", "pending", "success"]);
+  assert.ok(h.statuses.every((s) => s.sha === head && s.context === "ocr-review"));
+  assert.equal(h.service.state.data.jobs[0].state, "complete");
+  h.service.publish = async () => ({ summaryURL: "https://example.test/comment", comments: [{ severity: "high" }] });
+  h.service.accept(repository, pr(), { force: true });
+  await h.service.tick();
+  assert.equal(h.statuses.at(-1).state, "failure");
+  assert.equal(h.service.state.data.jobs.at(-1).state, "complete");
+});
+
+test("failures retry with backoff and stop at the cap; a restart retains that decision", async (t) => {
+  const h = setup(t, { run: async () => { throw new Error("provider unavailable"); } });
+  h.service.config.maxAttempts = 2;
+  const job = h.service.accept(repository, pr());
+  await h.service.tick();
+  assert.equal(job.state, "queued");
+  assert.ok(job.nextAt > Date.now());
+  assert.equal(h.service.state.next(), undefined);
+  job.nextAt = 0;
+  await h.service.tick();
+  assert.equal(job.state, "failed");
+  assert.equal(job.attempt, 2);
+  assert.equal(h.statuses.at(-1).state, "error");
+  assert.equal(new State(h.directory).next(), undefined);
+});
+
+test("new pushes abort active work, never publish its result, and queue the newer head", async (t) => {
+  const h = setup(t);
+  let started;
+  const ready = new Promise((resolve) => { started = resolve; });
+  h.service.run = async ({ signal }) => {
+    started();
+    await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+  };
+  h.service.publish = async () => assert.fail("superseded result published");
+  const first = h.service.accept(repository, pr());
+  const running = h.service.tick();
+  await ready;
+  h.current.pr = pr({ head: { sha: "c".repeat(40) } });
+  const next = h.service.accept(repository, h.current.pr);
+  await running;
+  assert.equal(first.state, "superseded");
+  assert.equal(h.service.state.next().id, next.id);
+  assert.deepEqual(h.statuses.map((s) => s.state), ["pending", "pending"]);
+});
+
+test("graceful shutdown requeues interrupted work without consuming a retry", async (t) => {
+  const h = setup(t);
+  let started;
+  const ready = new Promise((resolve) => { started = resolve; });
+  h.service.run = async ({ signal }) => { started(); await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true })); };
+  const job = h.service.accept(repository, pr());
+  const running = h.service.tick(); await ready;
+  h.service.stop(); await running;
+  assert.equal(job.state, "queued");
+  assert.equal(job.attempt, 0);
+  assert.equal(new State(h.directory).next().id, job.id);
+});
+
+test("a stale PR before execution or publication cannot set a successful status", async (t) => {
+  const h = setup(t);
+  const job = h.service.accept(repository, pr());
+  h.current.pr = pr({ head: { sha: "c".repeat(40) } });
+  await h.service.tick();
+  assert.equal(job.state, "superseded");
+  assert.ok(h.statuses.every((s) => s.state === "pending"));
+  h.service.publish = async () => {
+    h.current.pr.state = "closed";
+    return { comments: [], summaryURL: "https://example.test/comment" };
+  };
+  await h.service.tick();
+  assert.ok(h.statuses.every((s) => s.state !== "success"));
+});
+
+test("HTTP API requires a bearer token and webhook signatures; only allowlisted PRs are queued", async (t) => {
+  const h = setup(t);
+  const server = createServer(h.service, { apiToken: "api-test", webhookSecret: "webhook-test" });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  assert.equal((await fetch(url + "/healthz")).status, 503);
+  h.service.lastPoll = new Date().toISOString();
+  assert.equal((await fetch(url + "/healthz")).status, 200);
+  assert.equal((await fetch(url + "/v1/jobs")).status, 401);
+  const headers = { authorization: "Bearer api-test", "content-type": "application/json" };
+  assert.equal((await fetch(url + "/v1/reviews", { method: "POST", headers,
+    body: JSON.stringify({ repository: "other/repo", pull_number: 1 }) })).status, 400);
+  const body = JSON.stringify({ action: "opened", repository: { full_name: repository }, pull_request: { number: 1 } });
+  assert.equal((await fetch(url + "/webhooks/github", { method: "POST", body })).status, 401);
+  const signature = "sha256=" + crypto.createHmac("sha256", "webhook-test").update(body).digest("hex");
+  const response = await fetch(url + "/webhooks/github", { method: "POST", body,
+    headers: { "x-github-event": "pull_request", "x-hub-signature-256": signature } });
+  assert.equal(response.status, 202);
+  assert.equal((await response.json()).queued, true);
+  assert.equal((await (await fetch(url + "/v1/jobs", { headers })).json()).length, 1);
+  const again = await fetch(url + "/webhooks/github", { method: "POST", body,
+    headers: { "x-github-event": "pull_request", "x-hub-signature-256": signature } });
+  assert.equal((await again.json()).queued, false);
+});
+
+test("GitHub transport has the publisher's wire contract and reloads rotated credentials", async (t) => {
+  const h = setup(t), tokenFile = path.join(h.directory, "token");
+  fs.writeFileSync(tokenFile, "first");
+  const calls = [];
+  const github = createGitHub({ tokenFile, fetchImpl: async (url, options) => {
+    calls.push({ url, ...options });
+    return new Response(JSON.stringify({ id: 1 }), { status: 200, headers: { "x-ratelimit-remaining": "99" } });
+  } });
+  const p = { owner: "owner", repo: "repo", pull_number: 42 };
+  await github.rest.pulls.createReview({ ...p, commit_id: head, event: "COMMENT", body: "review", comments: [] });
+  assert.equal(calls[0].url, "https://api.github.com/repos/owner/repo/pulls/42/reviews");
+  assert.deepEqual(JSON.parse(calls[0].body), { commit_id: head, event: "COMMENT", body: "review", comments: [] });
+  fs.writeFileSync(tokenFile, "second");
+  await github.rest.issues.updateComment({ ...p, comment_id: 123, body: "updated" });
+  assert.equal(calls[1].headers.authorization, "Bearer second");
+  assert.equal(calls[1].redirect, "error");
+  const failing = createGitHub({ token: "test", fetchImpl: async () => new Response(JSON.stringify({ message: "rate limited" }),
+    { status: 429, headers: { "retry-after": "60" } }) });
+  await assert.rejects(failing.rest.pulls.get(p), (error) => error.status === 429 && error.response.headers["retry-after"] === "60");
+});
+
+test("review children receive only model/runtime variables and configuration rejects unsafe repos", () => {
+  assert.deepEqual(childEnvironment({ HOME: "/home/ocr", CODEX_HOME: "/auth", PATH: "/bin", OCR_LLM_TOKEN: "model",
+    GH_TOKEN: "github", AWS_SECRET_ACCESS_KEY: "secret", OCR_SERVICE_API_TOKEN: "control", GIT_CONFIG_VALUE_0: "git" }),
+  { HOME: "/home/ocr", CODEX_HOME: "/auth", PATH: "/bin", OCR_LLM_TOKEN: "model" });
+  assert.throws(() => configuration({ stateDirectory: "/data/ocr", repositories: [{ name: "../../tmp", baseBranches: ["main"] }] }), /unique owner/);
+});
+
+test("a delayed queued status cannot overwrite the final review status", async (t) => {
+  const h = setup(t), delivered = [];
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  h.github.rest.repos.createCommitStatus = async (value) => {
+    if (value.description.startsWith("OCR queued")) await blocked;
+    delivered.push(value.state);
+  };
+  const job = h.service.accept(repository, pr());
+  const flushing = h.service.flushStatuses();
+  const running = h.service.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(job.state, "queued");
+  release();
+  await Promise.all([flushing, running]);
+  assert.deepEqual(delivered, ["pending", "pending", "success"]);
+  assert.equal(job.state, "complete");
+});
+
+test("persistence failure clears the active slot and propagates for supervisor restart", async (t) => {
+  const h = setup(t);
+  h.service.accept(repository, pr());
+  h.service.execute = async () => {
+    h.service.state.save = () => { throw Object.assign(new Error("ENOSPC"), { persistence: true }); };
+    return { stale: false };
+  };
+  await assert.rejects(h.service.tick(), (error) => error.persistence === true);
+  assert.equal(h.service.active, null);
+});
+
+test("base advancement preserves completed head reviews but refreshes queued review ranges", async (t) => {
+  const h = setup(t);
+  const first = h.service.accept(repository, pr());
+  await h.service.tick();
+  const changed = pr({ base: { ...pr().base, sha: "c".repeat(40) } });
+  assert.equal(h.service.accept("OWNER/REPO", changed), null);
+  assert.equal(first.state, "complete");
+  const queued = h.service.accept(repository, changed, { force: true });
+  const next = h.service.accept(repository, pr({ base: { ...pr().base, sha: "d".repeat(40) } }));
+  assert.equal(queued.state, "superseded");
+  assert.equal(next.base, "d".repeat(40));
+});

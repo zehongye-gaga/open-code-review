@@ -1,0 +1,181 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+"use strict";
+
+const fs = require("node:fs");
+const path = require("node:path");
+const { execFile, spawn } = require("node:child_process");
+const { promisify } = require("node:util");
+const { runPostReviewComments } = require("../../scripts/github-actions/post-review-comments.js");
+
+const exec = promisify(execFile);
+const SHA = /^[0-9a-f]{40}$/;
+
+function childEnvironment(source = process.env) {
+  const names = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "CODEX_HOME",
+    "XDG_CONFIG_HOME", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE",
+    "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
+  return Object.fromEntries(Object.entries(source).filter(([key]) => names.includes(key) || key.startsWith("OCR_LLM_")));
+}
+
+async function resolvePullRequest({ github, context, core, prNumber }) {
+  if (!/^[1-9][0-9]*$/.test(String(prNumber)) || !Number.isSafeInteger(Number(prNumber))) {
+    throw new Error("A positive integer pull request number is required");
+  }
+  const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(prNumber) });
+  if (pr.state !== "open" || pr.draft) {
+    core.notice("Skipping a closed or draft pull request");
+    return null;
+  }
+  if (context.eventName === "pull_request_target" && context.payload?.pull_request?.head?.sha !== pr.head?.sha) {
+    core.notice("Skipping an event superseded by a newer PR head");
+    return null;
+  }
+  if (!SHA.test(pr.head?.sha) || !SHA.test(pr.base?.sha) ||
+      pr.base?.repo?.full_name?.toLowerCase() !== `${context.repo.owner}/${context.repo.repo}`.toLowerCase()) {
+    throw new Error("The PR does not have a valid head and base in this repository");
+  }
+  return {
+    number: Number(prNumber), head: pr.head.sha, base: pr.base.sha,
+    background: `Pull request #${prNumber}: ${pr.title}\n\n${pr.body || ""}`.slice(0, 50000),
+  };
+}
+
+async function prepareReview({ github, context, core, prNumber, cwd = process.cwd(),
+  temp, token, checkoutBase = false, signal, expectedHead, expectedBase }) {
+  core.setOutput("should_review", "false");
+  const metadata = await resolvePullRequest({ github, context, core, prNumber });
+  if (!metadata) return;
+  if ((expectedHead && metadata.head !== expectedHead) || (expectedBase && metadata.base !== expectedBase)) return;
+  if (!temp || !path.isAbsolute(temp)) throw new Error("Review storage must be an absolute directory");
+
+  // Git receives its short-lived credential only for fetch, never via argv or a config file.
+  const gitEnv = { ...childEnvironment(), GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  if (token) {
+    gitEnv.GIT_CONFIG_COUNT = "1";
+    gitEnv.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
+    gitEnv.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+  }
+  const git = async (args) => (await exec("git", ["-c", "credential.helper=", "-c", "core.hooksPath=/dev/null",
+    "-c", "core.fsmonitor=false", ...args], { cwd, env: gitEnv, timeout: 120000, signal })).stdout.trim();
+  if (!fs.existsSync(path.join(cwd, ".git"))) {
+    await git(["init"]);
+    await git(["remote", "add", "origin", `https://github.com/${context.repo.owner}/${context.repo.repo}.git`]);
+  }
+  await git(["fetch", "--no-tags", "--no-recurse-submodules", "origin",
+    `+${metadata.base}:refs/ocr/base`, `+refs/pull/${metadata.number}/head:refs/ocr/head`]);
+  if (await git(["rev-parse", "refs/ocr/head"]) !== metadata.head) {
+    core.notice("The PR changed during fetch; its newer event will review the new head");
+    return;
+  }
+  metadata.merge_base = await git(["merge-base", metadata.base, metadata.head]);
+  if (!SHA.test(metadata.merge_base)) throw new Error("Could not resolve the PR merge base");
+  if (checkoutBase) {
+    await git(["checkout", "--force", "--detach", metadata.base]);
+    await git(["clean", "-ffdqx"]);
+  }
+
+  const directory = fs.mkdtempSync(path.join(temp, "ocr-pr-"));
+  fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify(metadata, null, 2), { mode: 0o600 });
+  core.setOutput("result_directory", directory);
+  core.setOutput("should_review", "true");
+  core.info(`Reviewing PR #${metadata.number}: ${metadata.merge_base}..${metadata.head}`);
+}
+
+async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd = process.cwd(),
+  model = process.env.OCR_CODEX_MODEL || "gpt-6-astra",
+  budget = process.env.OCR_MAX_TOKENS_BUDGET || "1000000", provider = "openai-codex",
+  signal, timeoutMs = 25 * 60 * 1000 }) {
+  const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
+  if (!SHA.test(metadata.head) || !SHA.test(metadata.merge_base)) throw new Error("Invalid review range");
+  if (!/^(0|[1-9][0-9]*)$/.test(String(budget)) || !Number.isSafeInteger(Number(budget))) {
+    throw new Error("OCR_MAX_TOKENS_BUDGET must be a non-negative integer");
+  }
+  const stdout = fs.openSync(path.join(directory, "result.json"), "w", 0o600);
+  const stderr = fs.openSync(path.join(directory, "stderr.log"), "w", 0o600);
+  const env = childEnvironment();
+  let code = 1;
+  try {
+    code = await new Promise((resolve, reject) => {
+      const child = spawn(binary, ["review", "--repo", cwd, "--from", metadata.merge_base,
+        "--to", metadata.head, "--provider", provider, "--model", model,
+        "--audience", "agent", "--format", "json", "--concurrency", "2", "--timeout", "15",
+        "--max-tokens-budget", String(budget), "--background", metadata.background],
+      { cwd, env, stdio: ["ignore", stdout, stderr] });
+      let forceTimer;
+      const terminate = () => {
+        child.kill("SIGTERM");
+        forceTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
+        forceTimer.unref();
+      };
+      const timer = setTimeout(terminate, timeoutMs);
+      if (signal?.aborted) terminate();
+      else signal?.addEventListener("abort", terminate, { once: true });
+      child.once("error", reject);
+      child.once("close", (exitCode) => {
+        clearTimeout(timer);
+        clearTimeout(forceTimer);
+        signal?.removeEventListener("abort", terminate);
+        resolve(exitCode === null ? 1 : exitCode);
+      });
+    });
+  } catch (error) {
+    fs.writeSync(stderr, `Could not run installed OCR: ${error.message}\n`);
+  } finally {
+    fs.closeSync(stdout);
+    fs.closeSync(stderr);
+  }
+  fs.writeFileSync(path.join(directory, "exit-code.json"), JSON.stringify(code));
+  core.info(`OCR exited with code ${code}; report and diagnostics are saved in the job directory`);
+}
+
+async function publishReview({ github, context, core, directory, post = runPostReviewComments }) {
+  const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
+  const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: metadata.number });
+  if (pr.state !== "open" || pr.draft || pr.head.sha !== metadata.head || pr.base.sha !== metadata.base) {
+    core.notice("Skipping publication because the PR changed or closed during review");
+    return { stale: true };
+  }
+  const resultPath = path.join(directory, "result.json");
+  let result;
+  try { result = JSON.parse(fs.readFileSync(resultPath, "utf8")); } catch { /* The publisher reports missing output. */ }
+  if (result?.manifest?.input?.resolved_head && result.manifest.input.resolved_head !== metadata.head) {
+    core.setFailed("OCR returned a result for a different head; no comments were published");
+    return;
+  }
+  let failedComments = 0;
+  let publicationFailures;
+  let summaryURL = "";
+  let exitCode = 1;
+  try { exitCode = JSON.parse(fs.readFileSync(path.join(directory, "exit-code.json"), "utf8")); } catch { /* Missing execution is a failure. */ }
+  const verified = result?.manifest?.input?.resolved_head === metadata.head && Array.isArray(result.comments);
+  const skipped = verified && result?.status === "skipped" && result?.manifest?.terminal_state === "skipped";
+  const complete = verified && result?.status === "complete" && result?.manifest?.terminal_state === "complete";
+  const incomplete = exitCode !== 0 || (!complete && !skipped);
+  let publicationPath = resultPath;
+  if (!verified) {
+    publicationPath = path.join(directory, "publication-error.json");
+    fs.writeFileSync(publicationPath, JSON.stringify({ comments: [],
+      message: "The review did not produce a verifiable result. Check the service job diagnostics." }), { mode: 0o600 });
+  }
+  await post({
+    github, context, fs, prNumber: metadata.number, resultPath: publicationPath, stderrPath: path.join(directory, "stderr.log"),
+    stickySummary: true, incremental: true,
+    reviewIncomplete: incomplete, reviewSkipped: skipped && !incomplete,
+    core: { ...core, setOutput(name, value) {
+      if (name === "comments_failed") failedComments = Number(value);
+      if (name === "publication_failures") publicationFailures = Number(value);
+      if (name === "summary_comment_url") summaryURL = value;
+      core.setOutput(name, value);
+    } },
+  });
+  failedComments = publicationFailures ?? failedComments;
+  if (incomplete || failedComments > 0 || !summaryURL) {
+    core.setFailed("Review or publication was incomplete; inspect the summary and saved artifacts");
+  }
+  return { incomplete: incomplete || failedComments > 0 || !summaryURL, skipped, summaryURL,
+    comments: Array.isArray(result?.comments) ? result.comments : [] };
+}
+
+module.exports = { resolvePullRequest, prepareReview, runReview, publishReview, childEnvironment };
