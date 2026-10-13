@@ -11,11 +11,14 @@
     "scripts/update.js",
     "scripts/version.js",
     "scripts/platform.js",
-    "imgs/"
+    "imgs/",
+    "services/github-review/",
+    "scripts/github-actions/post-review-comments.js"
   ],
   "scripts": {
     "postinstall": "node scripts/install.js",
-    "test:github-actions": "node scripts/github-actions/post-review-comments.test.js && node scripts/github-actions/check-translation-sync.test.js && node scripts/github-actions/action-contract.test.js && node scripts/github-actions/check-plugin-contract.test.js",
+    "test:github-actions": "node scripts/github-actions/post-review-comments.test.js && node scripts/github-actions/check-translation-sync.test.js && node scripts/github-actions/action-contract.test.js && node scripts/github-actions/check-plugin-contract.test.js && node --test services/github-review/*.test.js",
+    "service:github-review": "node services/github-review/server.js",
     "test:update": "node scripts/version.test.js",
     "test:launcher": "node bin/ocr.test.js"
   },

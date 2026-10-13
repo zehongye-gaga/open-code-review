@@ -1,0 +1,23 @@
+{
+  "listen": "127.0.0.1",
+  "port": 8787,
+  "stateDirectory": "/var/lib/ocr-review",
+  "githubTokenFile": "/etc/ocr-review/github-token",
+  "apiTokenFile": "/etc/ocr-review/api-token",
+  "repositories": [
+    { "name": "owner/repository", "baseBranches": ["main"] }
+  ],
+  "binary": "/usr/local/bin/ocr",
+  "provider": "openai-codex",
+  "model": "gpt-6-astra",
+  "budget": 0,
+  "pollSeconds": 30,
+  "bootstrapExisting": true,
+  "timeoutSeconds": 1500,
+  "fetchTimeoutSeconds": 600,
+  "maxAttempts": 3,
+  "retrySeconds": 60,
+  "retentionDays": 7,
+  "statusContext": "ocr-review",
+  "blockSeverity": "high"
+}

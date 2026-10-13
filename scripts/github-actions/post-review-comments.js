@@ -121,6 +121,8 @@ async function runPostReviewComments({
   // resolve, anything else (including the default) is a hard no-op that issues
   // zero GraphQL calls.
   resolveOutdated = "",
+  reviewIncomplete = false,
+  reviewSkipped = false,
 }) {
   const log = (msg) => {
     if (core && typeof core.info === "function") core.info(msg);
@@ -195,7 +197,7 @@ async function runPostReviewComments({
   // resolved_head rather than the runner's HEAD_SHA.
   const buildAdvanceMarker = (manifest) => {
     stats.checkpointAfter = "";
-    if (!checkpointEnabled || !stickySummary) return null;
+    if (!checkpointEnabled || !stickySummary || reviewIncomplete || reviewSkipped) return null;
     if (!manifest || manifest.terminal_state !== "complete") return null;
     if (stats.failed !== outsideDiffCount) return null;
     // No fingerprint means the resolve step fell over before it computed one
@@ -222,6 +224,11 @@ async function runPostReviewComments({
   // carry (a body must carry at most one marker); with neither, the body is
   // exactly what it is today.
   const appendCheckpoint = (body, manifest) => {
+    if (reviewIncomplete) {
+      body = `⚠️ **OpenCodeReview: incomplete review**\n\nFindings below are partial; this run does not establish that the PR is clean.\n\n${body.replace("✅ **OpenCodeReview**:", "**OpenCodeReview**:")}`;
+    } else if (reviewSkipped) {
+      body = body.replace("✅ **OpenCodeReview**:", "ℹ️ **OpenCodeReview**:");
+    }
     const marker = buildAdvanceMarker(manifest);
     if (marker) return `${body}\n\n${marker}`;
     // The carry is gated on the same two conditions as the advance. Without
@@ -295,7 +302,10 @@ async function runPostReviewComments({
   // of them would otherwise close every open thread on the PR in one sweep.
   // Resolution requires a run that actually produced findings.
   if (comments.length === 0) {
-    const message = result.message || "No comments generated. Looks good to me.";
+    let fallbackMessage = "No comments generated. Looks good to me.";
+    if (reviewIncomplete) fallbackMessage = "No findings were produced before the review stopped.";
+    else if (reviewSkipped) fallbackMessage = "No reviewable files were selected.";
+    const message = result.message || fallbackMessage;
     // A clean run is still a complete run: this path advances the checkpoint.
     const body = appendCheckpoint(`${SUMMARY_MARKER}\n✅ **OpenCodeReview**: ${message}${rangeNote}`, result.manifest);
     const posted = await postSummary({ github, owner, repo, prNumber, body, sticky: stickySummary, preserveMarker, log });
@@ -483,6 +493,7 @@ async function runPostReviewComments({
       successCount += r.succeeded;
       failedCount += r.failed;
       outsideDiffCount += r.failedComments.filter((fc) => fc.outsideDiff === true).length;
+      stats.outsideDiff = outsideDiffCount;
       for (const fc of r.failedComments) failedComments.push(fc);
       batchCounters.attempted++;
       if (r.reconciled) batchCounters.reconciled++;
@@ -1022,6 +1033,7 @@ function setStatsOutputs(out, stats, batchCounters, batchSize) {
   out("comments_skipped", String(stats.skipped));
   out("comments_routed", String(stats.routed));
   out("comments_failed", String(stats.failed));
+  out("publication_failures", String(stats.failed - (stats.outsideDiff || 0)));
   // Emitted on every exit (always "0" when resolve_outdated is off or in
   // 'true' mode respectively) so a consumer workflow can read them
   // unconditionally instead of testing for their existence.

@@ -1,0 +1,32 @@
+[Unit]
+Description=OpenCodeReview GitHub PR review service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ocr-review
+Group=ocr-review
+WorkingDirectory=/opt/open-code-review/service
+Environment=HOME=/var/lib/ocr-review/home
+Environment=TMPDIR=/var/lib/ocr-review/tmp
+EnvironmentFile=-/etc/ocr-review/runtime.env
+ExecStart=/usr/bin/flock --nonblock --no-fork /var/lib/ocr-review/service.lock /usr/bin/node /opt/open-code-review/service/services/github-review/server.js /etc/ocr-review/config.json
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ocr-review
+PrivateTmp=true
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

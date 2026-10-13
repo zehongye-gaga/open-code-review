@@ -34,11 +34,8 @@ type ResolvedEndpoint struct {
 	Timeout    time.Duration
 	RetryCodes []int // additional HTTP status codes that trigger exponential-backoff retry
 
-	// AmbientAuth marks an endpoint that carries no token and needs no base
-	// URL, because the transport supplies both — AWS SigV4 signing derives the
-	// host from the region and the credentials from the environment's own
-	// chain. Completeness checks must treat an empty URL and Token as valid for
-	// these; requiring either would reject a correctly configured endpoint.
+	// AmbientAuth permits an empty URL and Token when the transport supplies
+	// them, such as AWS SigV4 or Codex's locally stored OAuth credentials.
 	AmbientAuth bool
 
 	// AWSProfile and AWSRegion override the ambient AWS chain for SigV4
@@ -54,9 +51,8 @@ const (
 	envOCRLLMModel        = "OCR_LLM_MODEL"
 	envOCRLLMAuthHeader   = "OCR_LLM_AUTH_HEADER"
 	envOCRLLMExtraHeaders = "OCR_LLM_EXTRA_HEADERS"
-	// envOCRLLMProtocol overrides the resolved protocol (anthropic |
-	// openai | openai-responses). Takes priority
-	// over OCR_USE_ANTHROPIC when set.
+	// envOCRLLMProtocol selects a canonical protocol (see protocol.go).
+	// Takes priority over OCR_USE_ANTHROPIC when set.
 	envOCRLLMProtocol = "OCR_LLM_PROTOCOL"
 	// envOCRLLMTimeout is a global override parsed at the top of
 	// ResolveEndpointWithOptions and applied by finalizeResolvedEndpoint to
@@ -272,6 +268,12 @@ func tryOCREnv(modelOverride string) (ResolvedEndpoint, bool, error) {
 	if modelOverride != "" {
 		model = modelOverride
 	}
+	if NormalizeProtocol(os.Getenv(envOCRLLMProtocol)) == ProtocolOpenAICodex {
+		if err := validateCodexEndpoint(url); err != nil {
+			return ResolvedEndpoint{}, false, fmt.Errorf("OCR environment: %w", err)
+		}
+		return ResolvedEndpoint{URL: codexBaseURL, Model: model, Protocol: ProtocolOpenAICodex, AmbientAuth: true}, model != "", nil
+	}
 	if url == "" || token == "" || model == "" {
 		return ResolvedEndpoint{}, false, nil
 	}
@@ -328,7 +330,7 @@ type llmFileConfig struct {
 	AuthHeader   string            `json:"auth_header,omitempty"`
 	Model        string            `json:"model,omitempty"`
 	AuthTokenCmd string            `json:"auth_token_cmd,omitempty"` // shell command whose stdout is the auth token; used when auth_token is empty
-	Protocol     string            `json:"protocol,omitempty"`       // anthropic|openai|openai-responses; takes priority over use_anthropic
+	Protocol     string            `json:"protocol,omitempty"`       // canonical protocol; takes priority over use_anthropic
 	UseAnthropic *bool             `json:"use_anthropic,omitempty"`  // pointer to distinguish unset from false; legacy fallback when protocol is empty
 	TimeoutSec   int               `json:"timeout_sec,omitempty"`    // per-request HTTP timeout in seconds
 	ExtraBody    map[string]any    `json:"extra_body,omitempty"`
@@ -485,7 +487,7 @@ func tryProviderConfig(cfg configFile, modelOverride string) (ResolvedEndpoint, 
 		if err := ValidateProtocol(normalized); err != nil {
 			return ResolvedEndpoint{}, false, fmt.Errorf("custom provider %q: %w", cfg.Provider, err)
 		}
-		if normalized != ProtocolAnthropicBedrock && entry.URL == "" {
+		if !UsesAmbientAuth(normalized) && entry.URL == "" {
 			return ResolvedEndpoint{}, false, fmt.Errorf("custom provider %q requires a url field for protocol %q", cfg.Provider, normalized)
 		}
 		url = entry.URL
@@ -499,8 +501,14 @@ func tryProviderConfig(cfg configFile, modelOverride string) (ResolvedEndpoint, 
 	// SigV4 signing and needs a token like anything else. Conversely an entry
 	// that selects the bedrock protocol explicitly signs its requests whatever
 	// the preset says.
-	ambientAuth := protocol == ProtocolAnthropicBedrock ||
+	ambientAuth := UsesAmbientAuth(protocol) ||
 		(isPreset && preset.AmbientAuth && entry.Protocol == "")
+	if protocol == ProtocolOpenAICodex {
+		if err := validateCodexEndpoint(url); err != nil {
+			return ResolvedEndpoint{}, false, fmt.Errorf("provider %q: %w", cfg.Provider, err)
+		}
+		apiKey = ""
+	}
 
 	// No credential at all is an error, and it is reported before api_key_cmd
 	// runs: only the command's *execution* is deferred, not the emptiness check.
@@ -640,7 +648,15 @@ func tryLegacyLlmConfig(cfg configFile, modelOverride string) (ResolvedEndpoint,
 	if strings.TrimSpace(tokenCmd) == "" {
 		tokenCmd = ""
 	}
-	if cfg.Llm.URL == "" || model == "" || (token == "" && tokenCmd == "") {
+	ambientAuth := NormalizeProtocol(cfg.Llm.Protocol) == ProtocolOpenAICodex
+	url := cfg.Llm.URL
+	if ambientAuth {
+		if err := validateCodexEndpoint(url); err != nil {
+			return ResolvedEndpoint{}, false, fmt.Errorf("llm.url: %w", err)
+		}
+		url, token, tokenCmd = codexBaseURL, "", ""
+	}
+	if model == "" || (!ambientAuth && (url == "" || (token == "" && tokenCmd == ""))) {
 		return ResolvedEndpoint{}, false, nil
 	}
 	// Static auth_token always wins; warn if a command is also set. The command
@@ -698,7 +714,7 @@ func tryLegacyLlmConfig(cfg configFile, modelOverride string) (ResolvedEndpoint,
 	// an otherwise-complete block whose auth_token_cmd is set (guaranteed by the
 	// incompleteness check above), so a failing command is a hard error and an
 	// incomplete or invalid block never prompts for a credential.
-	if token == "" {
+	if token == "" && !ambientAuth {
 		resolved, err := resolveKeyCmd(tokenCmd, "auth_token_cmd for llm config")
 		if err != nil {
 			return ResolvedEndpoint{}, false, err
@@ -707,7 +723,8 @@ func tryLegacyLlmConfig(cfg configFile, modelOverride string) (ResolvedEndpoint,
 	}
 
 	return ResolvedEndpoint{
-		URL:          cfg.Llm.URL,
+		URL:          url,
+		AmbientAuth:  ambientAuth,
 		Token:        token,
 		Model:        model,
 		Protocol:     protocol,

@@ -38,7 +38,8 @@ ocr config set providers.anthropic.api_key sk-ant-xxxxxxxxxx
 ### Built-in providers
 
 The following providers ship with OCR, with the Base URL and protocol
-preset — once selected, you only need to fill in the API key. If
+preset. API-key providers need a key; Codex and Bedrock use the credentials
+described below. If
 `providers.<name>.api_key` is unset, OCR falls back to the corresponding
 environment variable.
 
@@ -47,6 +48,7 @@ environment variable.
 | `anthropic` | anthropic | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | `bedrock` | anthropic-bedrock | derived from `aws_region` | — (AWS credential chain) |
 | `openai` | openai | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `openai-codex` | openai-codex | `https://chatgpt.com/backend-api/codex` | — (Codex ChatGPT login) |
 | `openai-responses` | openai-responses | `https://api.openai.com/v1` | `OPENAI_RESPONSES_API_KEY` |
 | `openrouter` | openai | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
 | `gemini` | openai | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY` |
@@ -92,6 +94,74 @@ ocr config set providers.litellm.url      https://gateway.internal:8000/v1
 The configured `url` takes precedence over the preset Base URL. When
 `providers.<name>.url` is unset (or cleared), OCR falls back to the
 preset default — so you only need to set it when your endpoint differs.
+
+### Codex subscription
+
+The `openai-codex` provider uses an existing Codex ChatGPT login as OCR's
+model backend. OCR still runs its own review and scan agents: grouping,
+planning, tool execution, context compression, review rounds, comment
+location, filtering, usage tracking, and sessions use the same code paths
+as API providers. No Codex agent process or delegation skill is launched.
+
+First log in using Codex's file credential store, if you have not already:
+
+```bash
+codex -c 'cli_auth_credentials_store="file"' login
+```
+
+OCR reads `$CODEX_HOME/auth.json`, or `~/.codex/auth.json` when `CODEX_HOME`
+is unset. Keychain-only and API-key logins are not supported by this provider.
+Choose a model available to your Codex account; the suggested model in the
+picker is not an entitlement check.
+
+```bash
+ocr config set providers.openai-codex.model YOUR_CODEX_MODEL
+ocr config set provider openai-codex
+ocr llm test
+ocr review --from main --to HEAD
+ocr scan --path src
+```
+
+`ocr llm test` checks the tool-call round trip as well as connectivity.
+`--provider openai-codex --model YOUR_CODEX_MODEL` selects this configured
+provider for an individual review or scan. For an installation without a
+selected provider or complete legacy configuration, environment-only setup
+also works:
+
+```bash
+OCR_LLM_PROTOCOL=openai-codex OCR_LLM_MODEL=YOUR_CODEX_MODEL ocr llm test
+```
+
+Do not set an API key or a custom URL for this provider. `api_key` and
+`api_key_cmd` are unused. Credentials are sent only to the Codex backend;
+custom API gateways belong under `openai-responses`.
+
+The adapter follows the direct Responses transport used by
+[Hermes](https://github.com/NousResearch/hermes-agent/blob/eefdfe0692207a7520b3a8c764fe510024f552a1/agent/transports/codex.py):
+OAuth authentication, streaming Responses, and native tool/reasoning replay,
+while the host owns the agent loop. Its
+[credential refresh design](https://github.com/NousResearch/hermes-agent/blob/eefdfe0692207a7520b3a8c764fe510024f552a1/hermes_cli/auth_codex.py)
+also informs this implementation.
+
+Transport differences from the model API:
+
+- Requests always use `stream: true` and `store: false`. OCR aggregates the
+  stream into its existing response type, retaining tool-call IDs, encrypted
+  reasoning, message phases, and usage. An interrupted or failed stream is an
+  error, not a completed review.
+- Unsupported fields such as `max_output_tokens`, `temperature`, `top_p`, and
+  `previous_response_id` are removed. OCR's context limit, tool-round limit,
+  and aggregate token budget still apply; the API's per-response output cap
+  cannot be enforced through this backend.
+- Models, quotas, and availability depend on the logged-in account and the
+  Codex backend. Identical orchestration does not guarantee identical model
+  findings or latency.
+- Tokens refresh shortly before expiry, or once after HTTP 401. OCR serializes
+  refreshes across its own processes, preserves unknown credential fields,
+  and atomically replaces the credential file with restrictive permissions.
+  It re-reads the file to adopt rotations by other clients. Codex itself does
+  not share OCR's lock, so simultaneous cross-application refreshes cannot be
+  made fully atomic; a rejected refresh requires logging in again.
 
 ### AWS Bedrock
 
@@ -144,7 +214,7 @@ rather than accepted and ignored.
 
 Any provider name not in the table above is treated as custom and must
 supply at least `url` and `protocol` (`protocol` is `anthropic`,
-`openai`, `openai-responses`, or `anthropic-bedrock`):
+`openai`, `openai-responses`, `openai-codex`, or `anthropic-bedrock`):
 
 ```bash
 ocr config set provider                             my-gateway
