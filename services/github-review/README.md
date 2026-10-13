@@ -38,6 +38,8 @@ configuration or `OCR_LLM_*` environment. `provider`, `model`, `budget` and the
 native flags in `review.js` are the only model-execution settings added by this
 service. Each review uses two native groups concurrently, a fifteen-minute
 per-group timeout and a configurable whole-process timeout.
+`fetchTimeoutSeconds` (default 600) separately bounds each Git operation; the
+initial private-repository history download can take longer than later fetches.
 
 The `ocr-review.service` unit is a deployment template. Install the repository
 at `/opt/open-code-review/service`, create a dedicated `ocr-review` user and its

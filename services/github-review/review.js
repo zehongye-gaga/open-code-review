@@ -43,7 +43,7 @@ async function resolvePullRequest({ github, context, core, prNumber }) {
 }
 
 async function prepareReview({ github, context, core, prNumber, cwd = process.cwd(),
-  temp, token, checkoutBase = false, signal, expectedHead, expectedBase }) {
+  temp, token, checkoutBase = false, signal, expectedHead, expectedBase, gitTimeoutMs = 600000 }) {
   core.setOutput("should_review", "false");
   const metadata = await resolvePullRequest({ github, context, core, prNumber });
   if (!metadata) return;
@@ -58,7 +58,7 @@ async function prepareReview({ github, context, core, prNumber, cwd = process.cw
     gitEnv.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
   }
   const git = async (args) => (await exec("git", ["-c", "credential.helper=", "-c", "core.hooksPath=/dev/null",
-    "-c", "core.fsmonitor=false", ...args], { cwd, env: gitEnv, timeout: 120000, signal })).stdout.trim();
+    "-c", "core.fsmonitor=false", ...args], { cwd, env: gitEnv, timeout: gitTimeoutMs, signal })).stdout.trim();
   if (!fs.existsSync(path.join(cwd, ".git"))) {
     await git(["init"]);
     await git(["remote", "add", "origin", `https://github.com/${context.repo.owner}/${context.repo.repo}.git`]);

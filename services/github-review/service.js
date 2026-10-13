@@ -14,7 +14,7 @@ const REPOSITORY = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 function configuration(input) {
   const config = { listen: "127.0.0.1", port: 8787, pollSeconds: 30, bootstrapExisting: true,
     binary: "/usr/local/bin/ocr", provider: "openai-codex", model: "gpt-6-astra",
-    budget: 1000000, timeoutSeconds: 1500, maxAttempts: 3, retrySeconds: 60,
+    budget: 1000000, timeoutSeconds: 1500, fetchTimeoutSeconds: 600, maxAttempts: 3, retrySeconds: 60,
     retentionDays: 7, statusContext: "ocr-review", blockSeverity: "high", ...input };
   if (!path.isAbsolute(config.stateDirectory || "")) throw new Error("stateDirectory must be absolute");
   if (!path.isAbsolute(config.binary)) throw new Error("binary must be absolute");
@@ -29,7 +29,7 @@ function configuration(input) {
     repo.name = repo.name.toLowerCase();
     seen.add(repo.name.toLowerCase());
   }
-  for (const key of ["pollSeconds", "timeoutSeconds", "maxAttempts", "retrySeconds", "retentionDays"]) {
+  for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "retrySeconds", "retentionDays"]) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 1) throw new Error(`${key} must be a positive integer`);
   }
   if (!Number.isSafeInteger(config.budget) || config.budget < 0) throw new Error("budget must be non-negative");
@@ -166,7 +166,8 @@ class ReviewService {
     await this.status(job, "pending", `OCR reviewing ${job.head.slice(0, 8)} (attempt ${job.attempt})`);
     await this.prepare({ github: this.github, context, core, prNumber: job.number, cwd,
       temp: path.join(this.config.stateDirectory, "runs"), token: this.github.getToken(),
-      checkoutBase: true, signal, expectedHead: job.head, expectedBase: job.base });
+      checkoutBase: true, signal, expectedHead: job.head, expectedBase: job.base,
+      gitTimeoutMs: this.config.fetchTimeoutSeconds * 1000 });
     if (signal.aborted) return { stale: true };
     if (outputs.should_review !== "true") {
       await this.observe(job.repository, job.number, { force: true });
