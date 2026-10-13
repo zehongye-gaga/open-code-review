@@ -16,6 +16,7 @@ import (
 //   - ProtocolAnthropic ("anthropic")
 //   - ProtocolOpenAIChatCompletions ("openai")
 //   - ProtocolOpenAIResponses ("openai-responses")
+//   - ProtocolOpenAICodex ("openai-codex")
 //   - ProtocolAnthropicBedrock ("anthropic-bedrock")
 //
 // To add a built-in provider that speaks a different protocol, set Protocol
@@ -107,6 +108,14 @@ var registry = []Provider{
 			"gpt-5.6-terra",
 			"gpt-5.6-luna",
 		},
+	},
+	{
+		Name:        "openai-codex",
+		DisplayName: "OpenAI Codex (ChatGPT subscription)",
+		Protocol:    ProtocolOpenAICodex,
+		BaseURL:     codexBaseURL,
+		AmbientAuth: true,
+		Models:      []string{"gpt-5.4"},
 	},
 	{
 		Name:        "openrouter",

@@ -40,6 +40,10 @@ func NewOpenAIResponsesClient(cfg ClientConfig) *OpenAIResponsesClient {
 		cfg.SessionKey = NewSessionKey()
 	}
 	ensureResponsesEndpoint(&cfg)
+	return &OpenAIResponsesClient{cfg: cfg, sdk: newResponsesSDK(cfg)}
+}
+
+func newResponsesSDK(cfg ClientConfig, extra ...openaiopt.RequestOption) openai.Client {
 	sdkBaseURL := strings.TrimSuffix(strings.TrimRight(cfg.URL, "/"), "/responses")
 
 	opts := []openaiopt.RequestOption{
@@ -61,10 +65,7 @@ func NewOpenAIResponsesClient(cfg ClientConfig) *OpenAIResponsesClient {
 		opts = append(opts, openaiopt.WithMiddleware(newRetryObserver(cfg.retryCollector)))
 	}
 
-	return &OpenAIResponsesClient{
-		cfg: cfg,
-		sdk: openai.NewClient(opts...),
-	}
+	return openai.NewClient(append(opts, extra...)...)
 }
 
 // ensureResponsesEndpoint normalizes cfg.URL to end with /responses. The
@@ -176,6 +177,10 @@ func (c *OpenAIResponsesClient) CompletionsWithCtx(ctx context.Context, req Chat
 //     file's agent loop share a cache bucket. Only set when non-empty.
 //     An explicit extra_body.prompt_cache_key entry is applied afterwards as a JSON patch.
 func (c *OpenAIResponsesClient) buildResponsesParams(model string, req ChatRequest) responses.ResponseNewParams {
+	return buildResponsesParams(model, req)
+}
+
+func buildResponsesParams(model string, req ChatRequest) responses.ResponseNewParams {
 	var systemParts []string
 	var input []responses.ResponseInputItemUnionParam
 
@@ -259,6 +264,10 @@ func (c *OpenAIResponsesClient) buildResponsesParams(model string, req ChatReque
 // ToolCalls keyed by CallID so the agent loop's NewToolResultMessage(call.ID,
 // ...) pairs correctly.
 func (c *OpenAIResponsesClient) mapResponsesResponse(sdkResp *responses.Response) *ChatResponse {
+	return mapResponsesResponse(sdkResp)
+}
+
+func mapResponsesResponse(sdkResp *responses.Response) *ChatResponse {
 	var contentPtr *string
 	if text := sdkResp.OutputText(); text != "" {
 		cleaned := stripThinkTags(text)

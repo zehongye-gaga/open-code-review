@@ -905,13 +905,13 @@ func parseTimeoutSeconds(value string) (int, error) {
 // The entry's own protocol decides whenever it sets one: a preset's protocol can
 // be overridden per entry (see tryProviderConfig), so `protocol: openai` on the
 // bedrock preset would otherwise still accept AWS settings that nothing reads.
-// Only when the entry is silent does the preset's own AmbientAuth flag answer.
+// Only when the entry is silent does the preset's protocol answer.
 func providerAcceptsAWSSettings(providerName string, entry *ProviderEntry) bool {
 	if entry.Protocol != "" {
 		return llm.NormalizeProtocol(entry.Protocol) == llm.ProtocolAnthropicBedrock
 	}
 	preset, isPreset := llm.LookupProvider(providerName)
-	return isPreset && preset.AmbientAuth
+	return isPreset && preset.Protocol == llm.ProtocolAnthropicBedrock
 }
 
 // normalizeAWSSetting trims the value and rejects the shapes AWS itself will

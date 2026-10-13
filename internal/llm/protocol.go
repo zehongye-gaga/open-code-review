@@ -27,6 +27,8 @@ const (
 	// ProtocolOpenAIResponses is the OpenAI Responses API (/v1/responses),
 	// used by GPT-5.x / o-series models.
 	ProtocolOpenAIResponses = "openai-responses"
+	// ProtocolOpenAICodex uses the Codex subscription Responses transport.
+	ProtocolOpenAICodex = "openai-codex"
 	// ProtocolAnthropicBedrock is the Anthropic Messages API served by AWS
 	// Bedrock. The request body is the same as ProtocolAnthropic — the
 	// difference is transport: requests are SigV4-signed from the ambient AWS
@@ -53,6 +55,8 @@ func NormalizeProtocol(raw string) string {
 		return ProtocolOpenAIChatCompletions
 	case ProtocolOpenAIResponses:
 		return ProtocolOpenAIResponses
+	case ProtocolOpenAICodex:
+		return ProtocolOpenAICodex
 	case ProtocolAnthropicBedrock:
 		return ProtocolAnthropicBedrock
 	default:
@@ -60,13 +64,18 @@ func NormalizeProtocol(raw string) string {
 	}
 }
 
-// ValidateProtocol accepts the four canonical protocol names and rejects
+// ValidateProtocol accepts the canonical protocol names and rejects
 // everything else.
 func ValidateProtocol(p string) error {
 	switch p {
-	case ProtocolAnthropic, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolAnthropicBedrock:
+	case ProtocolAnthropic, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolAnthropicBedrock, ProtocolOpenAICodex:
 		return nil
 	default:
-		return fmt.Errorf("unsupported protocol %q; supported protocols are %q, %q, %q, %q", p, ProtocolAnthropic, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolAnthropicBedrock)
+		return fmt.Errorf("unsupported protocol %q; supported protocols are %q, %q, %q, %q, %q", p, ProtocolAnthropic, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses, ProtocolAnthropicBedrock, ProtocolOpenAICodex)
 	}
+}
+
+// UsesAmbientAuth follows the effective protocol, including per-entry overrides.
+func UsesAmbientAuth(protocol string) bool {
+	return protocol == ProtocolAnthropicBedrock || protocol == ProtocolOpenAICodex
 }

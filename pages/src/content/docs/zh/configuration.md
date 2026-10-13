@@ -36,7 +36,8 @@ ocr config set providers.anthropic.api_key sk-ant-xxxxxxxxxx
 
 ### 内置 provider
 
-下列 provider 随 OCR 发布，已预置 Base URL 与协议，选中后只需填 API key。
+下列 provider 随 OCR 发布，已预置 Base URL 与协议。API provider 需要填写 API key；
+Codex 和 Bedrock 使用下文介绍的已有登录或环境凭据。
 若 `providers.<name>.api_key` 未设置，会自动回退到对应的环境变量。
 
 | 名称 | 协议 | Base URL | API key 环境变量 |
@@ -44,6 +45,7 @@ ocr config set providers.anthropic.api_key sk-ant-xxxxxxxxxx
 | `anthropic` | anthropic | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | `bedrock` | anthropic-bedrock | 由 `aws_region` 决定 | —（AWS 凭证链） |
 | `openai` | openai | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `openai-codex` | openai-codex | `https://chatgpt.com/backend-api/codex` | —（Codex ChatGPT 登录） |
 | `openai-responses` | openai-responses | `https://api.openai.com/v1` | `OPENAI_RESPONSES_API_KEY` |
 | `openrouter` | openai | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
 | `gemini` | openai | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY` |
@@ -86,6 +88,59 @@ ocr config set providers.litellm.url      https://gateway.internal:8000/v1
 
 配置的 `url` 优先于预设 Base URL。当 `providers.<name>.url` 未设置（或
 被清除）时，OCR 回退到预设默认值——因此只需在端点不同时才设置。
+
+### Codex 订阅
+
+`openai-codex` 将已有的 Codex ChatGPT 登录用作 OCR 的模型后端。分组、规划、
+工具执行、上下文压缩、多轮审查、评论定位、过滤、用量统计和会话恢复仍由 OCR
+原生链路负责，使用与 API provider 相同的执行代码。
+
+需要使用 Codex 的文件凭据存储。如果尚未登录，先执行：
+
+```bash
+codex -c 'cli_auth_credentials_store="file"' login
+```
+
+OCR 读取 `$CODEX_HOME/auth.json`，未设置 `CODEX_HOME` 时读取
+`~/.codex/auth.json`。此 provider 不支持仅存在于系统钥匙串中的凭据或 API Key
+登录。模型名称应以你的 Codex 账号实际可用的模型为准，预设列表不代表账号权限。
+
+```bash
+ocr config set providers.openai-codex.model YOUR_CODEX_MODEL
+ocr config set provider openai-codex
+ocr llm test
+ocr review --from main --to HEAD
+ocr scan --path src
+```
+
+`ocr llm test` 会验证工具调用及结果回传。也可以通过
+`--provider openai-codex --model YOUR_CODEX_MODEL` 为单次 review 或 scan 选择已配置的
+provider。尚未选定 provider、也没有完整旧版配置时，可直接通过环境变量使用：
+
+```bash
+OCR_LLM_PROTOCOL=openai-codex OCR_LLM_MODEL=YOUR_CODEX_MODEL ocr llm test
+```
+
+无需配置 API Key；`api_key`、`api_key_cmd` 不参与认证。此 provider 只接受固定的
+Codex 后端地址，自定义 API 网关应使用 `openai-responses`。
+
+实现参考了 [Hermes 的直接 Responses 传输](https://github.com/NousResearch/hermes-agent/blob/eefdfe0692207a7520b3a8c764fe510024f552a1/agent/transports/codex.py)
+和[凭据续期方式](https://github.com/NousResearch/hermes-agent/blob/eefdfe0692207a7520b3a8c764fe510024f552a1/hermes_cli/auth_codex.py)。
+OCR 自己控制 Agent 循环，adapter 负责认证、协议和流式响应归并。
+
+与模型 API 相比，仍有以下后端约束：
+
+- 固定发送 `stream: true`、`store: false`，保留工具调用 ID、加密 reasoning、
+  message phase 和 token 用量。断流或未完成的响应会报错。
+- 移除后端不支持的 `max_output_tokens`、`temperature`、`top_p`、
+  `previous_response_id` 等字段。OCR 的上下文限制、工具轮数和总 token 预算仍然
+  生效，但无法通过该后端强制执行 API 的单次输出 token 上限。
+- 可用模型、额度和时延取决于登录账号与 Codex 后端；执行链路相同不代表模型的
+  审查结论必然相同。
+- Token 接近过期时自动续期，HTTP 401 后最多续期并重试一次。OCR 的多个进程通过
+  文件锁协调续期，保留凭据文件的其他字段，以受限权限原子替换文件；也会重新读取
+  其他客户端已经更新的凭据。Codex 本身不使用 OCR 的锁，因此跨应用同时续期无法
+  完全保证原子性。续期遭拒时需重新登录。
 
 ### AWS Bedrock
 
@@ -132,7 +187,7 @@ URL 加一个 token，没有地方放区域或 profile，而 bedrock 这两个�
 ### 自定义 provider
 
 任何不在上表中的 provider 名都视为自定义，至少要提供 `url` 和 `protocol`
-（`protocol` 取 `anthropic`、`openai`、`openai-responses` 或
+（`protocol` 取 `anthropic`、`openai`、`openai-responses`、`openai-codex` 或
 `anthropic-bedrock`）：
 
 ```bash
