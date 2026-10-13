@@ -30,6 +30,16 @@ and commit statuses write. A classic PAT with access to the repositories also
 works. The token file is reread on every request, so it can be rotated without
 restarting. Installation-token generation for GitHub Apps is not included.
 
+First configure the native provider under the service account's `HOME`.
+`--provider` selects an existing OCR configuration entry, so sharing Codex
+credentials alone is insufficient. For the example systemd layout, run as the
+service account:
+
+```sh
+HOME=/var/lib/ocr-review/home ocr config set provider openai-codex
+HOME=/var/lib/ocr-review/home ocr config set model gpt-6-astra
+```
+
 For `openai-codex`, point `CODEX_HOME` at the server's existing Codex ChatGPT
 login. The service account needs access to `auth.json` and write access to its
 directory for atomic OAuth refresh. Do not copy Codex credentials into GitHub
@@ -47,7 +57,8 @@ writable state, `home` and `tmp` directories, and adjust paths for the host.
 Set `CODEX_HOME` in `/etc/ocr-review/runtime.env` and add its credential directory
 to the unit's writable paths if it is outside the service state directory.
 Keep configuration and credential files outside reviewed checkouts, readable
-only by the service account. `flock` ensures only one service owns the state.
+only by the service account. `flock --no-fork` ensures only one service owns the
+state while making Node the systemd main process for graceful shutdown.
 
 ```sh
 systemctl daemon-reload

@@ -11,7 +11,7 @@ WorkingDirectory=/opt/open-code-review/service
 Environment=HOME=/var/lib/ocr-review/home
 Environment=TMPDIR=/var/lib/ocr-review/tmp
 EnvironmentFile=-/etc/ocr-review/runtime.env
-ExecStart=/usr/bin/flock --nonblock /var/lib/ocr-review/service.lock /usr/bin/node /opt/open-code-review/service/services/github-review/server.js /etc/ocr-review/config.json
+ExecStart=/usr/bin/flock --nonblock --no-fork /var/lib/ocr-review/service.lock /usr/bin/node /opt/open-code-review/service/services/github-review/server.js /etc/ocr-review/config.json
 Restart=always
 RestartSec=10
 TimeoutStopSec=30
