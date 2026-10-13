@@ -10,7 +10,7 @@
   "binary": "/usr/local/bin/ocr",
   "provider": "openai-codex",
   "model": "gpt-6-astra",
-  "budget": 1000000,
+  "budget": 0,
   "pollSeconds": 30,
   "bootstrapExisting": true,
   "timeoutSeconds": 1500,

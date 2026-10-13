@@ -85,7 +85,7 @@ async function prepareReview({ github, context, core, prNumber, cwd = process.cw
 
 async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd = process.cwd(),
   model = process.env.OCR_CODEX_MODEL || "gpt-6-astra",
-  budget = process.env.OCR_MAX_TOKENS_BUDGET || "1000000", provider = "openai-codex",
+  budget = process.env.OCR_MAX_TOKENS_BUDGET || "0", provider = "openai-codex",
   signal, timeoutMs = 25 * 60 * 1000 }) {
   const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
   if (!SHA.test(metadata.head) || !SHA.test(metadata.merge_base)) throw new Error("Invalid review range");

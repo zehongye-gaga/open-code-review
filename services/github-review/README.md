@@ -46,7 +46,9 @@ directory for atomic OAuth refresh. Do not copy Codex credentials into GitHub
 secrets. For another provider, use the service account's normal OCR model
 configuration or `OCR_LLM_*` environment. `provider`, `model`, `budget` and the
 native flags in `review.js` are the only model-execution settings added by this
-service. Each review uses two native groups concurrently, a fifteen-minute
+service. `budget` defaults to `0`, which disables the aggregate token limit
+(`--max-tokens-budget 0`). Set a positive value only to opt into a token cap.
+Each review uses two native groups concurrently, a fifteen-minute
 per-group timeout and a configurable whole-process timeout.
 `fetchTimeoutSeconds` (default 600) separately bounds each Git operation; the
 initial private-repository history download can take longer than later fetches.
@@ -103,9 +105,10 @@ model usage bounded and repository workspaces isolated. A newer head/base
 supersedes queued work and terminates an active old review. Failed or partial
 reviews retry up to `maxAttempts`, with exponential backoff starting at
 `retrySeconds`. After the cap, inspect the job and request a rerun. A new commit
-always gets a new job. A review that exhausted its token budget stays incomplete
-and is not retried automatically with the same budget; adjust the limit and
-request an explicit rerun. This is a single-host service, not a distributed queue.
+always gets a new job. If an optional token cap is configured, a review that
+exhausts it stays incomplete and is not retried automatically with the same
+budget; remove or raise the cap and request an explicit rerun. This is a
+single-host service, not a distributed queue.
 
 The service fetches PR commits as Git objects and checks out only the trusted
 base commit. It never installs project dependencies or runs PR scripts. OCR
