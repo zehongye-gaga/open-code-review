@@ -103,7 +103,9 @@ model usage bounded and repository workspaces isolated. A newer head/base
 supersedes queued work and terminates an active old review. Failed or partial
 reviews retry up to `maxAttempts`, with exponential backoff starting at
 `retrySeconds`. After the cap, inspect the job and request a rerun. A new commit
-always gets a new job. This is a single-host service, not a distributed queue.
+always gets a new job. A review that exhausted its token budget stays incomplete
+and is not retried automatically with the same budget; adjust the limit and
+request an explicit rerun. This is a single-host service, not a distributed queue.
 
 The service fetches PR commits as Git objects and checks out only the trusted
 base commit. It never installs project dependencies or runs PR scripts. OCR

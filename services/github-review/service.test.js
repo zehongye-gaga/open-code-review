@@ -247,3 +247,14 @@ test("base advancement preserves completed head reviews but refreshes queued rev
   assert.equal(queued.state, "superseded");
   assert.equal(next.base, "d".repeat(40));
 });
+
+test("token-budget exhaustion reports an error without repeating the same paid review", async (t) => {
+  const h = setup(t, { publish: async () => ({ incomplete: true, budgetExceeded: true,
+    comments: [], summaryURL: "https://example.test/comment" }) });
+  const job = h.service.accept(repository, pr());
+  await h.service.tick();
+  assert.equal(job.state, "failed");
+  assert.equal(job.attempt, 1);
+  assert.match(h.statuses.at(-1).description, /Token budget exceeded/);
+  assert.equal(h.service.state.next(), undefined);
+});

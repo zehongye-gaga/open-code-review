@@ -175,7 +175,8 @@ async function publishReview({ github, context, core, directory, post = runPostR
     core.setFailed("Review or publication was incomplete; inspect the summary and saved artifacts");
   }
   return { incomplete: incomplete || failedComments > 0 || !summaryURL, skipped, summaryURL,
-    comments: Array.isArray(result?.comments) ? result.comments : [] };
+    comments: Array.isArray(result?.comments) ? result.comments : [],
+    budgetExceeded: result?.summary?.budget_exceeded === true };
 }
 
 module.exports = { resolvePullRequest, prepareReview, runReview, publishReview, childEnvironment };

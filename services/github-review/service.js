@@ -184,7 +184,10 @@ class ReviewService {
       await this.observe(job.repository, job.number, { force: true });
       return result;
     }
-    if (failures.length || !result || result.incomplete) throw new Error("Review or publication incomplete; inspect job artifacts");
+    if (failures.length || !result || result.incomplete) {
+      if (result?.budgetExceeded) throw Object.assign(new Error("Token budget exceeded; adjust the budget and request a rerun"), { retryable: false });
+      throw new Error("Review or publication incomplete; inspect job artifacts");
+    }
     const ranks = { critical: 4, high: 3, medium: 2, low: 1, none: 5 };
     const blocking = result.comments.filter((comment) => (ranks[comment.severity] || 0) >= ranks[this.config.blockSeverity]);
     const latest = await this.github.rest.pulls.get({ ...context.repo, pull_number: job.number });
@@ -221,9 +224,9 @@ class ReviewService {
       if (job.state !== "superseded") {
         if (this.stopping) { job.state = "queued"; job.nextAt = 0; job.attempt--; }
         else {
-          job.state = job.attempt < this.config.maxAttempts ? "queued" : "failed";
+          job.state = error.retryable !== false && job.attempt < this.config.maxAttempts ? "queued" : "failed";
           job.nextAt = Date.now() + this.config.retrySeconds * 1000 * 2 ** (job.attempt - 1);
-          try { await this.status(job, "error", job.state === "queued" ? "OCR incomplete; retry scheduled" : "OCR failed; inspect service job"); }
+          try { await this.status(job, "error", job.state === "queued" ? "OCR incomplete; retry scheduled" : job.error); }
           catch (statusError) { this.log("status_failed", { id: job.id, error: statusError.message }); }
         }
       }
