@@ -25,6 +25,10 @@ function createServer(service, { apiToken, webhookSecret } = {}) {
         const degraded = service.pollError || service.statusError || !service.lastPoll;
         return send(degraded ? 503 : 200, { status: degraded ? "degraded" : "ok",
           lastPoll: service.lastPoll, active: service.active?.job.id || null,
+          activeJobs: [...service.workers.entries()].map(([slot, { job }]) => ({
+            id: job.id, repository: job.repository, number: job.number, head: job.head, slot, startedAt: job.startedAt,
+          })),
+          running: service.workers.size, prConcurrency: service.config.prConcurrency,
           queued: service.state.data.jobs.filter((job) => job.state === "queued").length });
       }
       const webhook = req.url === "/webhooks/github" && req.method === "POST";

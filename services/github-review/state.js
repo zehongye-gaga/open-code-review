@@ -61,8 +61,8 @@ class State {
     this.save();
   }
 
-  next(now = Date.now()) {
-    return this.data.jobs.find((job) => job.state === "queued" && job.nextAt <= now);
+  next(now = Date.now(), busyKeys = new Set()) {
+    return this.data.jobs.find((job) => job.state === "queued" && job.nextAt <= now && !busyKeys.has(job.key));
   }
 }
 

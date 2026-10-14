@@ -50,6 +50,10 @@ service. `budget` defaults to `0`, which disables the aggregate token limit
 (`--max-tokens-budget 0`). Set a positive value only to opt into a token cap.
 Each review uses two native groups concurrently, a fifteen-minute
 per-group timeout and a configurable whole-process timeout.
+`prConcurrency` controls simultaneous PR reviews and defaults to `1`. For
+example, `4` reviews up to four different PRs, each with two native groups.
+Auxiliary model calls can add concurrency beyond those groups. Increase this
+setting according to provider capacity; model overload can still cause retries.
 `fetchTimeoutSeconds` (default 600) separately bounds each Git operation; the
 initial private-repository history download can take longer than later fetches.
 
@@ -90,7 +94,9 @@ polling repairs missed deliveries. They never directly trust supplied SHAs or
 clone URLs: current PR metadata is fetched from GitHub. No public ingress is
 needed for polling.
 
-`GET /healthz` reports queue size, active job and last successful poll. It returns
+`GET /healthz` reports queue size, `running`, `prConcurrency`, `activeJobs`
+(including PR numbers and worker slots), and the last successful poll. The
+legacy `active` field contains the first active job ID or null. It returns
 503 before the first successful poll or while discovery/status publication is
 degraded. `GET /v1/jobs` lists the latest 100 job records. `POST /v1/reviews` with
 `{"repository":"owner/repository","pull_number":123}` queues an explicit
@@ -100,9 +106,12 @@ those routes are disabled. The listener defaults to loopback; use an SSH tunnel
 or authenticated operational proxy for remote access.
 
 Queue state is atomically persisted before execution. Interrupted work resumes
-after restart. Reviews run serially across configured repositories, keeping
-model usage bounded and repository workspaces isolated. A newer head/base
-supersedes queued work and terminates an active old review. Failed or partial
+after restart. Reviews use a bounded pool of `prConcurrency` workers across
+configured repositories. Each worker has its own Git checkout, index and refs;
+one PR cannot change the files or fetch refs used by another. A newer head/base
+supersedes queued work and terminates an active old review. Its replacement
+waits until the previous execution of the same PR exits, while unrelated PRs
+can use other workers. Failed or partial
 reviews retry up to `maxAttempts`, with exponential backoff starting at
 `retrySeconds`. After the cap, inspect the job and request a rerun. A new commit
 always gets a new job. If an optional token cap is configured, a review that
@@ -133,6 +142,13 @@ active/retry artifacts remain. OCR session history and Git object caches have
 their own lifecycle and are not deleted by this retention job. Monitor the
 state volume. State corruption or persistent storage failures fail closed and
 restart the process rather than silently forgetting completed work.
+
+Worker zero keeps the original `stateDirectory/repositories/<owner>/<repo>`
+checkout. Other workers use
+`stateDirectory/worker-repositories/<slot>/<owner>/<repo>` with independent
+Git object stores. New slots download repository history on their first use;
+later reviews reuse their checkout. These caches persist if concurrency is
+reduced. Allow disk space for one checkout per worker and repository.
 
 Keep an existing required review check during parallel validation. Only replace
 that branch-protection requirement after validating PR creation, updates,

@@ -15,7 +15,7 @@ function configuration(input) {
   const config = { listen: "127.0.0.1", port: 8787, pollSeconds: 30, bootstrapExisting: true,
     binary: "/usr/local/bin/ocr", provider: "openai-codex", model: "gpt-6-astra",
     budget: 0, timeoutSeconds: 1500, fetchTimeoutSeconds: 600, maxAttempts: 3, retrySeconds: 60,
-    retentionDays: 7, statusContext: "ocr-review", blockSeverity: "high", ...input };
+    retentionDays: 7, prConcurrency: 1, statusContext: "ocr-review", blockSeverity: "high", ...input };
   if (!path.isAbsolute(config.stateDirectory || "")) throw new Error("stateDirectory must be absolute");
   if (!path.isAbsolute(config.binary)) throw new Error("binary must be absolute");
   if (!Array.isArray(config.repositories) || !config.repositories.length) throw new Error("Configure at least one repository");
@@ -29,7 +29,7 @@ function configuration(input) {
     repo.name = repo.name.toLowerCase();
     seen.add(repo.name.toLowerCase());
   }
-  for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "retrySeconds", "retentionDays"]) {
+  for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "retrySeconds", "retentionDays", "prConcurrency"]) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 1) throw new Error(`${key} must be a positive integer`);
   }
   if (!Number.isSafeInteger(config.budget) || config.budget < 0) throw new Error("budget must be non-negative");
@@ -46,11 +46,12 @@ class ReviewService {
     this.state = state || new State(this.config.stateDirectory);
     this.log = (event, details = {}) => log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
     this.prepare = prepare; this.run = run; this.publish = publish;
-    this.active = null; this.stopping = false; this.lastPoll = null; this.pollError = null;
+    this.workers = new Map(); this.stopping = false; this.lastPoll = null; this.pollError = null;
     fs.mkdirSync(path.join(this.config.stateDirectory, "runs"), { recursive: true, mode: 0o700 });
   }
 
   repo(name) { return typeof name === "string" && this.config.repositories.find((repo) => repo.name === name.toLowerCase()); }
+  get active() { return this.workers.values().next().value || null; }
   coordinates(name) { const [owner, repo] = name.split("/"); return { owner, repo }; }
   eligible(repository, pr) {
     const repo = this.repo(repository);
@@ -83,7 +84,9 @@ class ReviewService {
   }
 
   abortSuperseded() {
-    if (this.active?.job.state === "superseded") this.active.controller.abort();
+    for (const worker of this.workers.values()) {
+      if (worker.job.state === "superseded") worker.controller.abort();
+    }
   }
 
   flushStatuses() {
@@ -145,7 +148,7 @@ class ReviewService {
       ...(target ? { target_url: target } : {}) });
   }
 
-  async execute(job, signal) {
+  async execute(job, signal, slot = 0) {
     const outputs = {}, failures = [];
     const core = {
       info: (message) => this.log("review", { id: job.id, message }),
@@ -161,7 +164,11 @@ class ReviewService {
       this.accept(job.repository, current.data);
       return { stale: true };
     }
-    const cwd = path.join(this.config.stateDirectory, "repositories", ...job.repository.split("/"));
+    // Each slot owns its Git index, refs and working tree for the whole review.
+    // Slot zero retains the original path and its existing object cache.
+    const root = slot === 0 ? "repositories" : path.join("worker-repositories", String(slot));
+    const cwd = path.join(this.config.stateDirectory, root, ...job.repository.split("/"));
+    job.workspace = cwd;
     fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
     await this.status(job, "pending", `OCR reviewing ${job.head.slice(0, 8)} (attempt ${job.attempt})`);
     await this.prepare({ github: this.github, context, core, prNumber: job.number, cwd,
@@ -202,16 +209,26 @@ class ReviewService {
 
   async tick() {
     await this.flushStatuses();
-    if (this.active || this.stopping) return;
-    const job = this.state.next();
-    if (!job) return;
-    job.state = "running"; job.attempt++; job.startedAt = new Date().toISOString();
-    this.state.save();
-    const controller = new AbortController();
-    this.active = { job, controller };
-    this.log("started", { id: job.id, repository: job.repository, number: job.number, head: job.head });
+    if (this.stopping) return;
+    const tasks = [];
+    for (let slot = 0; slot < this.config.prConcurrency; slot++) {
+      if (this.workers.has(slot)) continue;
+      const busy = new Set([...this.workers.values()].map(({ job }) => job.key));
+      const job = this.state.next(Date.now(), busy);
+      if (!job) break;
+      job.state = "running"; job.attempt++; job.startedAt = new Date().toISOString();
+      this.state.save();
+      const controller = new AbortController();
+      this.workers.set(slot, { job, controller });
+      tasks.push(this.runJob(job, controller, slot));
+    }
+    await Promise.all(tasks);
+  }
+
+  async runJob(job, controller, slot) {
+    this.log("started", { id: job.id, repository: job.repository, number: job.number, head: job.head, slot });
     try {
-      const result = await this.execute(job, controller.signal);
+      const result = await this.execute(job, controller.signal, slot);
       if (job.state !== "superseded") {
         if (this.stopping) { job.state = "queued"; job.nextAt = 0; job.attempt--; }
         else job.state = result.stale ? "superseded" : "complete";
@@ -237,7 +254,7 @@ class ReviewService {
         try { const now = new Date(); fs.utimesSync(job.directory, now, now); }
         catch (error) { this.log("artifact_timestamp_failed", { id: job.id, error: error.message }); }
       }
-      try { this.state.save(); } finally { this.active = null; }
+      try { this.state.save(); } finally { this.workers.delete(slot); }
       this.log("finished", { id: job.id, state: job.state });
     }
   }
@@ -257,7 +274,10 @@ class ReviewService {
     this.state.save();
   }
 
-  stop() { this.stopping = true; this.active?.controller.abort(); }
+  stop() {
+    this.stopping = true;
+    for (const worker of this.workers.values()) worker.controller.abort();
+  }
 }
 
 module.exports = { ReviewService, configuration };

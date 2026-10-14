@@ -38,6 +38,107 @@ function setup(t, overrides = {}) {
   return { service, current, directory, statuses, github, config };
 }
 
+function parallelSetup(t, count = 5) {
+  const h = setup(t), pulls = new Map(), running = new Map(), starts = [];
+  h.service.config.prConcurrency = 4;
+  for (let number = 1; number <= count; number++) pulls.set(number, pr({ number }));
+  h.github.rest.pulls.get = async ({ pull_number }) => ({ data: pulls.get(pull_number) });
+  h.github.rest.pulls.list = async () => ({ data: [...pulls.values()] });
+  h.service.prepare = async ({ core, context, cwd }) => {
+    const number = context.issue.number;
+    const directory = path.join(h.directory, "runs", `ocr-pr-${number}-${context.runId}`);
+    fs.mkdirSync(directory, { recursive: true });
+    core.setOutput("should_review", "true"); core.setOutput("result_directory", directory);
+    starts.push({ number, cwd, directory });
+  };
+  h.service.run = async ({ cwd, signal }) => {
+    const entry = starts.findLast((entry) => entry.cwd === cwd);
+    await new Promise((resolve) => running.set(entry.number, { resolve, signal }));
+  };
+  for (const pull of pulls.values()) h.service.accept(repository, pull);
+  return { ...h, pulls, running, starts };
+}
+
+test("four isolated workers fill freed slots without exceeding the limit or duplicating jobs", async (t) => {
+  const h = parallelSetup(t);
+  const first = h.service.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.running.size, 4);
+  assert.equal(new Set(h.starts.map((entry) => entry.cwd)).size, 4);
+  assert.equal(h.service.state.data.jobs.filter((job) => job.state === "queued").length, 1);
+  await Promise.all([h.service.tick(), h.service.tick()]);
+  assert.equal(h.starts.length, 4);
+  h.running.get(2).resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  const next = h.service.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.starts.length, 5);
+  assert.equal(h.starts[4].cwd, h.starts[1].cwd);
+  assert.equal(h.service.workers.size, 4);
+  for (const entry of h.running.values()) entry.resolve();
+  await Promise.all([first, next]);
+  assert.equal(h.service.workers.size, 0);
+  assert.ok(h.service.state.data.jobs.every((job) => job.state === "complete"));
+  assert.equal(h.statuses.filter((s) => s.state === "success").length, 5);
+});
+
+test("a superseded PR waits for its old worker to exit without cancelling unrelated PRs", async (t) => {
+  const h = parallelSetup(t, 2), first = h.service.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const old = h.running.get(1), other = h.running.get(2);
+  const updated = pr({ head: { sha: "c".repeat(40) } });
+  h.pulls.set(1, updated);
+  const replacement = h.service.accept(repository, updated);
+  assert.equal(old.signal.aborted, true);
+  assert.equal(other.signal.aborted, false);
+  await h.service.tick();
+  assert.equal(h.starts.length, 2);
+  assert.equal(replacement.state, "queued");
+  old.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  const next = h.service.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.starts.length, 3);
+  h.running.get(1).resolve(); other.resolve();
+  await Promise.all([first, next]);
+  assert.equal(h.service.state.data.jobs[0].state, "superseded");
+  assert.equal(replacement.state, "complete");
+  assert.equal(h.statuses.filter((s) => s.state === "success" && s.sha === updated.head.sha).length, 1);
+});
+
+test("shutdown aborts and durably requeues all parallel workers without consuming attempts", async (t) => {
+  const h = parallelSetup(t, 4), pending = h.service.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  h.service.stop();
+  for (const entry of h.running.values()) { assert.equal(entry.signal.aborted, true); entry.resolve(); }
+  await pending;
+  const recovered = new State(h.directory);
+  assert.equal(recovered.data.jobs.length, 4);
+  assert.ok(recovered.data.jobs.every((job) => job.state === "queued" && job.attempt === 0));
+  assert.equal(h.service.active, null);
+});
+
+test("health lists all active PRs and concurrency configuration is validated", async (t) => {
+  const h = parallelSetup(t, 4), pending = h.service.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  h.service.lastPoll = new Date().toISOString();
+  const server = createServer(h.service);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/healthz`);
+  const health = await response.json();
+  assert.equal(health.running, 4);
+  assert.equal(health.prConcurrency, 4);
+  assert.deepEqual(health.activeJobs.map((job) => job.number), [1, 2, 3, 4]);
+  assert.equal(health.active, health.activeJobs[0].id);
+  for (const entry of h.running.values()) entry.resolve();
+  await pending;
+  assert.equal(configuration(h.config).prConcurrency, 1);
+  for (const value of [0, -1, 1.5, "4", null, Infinity]) {
+    assert.throws(() => configuration({ ...h.config, prConcurrency: value }), /prConcurrency/);
+  }
+});
+
 test("durable queue deduplicates head/base, coalesces updates and recovers an interrupted worker", (t) => {
   const { service, directory } = setup(t);
   const first = service.accept(repository, pr());
