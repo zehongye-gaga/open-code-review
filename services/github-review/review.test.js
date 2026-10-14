@@ -196,3 +196,78 @@ test("cancel and timeout terminate a review child and save its unsuccessful exit
   await running;
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "exit-code.json"))), 1);
 });
+
+test("native resume uses the pinned checkpoint range and falls back once only on admission rejection", async (t) => {
+  const directory = temp(t), h = harness(), resume = "11111111-2222-3333-4444-555555555555";
+  saveResult(directory);
+  const file = path.join(directory, "metadata.json");
+  const metadata = JSON.parse(fs.readFileSync(file));
+  metadata.range = { mode: "checkpoint", from: "c".repeat(40), to: head };
+  fs.writeFileSync(file, JSON.stringify(metadata));
+  const binary = path.join(directory, "ocr");
+  fs.writeFileSync(binary, `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync('calls.jsonl', JSON.stringify(args) + '\\n');
+if (args.includes('--resume')) {
+  process.stderr.write('Error: load resume session: missing session\\n'); process.exitCode = 1;
+} else process.stdout.write('{}');
+`, { mode: 0o700 });
+  await runReview({ ...h, directory, binary, cwd: directory, resume });
+  const calls = fs.readFileSync(path.join(directory, "calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][calls[0].indexOf("--resume") + 1], resume);
+  assert.equal(calls[0][calls[0].indexOf("--from") + 1], metadata.range.from);
+  assert.equal(calls[1].includes("--resume"), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "exit-code.json"))), 0);
+  assert.match(fs.readFileSync(path.join(directory, "resume-rejected-stderr.log"), "utf8"), /missing session/);
+  fs.writeFileSync(binary, `#!${process.execPath}\nprocess.stderr.write('Error: review failed: server_is_overloaded'); process.exitCode = 1;\n`);
+  await runReview({ ...h, directory, binary, cwd: directory, resume });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "exit-code.json"))), 1);
+  assert.match(fs.readFileSync(path.join(directory, "stderr.log"), "utf8"), /server_is_overloaded/);
+});
+
+test("a saved immutable snapshot can be prepared after the PR ref moves", async (t) => {
+  const directory = temp(t);
+  const git = (...args) => execFileSync("git", args, { cwd: directory, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+  git("commit", "--allow-empty", "-m", "Base");
+  const baseSha = git("rev-parse", "HEAD");
+  git("commit", "--allow-empty", "-m", "Old head");
+  const headSha = git("rev-parse", "HEAD");
+  const snapshot = { number: 1, head: headSha, base: baseSha, base_ref: "main", background: "Original requirements" };
+  const h = harness();
+  h.github.rest.pulls.get = async () => assert.fail("Retry must not replace the saved input with current PR metadata");
+  await prepareReview({ ...h, prNumber: 1, cwd: directory, temp: directory, snapshot,
+    expectedHead: headSha, expectedBase: baseSha, checkoutBase: true });
+  assert.equal(h.outputs.should_review, "true");
+  const metadata = JSON.parse(fs.readFileSync(path.join(h.outputs.result_directory, "metadata.json")));
+  assert.equal(metadata.head, headSha);
+  assert.equal(metadata.merge_base, baseSha);
+  assert.equal(metadata.background, snapshot.background);
+  assert.equal(git("rev-parse", "HEAD"), baseSha);
+});
+
+test("overlapping shutdown and timeout send only one graceful signal to native OCR", async (t) => {
+  const directory = temp(t), h = harness(), controller = new AbortController();
+  saveResult(directory);
+  const binary = path.join(directory, "ocr");
+  fs.writeFileSync(binary, `#!${process.execPath}
+const fs = require('node:fs');
+process.on('SIGTERM', () => {
+  fs.appendFileSync('signals', 'TERM\\n');
+  setTimeout(() => process.exit(0), 250);
+});
+fs.writeFileSync('ready', 'yes');
+setInterval(() => {}, 1000);
+`, { mode: 0o700 });
+  const running = runReview({ ...h, directory, binary, cwd: directory, timeoutMs: 1000, signal: controller.signal });
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(path.join(directory, "signals"))) {
+    assert.ok(Date.now() < deadline);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  controller.abort();
+  await running;
+  assert.equal(fs.readFileSync(path.join(directory, "signals"), "utf8"), "TERM\n");
+});

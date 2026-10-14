@@ -37,17 +37,18 @@ async function resolvePullRequest({ github, context, core, prNumber }) {
     throw new Error("The PR does not have a valid head and base in this repository");
   }
   return {
-    number: Number(prNumber), head: pr.head.sha, base: pr.base.sha,
+    number: Number(prNumber), head: pr.head.sha, base: pr.base.sha, base_ref: pr.base.ref,
     background: `Pull request #${prNumber}: ${pr.title}\n\n${pr.body || ""}`.slice(0, 50000),
   };
 }
 
 async function prepareReview({ github, context, core, prNumber, cwd = process.cwd(),
-  temp, token, checkoutBase = false, signal, expectedHead, expectedBase, gitTimeoutMs = 600000 }) {
+  temp, token, checkoutBase = false, signal, expectedHead, expectedBase, expectedBaseRef, snapshot, gitTimeoutMs = 600000 }) {
   core.setOutput("should_review", "false");
-  const metadata = await resolvePullRequest({ github, context, core, prNumber });
+  const metadata = snapshot ? { ...snapshot } : await resolvePullRequest({ github, context, core, prNumber });
   if (!metadata) return;
-  if ((expectedHead && metadata.head !== expectedHead) || (expectedBase && metadata.base !== expectedBase)) return;
+  if ((expectedHead && metadata.head !== expectedHead) || (expectedBase && metadata.base !== expectedBase) ||
+      (expectedBaseRef && metadata.base_ref !== expectedBaseRef)) return;
   if (!temp || !path.isAbsolute(temp)) throw new Error("Review storage must be an absolute directory");
 
   // Git receives its short-lived credential only for fetch, never via argv or a config file.
@@ -63,11 +64,22 @@ async function prepareReview({ github, context, core, prNumber, cwd = process.cw
     await git(["init"]);
     await git(["remote", "add", "origin", `https://github.com/${context.repo.owner}/${context.repo.repo}.git`]);
   }
-  await git(["fetch", "--no-tags", "--no-recurse-submodules", "origin",
-    `+${metadata.base}:refs/ocr/base`, `+refs/pull/${metadata.number}/head:refs/ocr/head`]);
-  if (await git(["rev-parse", "refs/ocr/head"]) !== metadata.head) {
-    core.notice("The PR changed during fetch; its newer event will review the new head");
-    return;
+  if (snapshot) {
+    if (!SHA.test(metadata.base) || !SHA.test(metadata.head)) throw new Error("Invalid saved snapshot");
+    try {
+      await git(["cat-file", "-e", `${metadata.base}^{commit}`]);
+      await git(["cat-file", "-e", `${metadata.head}^{commit}`]);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      await git(["fetch", "--no-tags", "--no-recurse-submodules", "origin", metadata.base, metadata.head]);
+    }
+  } else {
+    await git(["fetch", "--no-tags", "--no-recurse-submodules", "origin",
+      `+${metadata.base}:refs/ocr/base`, `+refs/pull/${metadata.number}/head:refs/ocr/head`]);
+    if (await git(["rev-parse", "refs/ocr/head"]) !== metadata.head) {
+      core.notice("The PR changed during fetch; its newer event will review the new head");
+      return;
+    }
   }
   metadata.merge_base = await git(["merge-base", metadata.base, metadata.head]);
   if (!SHA.test(metadata.merge_base)) throw new Error("Could not resolve the PR merge base");
@@ -86,9 +98,11 @@ async function prepareReview({ github, context, core, prNumber, cwd = process.cw
 async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd = process.cwd(),
   model = process.env.OCR_CODEX_MODEL || "gpt-6-astra",
   budget = process.env.OCR_MAX_TOKENS_BUDGET || "0", provider = "openai-codex",
-  signal, timeoutMs = 25 * 60 * 1000 }) {
+  signal, timeoutMs = 25 * 60 * 1000, resume }) {
   const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
-  if (!SHA.test(metadata.head) || !SHA.test(metadata.merge_base)) throw new Error("Invalid review range");
+  const from = metadata.range?.from || metadata.merge_base;
+  if (!SHA.test(metadata.head) || !SHA.test(from)) throw new Error("Invalid review range");
+  if (resume && !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(resume)) throw new Error("Invalid resume session");
   if (!/^(0|[1-9][0-9]*)$/.test(String(budget)) || !Number.isSafeInteger(Number(budget))) {
     throw new Error("OCR_MAX_TOKENS_BUDGET must be a non-negative integer");
   }
@@ -98,13 +112,17 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
   let code = 1;
   try {
     code = await new Promise((resolve, reject) => {
-      const child = spawn(binary, ["review", "--repo", cwd, "--from", metadata.merge_base,
+      const child = spawn(binary, ["review", "--repo", cwd, "--from", from,
         "--to", metadata.head, "--provider", provider, "--model", model,
         "--audience", "agent", "--format", "json", "--concurrency", "2", "--timeout", "15",
-        "--max-tokens-budget", String(budget), "--background", metadata.background],
+        "--max-tokens-budget", String(budget), "--background", metadata.background,
+        ...(resume ? ["--resume", resume] : [])],
       { cwd, env, stdio: ["ignore", stdout, stderr] });
-      let forceTimer;
+      let forceTimer, terminating = false;
       const terminate = () => {
+        // A second SIGTERM makes native OCR exit before flushing its manifest.
+        if (terminating) return;
+        terminating = true;
         child.kill("SIGTERM");
         forceTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
         forceTimer.unref();
@@ -128,12 +146,21 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
   }
   fs.writeFileSync(path.join(directory, "exit-code.json"), JSON.stringify(code));
   core.info(`OCR exited with code ${code}; report and diagnostics are saved in the job directory`);
+  if (resume && code !== 0 && !signal?.aborted && fs.statSync(path.join(directory, "result.json")).size === 0 &&
+      /^Error: (load resume session:|resume rejected:|resume session ")/m.test(fs.readFileSync(path.join(directory, "stderr.log"), "utf8"))) {
+    for (const name of ["result.json", "stderr.log", "exit-code.json"]) {
+      fs.renameSync(path.join(directory, name), path.join(directory, `resume-rejected-${name}`));
+    }
+    core.notice("The saved session could not be resumed; starting this snapshot afresh");
+    return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs });
+  }
 }
 
 async function publishReview({ github, context, core, directory, post = runPostReviewComments }) {
   const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
   const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: metadata.number });
-  if (pr.state !== "open" || pr.draft || pr.head.sha !== metadata.head || pr.base.sha !== metadata.base) {
+  if (pr.state !== "open" || pr.draft || pr.head.sha !== metadata.head || pr.base.sha !== metadata.base ||
+      (metadata.base_ref && pr.base.ref !== metadata.base_ref)) {
     core.notice("Skipping publication because the PR changed or closed during review");
     return { stale: true };
   }
@@ -149,7 +176,8 @@ async function publishReview({ github, context, core, directory, post = runPostR
   let summaryURL = "";
   let exitCode = 1;
   try { exitCode = JSON.parse(fs.readFileSync(path.join(directory, "exit-code.json"), "utf8")); } catch { /* Missing execution is a failure. */ }
-  const verified = result?.manifest?.input?.resolved_head === metadata.head && Array.isArray(result.comments);
+  const verified = result?.manifest?.input?.resolved_head === metadata.head && Array.isArray(result.comments) &&
+    (!metadata.range || result.manifest.input.resolved_base === metadata.range.from);
   const skipped = verified && result?.status === "skipped" && result?.manifest?.terminal_state === "skipped";
   const complete = verified && result?.status === "complete" && result?.manifest?.terminal_state === "complete";
   const incomplete = exitCode !== 0 || (!complete && !skipped);
@@ -162,6 +190,9 @@ async function publishReview({ github, context, core, directory, post = runPostR
   await post({
     github, context, fs, prNumber: metadata.number, resultPath: publicationPath, stderrPath: path.join(directory, "stderr.log"),
     stickySummary: true, incremental: true,
+    checkpointEnabled: Boolean(metadata.fingerprint), checkpointBaseRef: metadata.base_ref,
+    checkpointMergeBase: metadata.merge_base, checkpointFingerprint: metadata.fingerprint,
+    rangeMode: metadata.range?.mode, rangeFrom: metadata.range?.from, rangeTo: metadata.head,
     reviewIncomplete: incomplete, reviewSkipped: skipped && !incomplete,
     core: { ...core, setOutput(name, value) {
       if (name === "comments_failed") failedComments = Number(value);

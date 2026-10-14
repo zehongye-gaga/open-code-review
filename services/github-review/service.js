@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { State } = require("./state.js");
 const { prepareReview, runReview, publishReview } = require("./review.js");
+const { planReview, readProgress, checkpointFor } = require("./progress.js");
 
 const SHA = /^[0-9a-f]{40}$/;
 const REPOSITORY = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
@@ -75,9 +76,11 @@ class ReviewService {
       this.abortSuperseded();
       return null;
     }
-    const pendingBaseChanged = this.state.data.jobs.some((job) => job.key === `${repository}#${pr.number}` &&
-      ["queued", "running"].includes(job.state) && job.base !== pr.base.sha);
-    const job = this.state.enqueue(repository, pr, { ...options, force: options.force || pendingBaseChanged });
+    const pending = this.state.data.jobs.findLast((job) => job.key === `${repository}#${pr.number}` &&
+      ["queued", "running"].includes(job.state));
+    const pendingBaseChanged = pending && pending.base !== pr.base.sha;
+    const job = this.state.enqueue(repository, pr, { ...options, force: options.force || pendingBaseChanged,
+      fullReview: options.force === true });
     this.abortSuperseded();
     if (job) this.log("queued", { id: job.id, repository, number: job.number, head: job.head });
     return job;
@@ -148,7 +151,22 @@ class ReviewService {
       ...(target ? { target_url: target } : {}) });
   }
 
+  captureProgress(job) {
+    if (!job.snapshot || !job.directory) return;
+    const progress = readProgress(job.directory, job.snapshot);
+    if (!progress) return;
+    job.progress = { ...progress, workspace: job.workspace, slot: job.slot };
+    const checkpoint = checkpointFor(job, job.snapshot, progress);
+    if (checkpoint && job.state !== "superseded") {
+      this.state.data.checkpoints[job.key] = checkpoint;
+      this.log("checkpoint_saved", { id: job.id, head: job.head, findings: progress.findings });
+    }
+    this.state.save();
+  }
+
   async execute(job, signal, slot = 0) {
+    // A crash can leave a closed native report on disk before progress was saved.
+    this.captureProgress(job);
     const outputs = {}, failures = [];
     const core = {
       info: (message) => this.log("review", { id: job.id, message }),
@@ -160,7 +178,8 @@ class ReviewService {
     const context = { repo: this.coordinates(job.repository), eventName: "ocr_service",
       issue: { number: job.number }, runId: job.id, runAttempt: job.attempt };
     const current = await this.github.rest.pulls.get({ ...context.repo, pull_number: job.number });
-    if (!this.eligible(job.repository, current.data) || current.data.head.sha !== job.head || current.data.base.sha !== job.base) {
+    if (!this.eligible(job.repository, current.data) || (!job.snapshot &&
+        (current.data.head.sha !== job.head || current.data.base.sha !== job.base || current.data.base.ref !== job.baseRef))) {
       this.accept(job.repository, current.data);
       return { stale: true };
     }
@@ -173,22 +192,50 @@ class ReviewService {
     await this.status(job, "pending", `OCR reviewing ${job.head.slice(0, 8)} (attempt ${job.attempt})`);
     await this.prepare({ github: this.github, context, core, prNumber: job.number, cwd,
       temp: path.join(this.config.stateDirectory, "runs"), token: this.github.getToken(),
-      checkoutBase: true, signal, expectedHead: job.head, expectedBase: job.base,
+      checkoutBase: true, signal, expectedHead: job.head, expectedBase: job.base, snapshot: job.snapshot,
+      expectedBaseRef: job.baseRef,
       gitTimeoutMs: this.config.fetchTimeoutSeconds * 1000 });
     if (signal.aborted) return { stale: true };
     if (outputs.should_review !== "true") {
-      await this.observe(job.repository, job.number, { force: true });
+      await this.observe(job.repository, job.number);
       return { stale: true };
     }
     job.directory = outputs.result_directory;
+    const { metadata, resume } = await planReview({ config: this.config, job,
+      checkpoint: this.state.data.checkpoints[job.key], directory: job.directory, cwd, signal });
+    job.snapshot = metadata;
+    job.slot = slot;
+    job.range = metadata.range;
+    this.log("review_range", { id: job.id, ...metadata.range, resume: resume || null });
     this.state.save();
-    await this.run({ core, directory: job.directory, cwd, binary: this.config.binary,
-      provider: this.config.provider, model: this.config.model, budget: this.config.budget,
-      timeoutMs: this.config.timeoutSeconds * 1000, signal });
+    const saved = job.progress?.fingerprint === metadata.fingerprint && (job.progress.complete || job.progress.skipped) &&
+      readProgress(job.progress.directory, metadata);
+    if (saved?.complete || saved?.skipped) {
+      job.directory = job.progress.directory;
+      this.log("reuse_completed_review", { id: job.id, sessionId: saved.sessionId });
+    } else {
+      try {
+        await this.run({ core, directory: job.directory, cwd, binary: this.config.binary,
+          provider: this.config.provider, model: this.config.model, budget: this.config.budget,
+          timeoutMs: this.config.timeoutSeconds * 1000, signal, resume });
+      } finally {
+        this.captureProgress(job);
+      }
+    }
     if (signal.aborted) return { stale: true };
+    const observed = await this.github.rest.pulls.get({ ...context.repo, pull_number: job.number });
+    if (job.replacement || !this.eligible(job.repository, observed.data) || observed.data.head.sha !== job.head ||
+        observed.data.base.sha !== job.base || observed.data.base.ref !== job.baseRef) {
+      this.accept(job.repository, observed.data);
+      if (job.state !== "superseded" && !job.progress?.complete && !job.progress?.skipped) {
+        throw Object.assign(new Error("Snapshot review incomplete; resume before reviewing the queued head"),
+          { retryable: !job.progress?.budgetExceeded });
+      }
+      return { stale: true, checkpoint: job.progress?.complete || false };
+    }
     const result = await this.publish({ github: this.github, context, core, directory: job.directory });
     if (result?.stale) {
-      await this.observe(job.repository, job.number, { force: true });
+      await this.observe(job.repository, job.number);
       return result;
     }
     if (failures.length || !result || result.incomplete) {
@@ -198,7 +245,8 @@ class ReviewService {
     const ranks = { critical: 4, high: 3, medium: 2, low: 1, none: 5 };
     const blocking = result.comments.filter((comment) => (ranks[comment.severity] || 0) >= ranks[this.config.blockSeverity]);
     const latest = await this.github.rest.pulls.get({ ...context.repo, pull_number: job.number });
-    if (!this.eligible(job.repository, latest.data) || latest.data.head.sha !== job.head || latest.data.base.sha !== job.base) {
+    if (!this.eligible(job.repository, latest.data) || latest.data.head.sha !== job.head ||
+        latest.data.base.sha !== job.base || latest.data.base.ref !== job.baseRef) {
       this.accept(job.repository, latest.data);
       return { stale: true };
     }
@@ -214,8 +262,9 @@ class ReviewService {
     for (let slot = 0; slot < this.config.prConcurrency; slot++) {
       if (this.workers.has(slot)) continue;
       const busy = new Set([...this.workers.values()].map(({ job }) => job.key));
-      const job = this.state.next(Date.now(), busy);
-      if (!job) break;
+      const job = this.state.next(Date.now(), busy, (candidate) => !candidate.snapshot || candidate.slot === slot ||
+        !Number.isInteger(candidate.slot) || candidate.slot >= this.config.prConcurrency);
+      if (!job) continue;
       job.state = "running"; job.attempt++; job.startedAt = new Date().toISOString();
       this.state.save();
       const controller = new AbortController();
@@ -231,7 +280,7 @@ class ReviewService {
       const result = await this.execute(job, controller.signal, slot);
       if (job.state !== "superseded") {
         if (this.stopping) { job.state = "queued"; job.nextAt = 0; job.attempt--; }
-        else job.state = result.stale ? "superseded" : "complete";
+        else job.state = result.stale ? (result.checkpoint ? "checkpointed" : "superseded") : "complete";
       }
       job.result = result;
       delete job.error;
@@ -262,7 +311,8 @@ class ReviewService {
   cleanup() {
     const cutoff = Date.now() - this.config.retentionDays * 86400000;
     const directory = path.join(this.config.stateDirectory, "runs");
-    const protectedPaths = new Set(this.state.data.jobs.filter((job) => ["queued", "running"].includes(job.state)).map((job) => job.directory));
+    const protectedPaths = new Set(this.state.data.jobs.filter((job) => ["queued", "running"].includes(job.state))
+      .flatMap((job) => [job.directory, job.progress?.directory]));
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const name = path.join(directory, entry.name);
       if (entry.isDirectory() && entry.name.startsWith("ocr-pr-") && !protectedPaths.has(name) && fs.statSync(name).mtimeMs < cutoff) {

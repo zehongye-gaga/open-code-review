@@ -14,9 +14,34 @@ const { ReviewService, configuration } = require("./service.js");
 const { createServer } = require("./server.js");
 const { createGitHub } = require("./github.js");
 const { childEnvironment } = require("./review.js");
+const { planReview } = require("./progress.js");
 
 const repository = "owner/repo";
 const head = "b".repeat(40), base = "a".repeat(40);
+const sessionId = "11111111-2222-3333-4444-555555555555";
+async function until(predicate) {
+  const deadline = Date.now() + 5000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, "Timed out waiting for worker transition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+function writeReport(directory, { state = "complete", comments = [] } = {}) {
+  const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json")));
+  const item = { item_id: "file-1", fingerprint: "diff-1" };
+  fs.writeFileSync(path.join(directory, "result.json"), JSON.stringify({ status: state, session_id: sessionId, comments,
+    manifest: { schema_version: "ocr.run-manifest/v1", operation: "review", run_id: sessionId, terminal_state: state,
+      input: { mode: "range", resolved_base: metadata.range.from, resolved_head: metadata.head },
+      coverage: { selected: [item], completed: state === "complete" ? [item] : [], reused: [],
+        failed: state === "complete" ? [] : [item], waived: [] } } }));
+  fs.writeFileSync(path.join(directory, "exit-code.json"), "0");
+}
+function prepareFixture(directory, pull, core, snapshot) {
+  fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify(snapshot || {
+    number: pull.number, head: pull.head.sha, base: pull.base.sha, base_ref: pull.base.ref,
+    merge_base: base, background: "Review this change" }));
+  core.setOutput("should_review", "true"); core.setOutput("result_directory", directory);
+}
 function pr(overrides = {}) {
   return { number: 1, state: "open", draft: false, title: "Fix", head: { sha: head },
     base: { sha: base, ref: "main", repo: { full_name: repository } }, ...overrides };
@@ -25,14 +50,16 @@ function setup(t, overrides = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ocr-service-test-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const current = { pr: pr() }, statuses = [];
-  const config = { stateDirectory: directory, repositories: [{ name: repository, baseBranches: ["main"] }] };
+  const binary = path.join(directory, "ocr");
+  fs.writeFileSync(binary, "mock binary");
+  const config = { stateDirectory: directory, binary, repositories: [{ name: repository, baseBranches: ["main"] }] };
   const github = { getToken: () => "test-token", rest: {
     pulls: { get: async () => ({ data: current.pr }), list: async () => ({ data: [current.pr] }) },
     repos: { createCommitStatus: async (p) => { statuses.push(p); return { data: {} }; } },
   } };
   const service = new ReviewService({ config, github, log: () => {},
-    prepare: async ({ core }) => { core.setOutput("should_review", "true"); core.setOutput("result_directory", directory); },
-    run: async () => {},
+    prepare: async ({ core, snapshot }) => { prepareFixture(directory, current.pr, core, snapshot); },
+    run: async ({ directory }) => writeReport(directory),
     publish: async () => ({ summaryURL: "https://github.com/owner/repo/pull/1#issuecomment-1", comments: [], incomplete: false }),
     ...overrides });
   return { service, current, directory, statuses, github, config };
@@ -44,16 +71,17 @@ function parallelSetup(t, count = 5) {
   for (let number = 1; number <= count; number++) pulls.set(number, pr({ number }));
   h.github.rest.pulls.get = async ({ pull_number }) => ({ data: pulls.get(pull_number) });
   h.github.rest.pulls.list = async () => ({ data: [...pulls.values()] });
-  h.service.prepare = async ({ core, context, cwd }) => {
+  h.service.prepare = async ({ core, context, cwd, snapshot }) => {
     const number = context.issue.number;
     const directory = path.join(h.directory, "runs", `ocr-pr-${number}-${context.runId}`);
     fs.mkdirSync(directory, { recursive: true });
-    core.setOutput("should_review", "true"); core.setOutput("result_directory", directory);
+    prepareFixture(directory, pulls.get(number), core, snapshot);
     starts.push({ number, cwd, directory });
   };
   h.service.run = async ({ cwd, signal }) => {
     const entry = starts.findLast((entry) => entry.cwd === cwd);
     await new Promise((resolve) => running.set(entry.number, { resolve, signal }));
+    writeReport(entry.directory);
   };
   for (const pull of pulls.values()) h.service.accept(repository, pull);
   return { ...h, pulls, running, starts };
@@ -62,16 +90,16 @@ function parallelSetup(t, count = 5) {
 test("four isolated workers fill freed slots without exceeding the limit or duplicating jobs", async (t) => {
   const h = parallelSetup(t);
   const first = h.service.tick();
-  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => h.running.size === 4);
   assert.equal(h.running.size, 4);
   assert.equal(new Set(h.starts.map((entry) => entry.cwd)).size, 4);
   assert.equal(h.service.state.data.jobs.filter((job) => job.state === "queued").length, 1);
   await Promise.all([h.service.tick(), h.service.tick()]);
   assert.equal(h.starts.length, 4);
   h.running.get(2).resolve();
-  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => h.service.workers.size === 3);
   const next = h.service.tick();
-  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => h.running.size === 5);
   assert.equal(h.starts.length, 5);
   assert.equal(h.starts[4].cwd, h.starts[1].cwd);
   assert.equal(h.service.workers.size, 4);
@@ -84,31 +112,31 @@ test("four isolated workers fill freed slots without exceeding the limit or dupl
 
 test("a superseded PR waits for its old worker to exit without cancelling unrelated PRs", async (t) => {
   const h = parallelSetup(t, 2), first = h.service.tick();
-  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => h.running.size === 2);
   const old = h.running.get(1), other = h.running.get(2);
   const updated = pr({ head: { sha: "c".repeat(40) } });
   h.pulls.set(1, updated);
   const replacement = h.service.accept(repository, updated);
-  assert.equal(old.signal.aborted, true);
+  assert.equal(old.signal.aborted, false);
   assert.equal(other.signal.aborted, false);
   await h.service.tick();
   assert.equal(h.starts.length, 2);
   assert.equal(replacement.state, "queued");
   old.resolve();
-  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => h.service.workers.size === 1);
   const next = h.service.tick();
-  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => h.running.get(1) !== old);
   assert.equal(h.starts.length, 3);
   h.running.get(1).resolve(); other.resolve();
   await Promise.all([first, next]);
-  assert.equal(h.service.state.data.jobs[0].state, "superseded");
+  assert.equal(h.service.state.data.jobs[0].state, "checkpointed");
   assert.equal(replacement.state, "complete");
   assert.equal(h.statuses.filter((s) => s.state === "success" && s.sha === updated.head.sha).length, 1);
 });
 
 test("shutdown aborts and durably requeues all parallel workers without consuming attempts", async (t) => {
   const h = parallelSetup(t, 4), pending = h.service.tick();
-  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => h.running.size === 4);
   h.service.stop();
   for (const entry of h.running.values()) { assert.equal(entry.signal.aborted, true); entry.resolve(); }
   await pending;
@@ -120,7 +148,7 @@ test("shutdown aborts and durably requeues all parallel workers without consumin
 
 test("health lists all active PRs and concurrency configuration is validated", async (t) => {
   const h = parallelSetup(t, 4), pending = h.service.tick();
-  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => h.running.size === 4);
   h.service.lastPoll = new Date().toISOString();
   const server = createServer(h.service);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -204,23 +232,33 @@ test("failures retry with backoff and stop at the cap; a restart retains that de
   assert.equal(new State(h.directory).next(), undefined);
 });
 
-test("new pushes abort active work, never publish its result, and queue the newer head", async (t) => {
+test("new pushes preserve active work and its checkpoint, coalescing only waiting heads", async (t) => {
   const h = setup(t);
   let started;
   const ready = new Promise((resolve) => { started = resolve; });
-  h.service.run = async ({ signal }) => {
+  let finish, oldSignal;
+  h.service.run = async ({ signal, directory }) => {
+    oldSignal = signal;
     started();
-    await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+    await new Promise((resolve) => { finish = resolve; });
+    writeReport(directory);
   };
   h.service.publish = async () => assert.fail("superseded result published");
   const first = h.service.accept(repository, pr());
   const running = h.service.tick();
   await ready;
   h.current.pr = pr({ head: { sha: "c".repeat(40) } });
+  const intermediate = h.service.accept(repository, h.current.pr);
+  h.current.pr = pr({ head: { sha: "d".repeat(40) } });
   const next = h.service.accept(repository, h.current.pr);
+  assert.equal(intermediate.state, "superseded");
+  assert.equal(oldSignal.aborted, false);
+  assert.equal(first.state, "running");
+  finish();
   await running;
-  assert.equal(first.state, "superseded");
+  assert.equal(first.state, "checkpointed");
   assert.equal(h.service.state.next().id, next.id);
+  assert.equal(h.service.state.data.checkpoints[first.key].payload.head, head);
   assert.deepEqual(h.statuses.map((s) => s.state), ["pending", "pending"]);
 });
 
@@ -358,4 +396,115 @@ test("token-budget exhaustion reports an error without repeating the same paid r
   assert.equal(job.attempt, 1);
   assert.match(h.statuses.at(-1).description, /Token budget exceeded/);
   assert.equal(h.service.state.next(), undefined);
+});
+
+test("a failed old snapshot resumes after restart before the coalesced new head can run", async (t) => {
+  const h = setup(t);
+  const old = h.service.accept(repository, pr());
+  h.service.run = async ({ directory }) => {
+    writeReport(directory, { state: "partial" });
+    h.current.pr = pr({ head: { sha: "c".repeat(40) } });
+    h.service.accept(repository, h.current.pr);
+  };
+  h.service.publish = async () => assert.fail("An old snapshot must not publish");
+  await h.service.tick();
+  assert.equal(old.state, "queued");
+  assert.equal(old.progress.sessionId, sessionId);
+  assert.equal(old.progress.complete, false);
+  assert.equal(h.service.state.data.checkpoints[old.key], undefined);
+  assert.equal(h.service.state.next(), undefined, "The newer head waits through the old snapshot's backoff");
+  h.service.state = new State(h.directory);
+  const recovered = h.service.state.data.jobs[0];
+  recovered.nextAt = 0;
+  h.service.run = async ({ resume, directory }) => {
+    assert.equal(resume, sessionId);
+    const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json")));
+    assert.equal(metadata.head, head);
+    assert.equal(metadata.range.from, base);
+    writeReport(directory);
+  };
+  await h.service.tick();
+  assert.equal(recovered.state, "checkpointed");
+  assert.equal(h.service.state.data.checkpoints[recovered.key].payload.head, head);
+  assert.equal(h.service.state.next().head, "c".repeat(40));
+});
+
+test("a resumable snapshot keeps its worker slot even when lower slots are free", async (t) => {
+  const h = setup(t);
+  h.service.config.prConcurrency = 4;
+  const job = h.service.accept(repository, pr());
+  job.snapshot = { number: 1, head, base, base_ref: "main", merge_base: base, background: "Review this change" };
+  job.slot = 2;
+  h.service.run = async ({ directory, cwd }) => {
+    assert.match(cwd, /worker-repositories\/2\/owner\/repo$/);
+    writeReport(directory);
+  };
+  await h.service.tick();
+  assert.equal(job.state, "complete");
+  assert.equal(job.slot, 2);
+  assert.ok(job.progress.sessionId);
+});
+
+test("publication retries reuse a complete report without another model call", async (t) => {
+  const h = setup(t);
+  let executions = 0, publications = 0;
+  h.service.run = async ({ directory }) => { executions++; writeReport(directory); };
+  h.service.publish = async () => {
+    if (++publications === 1) throw new Error("GitHub unavailable");
+    return { comments: [], summaryURL: "https://example.test/summary" };
+  };
+  const job = h.service.accept(repository, pr());
+  await h.service.tick();
+  assert.equal(job.state, "queued");
+  job.nextAt = 0;
+  await h.service.tick();
+  assert.equal(job.state, "complete");
+  assert.equal(executions, 1);
+  assert.equal(publications, 2);
+});
+
+test("a moving base is coalesced once while its original snapshot continues", (t) => {
+  const h = setup(t), job = h.service.accept(repository, pr());
+  job.state = "running";
+  const changed = pr({ base: { ...pr().base, sha: "d".repeat(40) } });
+  const next = h.service.accept(repository, changed);
+  assert.equal(job.state, "running");
+  for (let i = 0; i < 3; i++) assert.equal(h.service.accept(repository, changed), null);
+  assert.equal(h.service.state.data.jobs.length, 2);
+  assert.equal(next.state, "queued");
+});
+
+test("restart recovers closed native artifacts even if progress was not persisted", async (t) => {
+  const h = setup(t), job = h.service.accept(repository, pr());
+  job.workspace = path.join(h.directory, "repositories", "owner", "repo");
+  fs.mkdirSync(job.workspace, { recursive: true });
+  job.directory = path.join(h.directory, "runs", "ocr-pr-crashed");
+  fs.mkdirSync(job.directory);
+  prepareFixture(job.directory, h.current.pr, { setOutput() {} });
+  const planned = await planReview({ config: h.service.config, job, directory: job.directory, cwd: job.workspace });
+  job.snapshot = planned.metadata; job.slot = 0; job.state = "running";
+  writeReport(job.directory);
+  h.service.state.save();
+  h.service.state = new State(h.directory);
+  h.service.run = async () => assert.fail("A closed complete report should be recovered without rerunning OCR");
+  await h.service.tick();
+  const recovered = h.service.state.data.jobs[0];
+  assert.equal(recovered.state, "complete");
+  assert.equal(recovered.progress.sessionId, sessionId);
+  assert.equal(recovered.directory, job.directory);
+  assert.equal(h.service.state.data.checkpoints[job.key].payload.head, head);
+});
+
+test("retargeting to an allowed branch with the same base SHA cannot publish the old snapshot", async (t) => {
+  const h = setup(t), job = h.service.accept(repository, pr());
+  h.service.config.repositories[0].baseBranches.push("release");
+  h.service.run = async ({ directory }) => {
+    writeReport(directory);
+    h.current.pr = pr({ base: { ...pr().base, ref: "release" } });
+  };
+  h.service.publish = async () => assert.fail("The previous target branch must not be published");
+  await h.service.tick();
+  assert.equal(job.state, "checkpointed");
+  assert.equal(h.service.state.next().baseRef, "release");
+  assert.ok(h.statuses.every((status) => status.state !== "success"));
 });

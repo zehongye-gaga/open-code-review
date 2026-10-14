@@ -65,6 +65,9 @@ to the unit's writable paths if it is outside the service state directory.
 Keep configuration and credential files outside reviewed checkouts, readable
 only by the service account. `flock --no-fork` ensures only one service owns the
 state while making Node the systemd main process for graceful shutdown.
+Keep `KillMode=mixed`: Node sends one termination signal to each OCR child so
+it can flush its manifest. Sending signals to the whole control group as well
+would deliver a second signal, which native OCR treats as a forced exit.
 
 ```sh
 systemctl daemon-reload
@@ -105,23 +108,50 @@ token comes from `apiTokenFile` or `OCR_SERVICE_API_TOKEN`. Without an API token
 those routes are disabled. The listener defaults to loopback; use an SSH tunnel
 or authenticated operational proxy for remote access.
 
-Queue state is atomically persisted before execution. Interrupted work resumes
+Queue state is atomically persisted before execution. Interrupted work is requeued
 after restart. Reviews use a bounded pool of `prConcurrency` workers across
 configured repositories. Each worker has its own Git checkout, index and refs;
 one PR cannot change the files or fetch refs used by another. A newer head/base
-supersedes queued work and terminates an active old review. Its replacement
-waits until the previous execution of the same PR exits, while unrelated PRs
-can use other workers. Failed or partial
-reviews retry up to `maxAttempts`, with exponential backoff starting at
-`retrySeconds`. After the cap, inspect the job and request a rerun. A new commit
-always gets a new job. If an optional token cap is configured, a review that
+does not cancel a running snapshot or its scheduled retries. Multiple pushes
+coalesce into one latest waiting job. That job waits for the original snapshot
+to finish or exhaust its retries; unrelated PRs can use other workers. Closing
+a PR, converting it to draft, or changing it to a disallowed base still cancels
+its work and removes its checkpoint.
+
+Failed or partial reviews retry up to `maxAttempts`, with exponential backoff
+starting at `retrySeconds`. The original head, base, background and review range
+stay pinned. When the native report contains a verifiable session manifest,
+the next attempt passes `--resume` to OCR, reusing its completed file/group
+checkpoints. Retries keep their original worker checkout because native sessions
+are indexed by repository path. If concurrency is reduced below that slot, the
+snapshot restarts on an available worker. A changed binary, model, rules or model
+configuration invalidates reuse. A missing or rejected session falls back once
+to a fresh review of the snapshot, retaining the admission diagnostics. A crash
+or SIGKILL before a native manifest is written cannot be resumed by OCR and
+requires a fresh attempt. Publication-only failures reuse the saved complete
+report without making another model call. After the retry cap, inspect the job
+and request a rerun. If an optional token cap is configured, a review that
 exhausts it stays incomplete and is not retried automatically with the same
 budget; remove or raise the cap and request an explicit rerun. This is a
 single-host service, not a distributed queue.
 
+Completed native reviews save durable per-PR checkpoints, even if a newer push
+means their results can no longer be published. These jobs end as `checkpointed`
+instead of cancelled. Only a checkpoint with zero findings can narrow the next
+review to `checkpoint-head..new-head`. A checkpoint with any finding requires
+a full review so unresolved issues cannot disappear from the blocking status.
+The service reuses OCR's checkpoint ancestry/base/config validation. Force pushes,
+changed base commits or branches, changed requirements/rules/model configuration,
+missing objects and explicit API reruns fall back to the full PR range. Partial,
+failed and excluded-only reviews never advance the checkpoint. The local state
+is authoritative; user-written PR comments cannot create a trusted checkpoint.
+Incremental summaries state the exact reviewed range and refer to the previous
+review. Incremental review reduces repeated work but is not a fresh full-PR
+analysis; an explicit API rerun always starts a full review.
+
 The service fetches PR commits as Git objects and checks out only the trusted
 base commit. It never installs project dependencies or runs PR scripts. OCR
-reads the immutable range `merge-base..head`. Head/base are checked after fetch,
+reads an immutable full or checkpoint range. Head/base are checked after fetch,
 before publication and before the final status. Publication uses OCR's existing
 incremental comment deduplication and sticky summary. Superseded results cannot
 set a successful status for a newer commit. GitHub has no atomic compare-and-set
@@ -137,6 +167,10 @@ Out-of-diff findings successfully included in the summary do not count as
 publication failures. A failed review is never reported as clean.
 
 Metadata, original OCR JSON, stderr and exit codes live in `stateDirectory/runs`.
+Job records expose `range`, `snapshot`, `progress` (session, range, coverage
+completion and artifact directory), and a replacement job ID when pushes queue
+behind a running snapshot. Logs include `review_range`, `checkpoint_saved` and
+`reuse_completed_review` events. Per-PR checkpoints persist in `state.json`.
 Completed artifacts and job records expire after `retentionDays` (default seven);
 active/retry artifacts remain. OCR session history and Git object caches have
 their own lifecycle and are not deleted by this retention job. Monitor the
