@@ -189,6 +189,59 @@ that branch-protection requirement after validating PR creation, updates,
 comments, failures and restart recovery; then retire its previous service if it
 has no other repository or notification responsibilities.
 
+## Read-only monitoring dashboard
+
+Run the independent monitor on the same Linux host as the review services:
+
+```sh
+node services/github-review/monitor.js /etc/ocr-review/monitor.json
+# Equivalent npm entry point:
+npm run service:monitor -- /etc/ocr-review/monitor.json
+```
+
+Copy `monitor.example.json` and adjust the OCR configuration path, volumes and
+optional CR Agent state sources. Remove `cragent` when that service is not
+installed. All configured state sources must be readable by the monitor user.
+The GitHub token path is inherited from the OCR configuration; a token that can
+read the configured repositories through GraphQL is required. Restart the
+monitor after changing configuration. No dependencies need to be installed.
+The supplied `ocr-monitor.service` is a systemd template with a 256 MB memory
+limit, a CPU limit and a read-only filesystem. Adjust its user and executable
+paths to the deployment. It is independent of `ocr-review.service`; starting or
+restarting the monitor does not interrupt reviews.
+
+Open `/` for the responsive dashboard. It refreshes local state every ten
+seconds and current open PR heads/statuses through GitHub GraphQL every minute.
+`GET /api/status` returns the same redacted snapshot; `GET /healthz` checks monitor
+collection freshness. All other methods are rejected. No review, cancellation,
+retry or configuration controls are exposed. The monitor reads state files
+directly without constructing the mutating review `State` class.
+
+The default listener is loopback. For direct access within a trusted private
+network, bind `listen` to that host's private address and restrict port 8788 to
+that network. PR titles, repository names and review metadata are visible to
+anyone who can reach this listener. For public access, keep loopback binding and
+use an authenticated HTTPS reverse proxy. Optional `bearerTokenFile` protects
+every route for a proxy or API client that supplies the Authorization header;
+the webpage does not store tokens or implement a login flow. GitHub tokens,
+Codex credentials, review prompts, source snippets and raw errors are never
+included in dashboard responses. PR metadata is rendered as text, never HTML.
+
+GitHub results are matched to the current PR head. Missing OCR checks, including
+historical PRs skipped by `bootstrapExisting: false`, stay explicitly unreviewed.
+Code findings, execution failures, pending work and saved checkpoints have
+separate labels. Local worker state is displayed separately from GitHub status.
+The monitor preserves the last result on upstream failures and prominently
+marks stale/unavailable sources. Root/data capacity, available system memory,
+load, process uptime, cgroup memory and restart counts are collected from the
+host. Service memory includes child processes and cgroup-accounted cache.
+
+The 24-hour token total sums the last native `result.json` for jobs completed or
+checkpointed within that window. Missing reports are counted and displayed.
+It excludes failed attempts, in-progress work and CR Agent tokens; it is not a
+complete inference ledger, bill or remaining subscription allowance. Cached
+input tokens are a subset of input usage, not added again to the total.
+
 ## Development
 
 ```sh

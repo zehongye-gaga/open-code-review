@@ -1,0 +1,21 @@
+{
+  "listen": "127.0.0.1",
+  "port": 8788,
+  "ocrConfig": "/etc/ocr-review/config.json",
+  "ocrUnit": "ocr-review.service",
+  "ocrHealthURL": "http://127.0.0.1:8787/healthz",
+  "volumes": [
+    { "label": "Root", "path": "/" },
+    { "label": "Review data", "path": "/var/lib/ocr-review" }
+  ],
+  "cragent": {
+    "unit": "cragent.service",
+    "concurrency": 4,
+    "pollSeconds": 120,
+    "timeoutSeconds": 2700,
+    "statusContext": "codex-insightflow-review",
+    "states": [
+      { "name": "main", "repository": "owner/repository", "file": "/var/lib/cragent/state/owner-repository/go-runtime-state.json" }
+    ]
+  }
+}
