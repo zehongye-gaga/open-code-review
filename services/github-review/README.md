@@ -272,6 +272,13 @@ Metric boundaries:
   provider usage when available and may estimate it when absent; a failed request
   without usage cannot be billed accurately here. Cached tokens are a subset of
   input tokens, never added again. CR Agent usage is excluded.
+- Cached-input share is the sum of cached input tokens divided by the sum of
+  input tokens, including first requests across stages and conversations. PR and
+  period totals describe aggregate input reuse, not an individual conversation's
+  KV-cache efficiency. The API's `cacheHitRatio` field retains this aggregate
+  meaning. Conversation-level diagnostics need to separate file groups, review
+  rounds, first requests and continuations; one native OCR run can contain many
+  independent model conversations.
 - Completed/failed tasks, findings and end-to-end timing belong to task completion
   day. Completion rate excludes superseded tasks. Findings count the final report
   once per task, including checkpointed older heads; the same bug across commits
