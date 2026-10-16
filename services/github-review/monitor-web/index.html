@@ -8,6 +8,7 @@
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/monitor.css">
   <script src="/monitor-view.js" defer></script>
+  <script src="/monitor-analytics.js" defer></script>
   <script src="/monitor-ui.js" defer></script>
 </head>
 <body>
@@ -25,6 +26,23 @@
       <div class="kpi"><div class="kpi-label"><span>{{usageTitle}}</span><span class="kpi-symbol mint">⌁</span></div><strong id="tokens">—</strong><p id="tokens-detail">{{usageWaiting}}</p></div>
     </section>
     <section class="panel work-panel"><div class="panel-heading"><h2><span class="dot blue-dot"></span>{{workTitle}}</h2><span class="muted" id="work-count"></span></div><div id="work" class="work-grid"></div></section>
+    <section class="panel analytics-panel" id="analytics-panel" hidden>
+      <div class="panel-heading"><div><h2>{{analyticsTitle}}</h2><p class="section-note" id="analytics-scope"></p></div><div class="filters" aria-label="{{analyticsPeriod}}"><button class="filter selected" data-period="today">{{today}}</button><button class="filter" data-period="week">{{thisWeek}}</button><button class="filter" data-period="month">{{last30Days}}</button><button class="filter" data-period="retained">{{retainedHistory}}</button></div></div>
+      <div id="analytics-notice" class="analytics-notice" role="status"></div>
+      <div id="analytics-stats" class="analytics-stats"></div>
+      <div class="analytics-charts">
+        <div class="trend-panel"><div class="trend-heading"><h3>{{trendTitle}}</h3><div class="chart-controls"><select id="trend-metric" aria-label="{{trendMetric}}"><option value="totalTokens">Token</option><option value="findings">{{findingOccurrences}}</option><option value="completed">{{finishedReviews}}</option><option value="nativeSeconds">{{nativeTime}}</option></select><select id="trend-grain" aria-label="{{trendGrain}}"><option value="daily">{{dailyView}}</option><option value="weekly">{{weeklyView}}</option></select></div></div><div id="analytics-chart" class="analytics-chart"></div></div>
+        <div class="phase-panel"><h3>{{phaseTitle}}</h3><p class="section-note">{{phaseScope}}</p><div id="analytics-phases"></div></div>
+      </div>
+      <p class="analytics-definition">{{analyticsDefinition}}</p>
+    </section>
+    <section class="panel analytics-pulls-panel" id="analytics-pulls-panel" hidden>
+      <div class="panel-heading"><div><h2>{{pullAnalyticsTitle}}</h2><p class="section-note">{{pullAnalyticsScope}}</p></div><span id="analytics-pull-count" class="count"></span></div>
+      <div class="table-toolbar"><input type="search" id="analytics-search" placeholder="{{analyticsSearch}}" aria-label="{{analyticsSearch}}"><select id="analytics-sort" aria-label="{{analyticsSort}}"><option value="recent">{{sortRecent}}</option><option value="tokens">{{sortTokens}}</option><option value="findings">{{sortFindings}}</option><option value="duration">{{sortDuration}}</option></select></div>
+      <div class="table-scroll"><table><thead><tr><th>PR</th><th>{{latestFinding}}</th><th>{{reviewCounts}}</th><th>Token</th><th>{{nativeTime}}</th><th>{{retryResume}}</th><th>{{details}}</th></tr></thead><tbody id="analytics-pulls"></tbody></table></div>
+      <div class="table-foot"><span>{{pullAnalyticsHint}}</span><button id="analytics-more" class="button">{{showMore}}</button></div>
+    </section>
+    <dialog id="analytics-dialog" class="analytics-dialog"><div class="panel-heading"><div><h2 id="analytics-detail-title"></h2><p class="section-note">{{detailScope}}</p></div><button id="analytics-close" class="button">{{close}}</button></div><div id="analytics-detail" class="table-scroll"></div></dialog>
     <div class="main-grid">
       <main class="panel pr-panel">
         <div class="panel-heading"><div><h2>Pull Requests</h2><p class="section-note">{{prSubtitle}}</p></div><span class="count" id="pr-count">—</span></div>

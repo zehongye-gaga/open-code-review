@@ -89,6 +89,9 @@ async function prepareReview({ github, context, core, prNumber, cwd = process.cw
   }
 
   const directory = fs.mkdtempSync(path.join(temp, "ocr-pr-"));
+  metadata.telemetry = { repository: `${context.repo.owner}/${context.repo.repo}`.toLowerCase(),
+    jobId: String(context.runId), attempt: context.runAttempt, workspace: cwd,
+    preparedAt: new Date().toISOString() };
   fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify(metadata, null, 2), { mode: 0o600 });
   core.setOutput("result_directory", directory);
   core.setOutput("should_review", "true");

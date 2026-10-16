@@ -252,3 +252,19 @@ test("health transport fails closed and systemd names cannot become options", as
   assert.equal((await getHealth("http://127.0.0.1:1/healthz")).reachable, false);
   await assert.rejects(unitStatus("../bad;echo.service"), /Invalid/);
 });
+
+test("PR analytics validates parameters and survives a malformed HTTP request target", async (t) => {
+  const url = await serve(t, { snapshot: () => ({ ready: true }),
+    analyticsPull: (repository, number) => ({ repository, number, runs: [] }) });
+  const response = await fetch(url + "/api/analytics/pr?repository=Org%2FRepo&number=12");
+  assert.deepEqual(await response.json(), { repository: "org/repo", number: 12, runs: [] });
+  assert.equal((await fetch(url + "/api/analytics/pr?repository=../secret&number=0")).status, 400);
+  const malformed = await new Promise((resolve, reject) => {
+    const request = http.get({ hostname: "127.0.0.1", port: new URL(url).port, path: "//[invalid" }, (res) => {
+      res.resume(); res.on("end", () => resolve(res.statusCode));
+    });
+    request.on("error", reject);
+  });
+  assert.equal(malformed, 400);
+  assert.equal((await fetch(url + "/api/status")).status, 200);
+});

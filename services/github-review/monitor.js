@@ -15,6 +15,7 @@ function createMonitorServer(monitor, { bearerToken } = {}) {
   const assets = new Map([["/", ["index.html", "text/html; charset=utf-8"]],
     ["/monitor.css", ["monitor.css", "text/css; charset=utf-8"]],
     ["/monitor-view.js", ["monitor-view.js", "text/javascript; charset=utf-8"]],
+    ["/monitor-analytics.js", ["monitor-analytics.js", "text/javascript; charset=utf-8"]],
     ["/monitor-ui.js", ["monitor-ui.js", "text/javascript; charset=utf-8"]]]
     .map(([route, [file, type]]) => [route, { body: fs.readFileSync(path.join(__dirname, "monitor-web", file)), type }]));
   assets.get("/").body = assets.get("/").body.toString("utf8").replace(/\{\{(\w+)\}\}/g, (_, key) => {
@@ -34,6 +35,17 @@ function createMonitorServer(monitor, { bearerToken } = {}) {
       if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return send(401, { error: "Unauthorized" });
     }
     if (req.url === "/api/status") return send(200, monitor.snapshot());
+    let url;
+    try { url = new URL(req.url, "http://localhost"); }
+    catch { return send(400, { error: "Invalid URL" }); }
+    if (url.pathname === "/api/analytics/pr") {
+      const repository = url.searchParams.get("repository"), number = Number(url.searchParams.get("number"));
+      if (!/^[\w.-]+\/[\w.-]+$/.test(repository || "") || !Number.isSafeInteger(number) || number < 1) {
+        return send(400, { error: "A repository and positive PR number are required" });
+      }
+      const result = monitor.analyticsPull?.(repository.toLowerCase(), number);
+      return result ? send(200, result) : send(503, { error: "Analytics unavailable" });
+    }
     if (req.url === "/healthz") {
       const snapshot = monitor.snapshot();
       return send(snapshot.ready && !snapshot.stale ? 200 : 503, { ready: snapshot.ready, collectedAt: snapshot.collectedAt });

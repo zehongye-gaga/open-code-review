@@ -74,7 +74,8 @@ test("fetches exact PR objects while retaining the trusted base working tree", a
   git(origin, "update-ref", "refs/pull/1/head", headSha);
   git(directory, "clone", "--branch", "main", origin, checkout);
   const h = harness(makePR({ head: { sha: headSha }, base: { sha: baseSha, repo: { full_name: "owner/repo" } } }));
-  await prepareReview({ ...h, prNumber: "1", cwd: checkout, temp: directory, token: "test-token" });
+  await prepareReview({ ...h, context: { ...h.context, runId: "service-job", runAttempt: 2 },
+    prNumber: "1", cwd: checkout, temp: directory, token: "test-token" });
   assert.equal(h.outputs.should_review, "true");
   assert.equal(fs.readFileSync(path.join(checkout, "trusted.txt"), "utf8"), "trusted base\n");
   assert.equal(fs.existsSync(path.join(checkout, "untrusted.sh")), false);
@@ -83,6 +84,10 @@ test("fetches exact PR objects while retaining the trusted base working tree", a
   const metadata = JSON.parse(fs.readFileSync(path.join(h.outputs.result_directory, "metadata.json")));
   assert.equal(metadata.head, headSha);
   assert.equal(metadata.merge_base, baseSha);
+  assert.deepEqual({ ...metadata.telemetry, preparedAt: null }, {
+    repository: "owner/repo", jobId: "service-job", attempt: 2, workspace: checkout, preparedAt: null,
+  });
+  assert.ok(Date.parse(metadata.telemetry.preparedAt));
   git(origin, "update-ref", "refs/pull/1/head", baseSha);
   await prepareReview({ ...h, prNumber: "1", cwd: checkout, temp: directory });
   assert.equal(h.outputs.should_review, "false");

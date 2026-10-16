@@ -205,8 +205,9 @@ installed. All configured state sources must be readable by the monitor user.
 The GitHub token path is inherited from the OCR configuration; a token that can
 read the configured repositories through GraphQL is required. Restart the
 monitor after changing configuration. No dependencies need to be installed.
-The supplied `ocr-monitor.service` is a systemd template with a 256 MB memory
-limit, a CPU limit and a read-only filesystem. Adjust its user and executable
+The supplied `ocr-monitor.service` is a systemd template with a 384 MB memory
+limit, a CPU limit and a read-only filesystem except for its own analytics
+directory (`StateDirectory`/`ReadWritePaths`). Adjust its user and executable
 paths to the deployment. It is independent of `ocr-review.service`; starting or
 restarting the monitor does not interrupt reviews.
 
@@ -236,11 +237,58 @@ marks stale/unavailable sources. Root/data capacity, available system memory,
 load, process uptime, cgroup memory and restart counts are collected from the
 host. Service memory includes child processes and cgroup-accounted cache.
 
-The 24-hour token total sums the last native `result.json` for jobs completed or
-checkpointed within that window. Missing reports are counted and displayed.
-It excludes failed attempts, in-progress work and CR Agent tokens; it is not a
-complete inference ledger, bill or remaining subscription allowance. Cached
-input tokens are a subset of input usage, not added again to the total.
+Configure `analytics.directory` as a separate writable directory and
+`analytics.sessionDirectory` as the review service user's native
+`$HOME/.opencodereview/sessions`. `retentionDays` defaults to 90 (7-366 allowed);
+`timeZone` defaults to `Asia/Shanghai`, with calendar weeks starting Monday.
+The ledger's time zone is immutable: use a new directory to change it and
+backfill from available source logs. Omitting `analytics` keeps the legacy
+24-hour final-report total and disables the additional panels.
+
+Analytics incrementally reads all worker slots' native JSONL sessions, including
+failed attempts and responses already returned by running reviews. It persists
+only numeric aggregates, identifiers and cursors via an atomic, fsynced ledger;
+prompts, source code, tool arguments, findings text and credentials are discarded.
+Size the memory limit and retention for the repository's review volume; the
+in-memory ledger grows with the number of retained jobs and sessions.
+Retries and resumes have distinct session IDs. Publication retries reuse the
+same session and do not duplicate token counts. An initial backfill processes
+roughly 64 MB per collection (finishing the current file), with a visible pending
+count. Each JSONL line is limited to 8 MB; skipped/malformed records and read or
+persistence errors are visible, never silently presented as complete data.
+Only run one monitor per ledger directory. Back up that directory for continuity.
+
+The dashboard provides today/current-week/30-day/retained totals, daily and weekly
+trends, phase token breakdowns, searchable PR totals and individual review-task
+details (`GET /api/analytics/pr?repository=owner/repo&number=123`). Metrics include
+input/output/cache tokens, requests/errors/tools, findings by severity, completion
+rate, retries/resumes, file coverage/reuse, native runtime, initial queue wait,
+and mean/P95 end-to-end duration. PR totals include closed PRs. The task ledger
+survives the review service's shorter artifact retention and monitor restarts.
+
+Metric boundaries:
+
+- Tokens belong to the calendar day of each model response. Native OCR uses
+  provider usage when available and may estimate it when absent; a failed request
+  without usage cannot be billed accurately here. Cached tokens are a subset of
+  input tokens, never added again. CR Agent usage is excluded.
+- Completed/failed tasks, findings and end-to-end timing belong to task completion
+  day. Completion rate excludes superseded tasks. Findings count the final report
+  once per task, including checkpointed older heads; the same bug across commits
+  can appear more than once. Latest PR findings identify the corresponding head;
+  they are not a count of unresolved unique issues on GitHub.
+- Native duration sums each finished session's wall time, including failed and
+  resumed sessions. It does not sum internally parallel tool/LLM times. End-to-end
+  duration includes queueing, preparation, retries and publishing. Historical
+  first-queue wait is unknown when the first attempt was never observed.
+- Backfill only covers retained source files. New service artifacts record an
+  explicit repository/job/workspace identity. Older sessions use report session
+  IDs or matching workspace/range/preparation timestamps; unmatched sessions stay
+  in overall usage with an attribution warning. No historical numbers are invented.
+
+These metrics are operational observations, not an invoice or subscription
+allowance. The original 24-hour report card remains available for comparison;
+it counts only final reports and therefore has a different scope.
 
 ## Development
 

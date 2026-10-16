@@ -162,7 +162,7 @@ function render() {
   for (const volume of host.volumes) resources.append(resource(volume.label, volume.totalBytes === null ? null : volume.totalBytes - volume.availableBytes, volume.totalBytes, `${bytes(volume.availableBytes)} ${t("available")} / ${bytes(volume.totalBytes)}`));
   resources.append(resource(t("memoryUsed"), host.memoryTotalBytes - host.memoryAvailableBytes, host.memoryTotalBytes, `${bytes(host.memoryAvailableBytes)} ${t("available")} / ${bytes(host.memoryTotalBytes)}`));
   const load = node("div", "load-row"); load.append(node("span", "", t("load")), node("span", "mono", `${host.load[0].toFixed(2)} / ${host.cpuCount} ${t("cores")}`)); resources.append(load);
-  renderWork(data); renderPulls(data); renderHistory(data);
+  renderWork(data); renderPulls(data); renderHistory(data); window.OCRAnalytics.render(data);
 }
 
 async function refresh() {

@@ -8,6 +8,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const { Analytics } = require("./analytics.js");
+const { runRows } = require("./analytics-summary.js");
 
 const execute = promisify(execFile);
 const activeStates = new Set(["running", "publishing", "error_publishing"]);
@@ -81,7 +83,7 @@ function ocrRow(job) {
     blocking: Number.isFinite(job.result?.blocking) ? job.result.blocking : null,
     resultURL: safeURL(job.result?.summaryURL), incremental: job.range?.mode === "checkpoint",
     resume: Boolean(job.progress?.sessionId),
-    coverage: job.progress ? { selected: numeric(job.progress.selected), complete: numeric(job.progress.complete) } : null };
+    coverage: job.progress ? { selected: numeric(job.progress.selected), complete: job.progress.complete === true } : null };
 }
 
 function crRow(review, repository, id) {
@@ -179,6 +181,7 @@ class Monitor {
     if (!Array.isArray(this.config.repositories) || !this.config.stateDirectory) throw new Error("Invalid OCR configuration");
     this.config.repositories = this.config.repositories.map((repository) => ({ ...repository, name: canonicalRepo(repository.name) }));
     this.reports = new ReportCache(this.config.stateDirectory);
+    this.analytics = options.analytics ? new Analytics(this.config, options.analytics) : null;
     this.local = null;
     this.remote = { pulls: [], updatedAt: null, error: false, remaining: null };
     this.localBusy = false; this.githubBusy = false;
@@ -231,7 +234,14 @@ class Monitor {
       const counts = (jobs) => ({ running: jobs.filter((job) => activeStates.has(job.state)).length,
         queued: jobs.filter((job) => queuedStates.has(job.state)).length });
       const ocrCounts = counts(ocrJobs), crCounts = counts(crJobs);
-      this.local = { collectedAt: new Date(now).toISOString(), ocrJobs, crJobs, usage,
+      let analytics = this.analytics ? previous?.analytics || { enabled: true, pendingFiles: 1 } : { enabled: false };
+      if (this.analytics) {
+        try {
+          if (ocrError) throw new Error("Review state unavailable");
+          analytics = { ...await this.analytics.collect(nativeJobs, now), error: false };
+        } catch { analytics = { ...analytics, error: true }; }
+      }
+      this.local = { collectedAt: new Date(this.now()).toISOString(), ocrJobs, crJobs, usage, analytics,
         resources: this.resources(this.options.volumes || [{ label: "Root", path: "/" }, { label: "Review data", path: this.config.stateDirectory }]),
         services: {
           ocr: { ...ocrUnit, ...ocrCounts, running: health.running ?? ocrCounts.running, queued: health.queued ?? ocrCounts.queued,
@@ -261,6 +271,14 @@ class Monitor {
     finally { this.githubBusy = false; }
   }
 
+  analyticsPull(repository, number) {
+    if (!this.analytics || !this.local?.analytics?.collectedAt) return null;
+    const runs = runRows(this.analytics.ledger).filter((r) => r.repository === repository && r.number === number)
+      .sort((a, b) => timestamp(b.createdAt) - timestamp(a.createdAt) || Number(b.id) - Number(a.id));
+    return { repository, number, collectedAt: this.local.analytics.collectedAt,
+      error: this.local.analytics.error, runs };
+  }
+
   snapshot() {
     const now = this.now(), local = this.local;
     if (!local) return { version: 1, ready: false, collectedAt: null };
@@ -274,7 +292,7 @@ class Monitor {
     }));
     return { version: 1, ready: true, collectedAt: local.collectedAt, stale,
       github: { updatedAt: this.remote.updatedAt, stale: githubStale, error: this.remote.error, remaining: this.remote.remaining },
-      services, resources: local.resources, usage: local.usage,
+      services, resources: local.resources, usage: local.usage, analytics: local.analytics,
       work: latest([...local.ocrJobs, ...local.crJobs].filter((job) => activeStates.has(job.state) || queuedStates.has(job.state)))
         .map((job) => ({ ...job, elapsedSeconds: age(job.startedAt || job.createdAt || job.updatedAt, now),
           overdue: job.state === "running" && age(job.startedAt || job.updatedAt, now) > (services[job.engine]?.timeoutSeconds || 2700) + 120 })),
