@@ -229,3 +229,14 @@ test("rejects corrupt ledgers and time zone changes instead of resetting accumul
   write(f.collector.file, { version: 1, timeZone: "UTC", sessions: {}, jobs: {}, artifacts: {} });
   assert.throws(() => new Analytics(f.config, f.options), /Invalid analytics ledger/);
 });
+
+
+test("discovers repository sessions from accepted jobs without an explicit repository entry", async (t) => {
+  const f = fixture(t);
+  invocation(f, { id: "dynamic-repository" });
+  f.config.repositories = [];
+  const result = await f.collector.collect(f.jobs, now);
+  assert.equal(result.pulls.length, 1);
+  assert.equal(result.pulls[0].repository, "org/repo");
+  assert.equal(result.pulls[0].usage.totalTokens, 110);
+});

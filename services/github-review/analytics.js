@@ -120,7 +120,7 @@ class Analytics {
 
   collectJobs(jobs) {
     for (const job of jobs) {
-      if (!this.config.repositories.some((r) => r.name === job.repository) || !Number.isSafeInteger(job.number)) continue;
+      if (!/^[\w.-]+\/[\w.-]+$/.test(job.repository || "") || !Number.isSafeInteger(job.number)) continue;
       const id = String(job.id), previous = this.ledger.jobs[id];
       this.ledger.jobs[id] = { ...previous, id, repository: job.repository, number: job.number, head: job.head, base: job.base,
         createdAt: job.createdAt, startedAt: job.startedAt, updatedAt: job.updatedAt || job.createdAt, state: job.state,
@@ -183,7 +183,8 @@ class Analytics {
 
   async collectSessions(cutoff) {
     const workspaces = new Map();
-    for (const repository of this.config.repositories) {
+    for (const name of new Set([...this.config.repositories.map((r) => r.name), ...Object.values(this.ledger.jobs).map((j) => j.repository)])) {
+      const repository = { name };
       workspaces.set(path.join(this.config.stateDirectory, "repositories", ...repository.name.split("/")), repository.name);
       for (const entry of entries(path.join(this.config.stateDirectory, "worker-repositories"))) {
         if (entry.isDirectory() && /^\d+$/.test(entry.name)) workspaces.set(
