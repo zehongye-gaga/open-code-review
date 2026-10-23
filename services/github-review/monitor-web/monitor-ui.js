@@ -163,7 +163,7 @@ function render() {
   set("findings", data.github.updatedAt ? attention.length : "—");
   set("findings-detail", `${t("failure")} ${attention.filter((pr) => [pr.ocr, pr.cragent].some((s) => s.state === "failure")).length} · ${t("error")} ${attention.filter((pr) => [pr.ocr, pr.cragent].some((s) => s.state === "error")).length}`);
   set("tokens", data.services.ocr.sourceError ? "—" : compact(data.usage.totalTokens));
-  set("tokens-detail", `${data.usage.reports} ${t("reports")} · ${t("cache")} ${compact(data.usage.cacheReadTokens)}${data.usage.expectedReports !== data.usage.reports ? ` · ${t("reportMissing")} ${data.usage.expectedReports - data.usage.reports}` : ""}`);
+  set("tokens-detail", `${data.usage.reports} ${t("reports")}${data.usage.expectedReports !== data.usage.reports ? ` · ${t("reportMissing")} ${data.usage.expectedReports - data.usage.reports}` : ""}`);
   $("services").replaceChildren(...Object.entries(data.services).filter(([, service]) => service).map(([key, service]) => serviceCard(key, { ...service, healthy: service.healthy && !localStale && !disconnected })));
   const resources = $("resources"), host = data.resources; resources.replaceChildren();
   for (const volume of host.volumes) resources.append(resource(volume.label, volume.totalBytes === null ? null : volume.totalBytes - volume.availableBytes, volume.totalBytes, `${bytes(volume.availableBytes)} ${t("available")} / ${bytes(volume.totalBytes)}`));
@@ -225,7 +225,7 @@ function renderAudit(data) {
   for (const repository of agents.keys()) if (!repos.has(repository)) repos.set(repository, { repository, pullRequests: 0, reviews: 0, sessions: 0 });
   for (const r of [...repos.values()].sort((a,b) => (b.totalTokens || 0) + (agents.get(b.repository)?.total || 0) - (a.totalTokens || 0) - (agents.get(a.repository)?.total || 0))) {
     const row = node("tr"), agent = agents.get(r.repository);
-    for (const value of [r.repository, `${r.pullRequests} / ${r.reviews}${r.usageMissingJobs ? ` · ${r.usageMissingJobs} ${t("missingUsageJobs")}` : ""}`, agent ? compact(agent.total) : "—", r.sessions ? compact(r.totalTokens) : t("tokenUnknown"), `${compact(r.inputTokens)} / ${compact(r.outputTokens)}`, compact(r.cacheReadTokens)]) row.append(node("td", "mono", value));
+    for (const value of [r.repository, `${r.pullRequests} / ${r.reviews}${r.usageMissingJobs ? ` · ${r.usageMissingJobs} ${t("missingUsageJobs")}` : ""}`, agent ? compact(agent.total) : "—", r.sessions ? compact(r.totalTokens) : t("tokenUnknown"), `${compact(r.inputTokens)} / ${compact(r.outputTokens)}`]) row.append(node("td", "mono", value));
     if (agent) row.children[2].append(node("p", "muted", `${compact(agent.input)} / ${compact(agent.output)}`));
     usage.append(row);
   }
