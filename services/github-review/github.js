@@ -39,6 +39,7 @@ function createGitHub({ tokenFile, token, api = "https://api.github.com", fetchI
     pulls: {
       get: (p) => request("GET", pullPath(p)),
       list: (p) => request("GET", `${repoPath(p)}/pulls${page(p)}&state=open&sort=updated&direction=desc`),
+      listForHead: (p) => request("GET", `${repoPath(p)}/pulls${page(p)}&state=open&head=${encodeURIComponent(p.head)}`),
       listFiles: (p) => request("GET", `${pullPath(p)}/files${page(p)}`),
       listReviews: (p) => request("GET", `${pullPath(p)}/reviews${page(p)}`),
       listReviewComments: (p) => request("GET", `${pullPath(p)}/comments${page(p)}&sort=updated&direction=desc`),
@@ -49,8 +50,10 @@ function createGitHub({ tokenFile, token, api = "https://api.github.com", fetchI
       createComment: (p) => request("POST", `${repoPath(p)}/issues/${p.issue_number}/comments`, { body: p.body }),
       updateComment: (p) => request("PATCH", `${repoPath(p)}/issues/comments/${p.comment_id}`, { body: p.body }),
     },
+    checks: { listForRef: (p) => request("GET", `${repoPath(p)}/commits/${encodeURIComponent(p.ref)}/check-runs${page(p)}`) },
     users: { getAuthenticated: () => request("GET", "/user") },
     repos: {
+      getCombinedStatusForRef: (p) => request("GET", `${repoPath(p)}/commits/${encodeURIComponent(p.ref)}/status${page(p)}`),
       createCommitStatus: (p) => request("POST", `${repoPath(p)}/statuses/${p.sha}`, omit(p, ["owner", "repo", "sha"])),
     },
   };
