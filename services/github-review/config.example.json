@@ -11,6 +11,7 @@
   "provider": "openai-codex",
   "model": "gpt-6-astra",
   "budget": 0,
+  "prConcurrency": 1,
   "pollSeconds": 30,
   "bootstrapExisting": true,
   "timeoutSeconds": 1500,

@@ -1,0 +1,31 @@
+[Unit]
+Description=OpenCodeReview read-only review dashboard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ocr-review
+Group=ocr-review
+WorkingDirectory=/opt/open-code-review/service
+ExecStart=/usr/bin/node /opt/open-code-review/service/services/github-review/monitor.js /etc/ocr-review/monitor.json
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+MemoryMax=384M
+CPUQuota=25%
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+StateDirectory=ocr-monitor
+ReadWritePaths=/var/lib/ocr-monitor
+ProtectHome=true
+PrivateTmp=true
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

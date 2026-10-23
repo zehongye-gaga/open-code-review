@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{{pageTitle}}</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/monitor.css">
+  <script src="/monitor-view.js" defer></script>
+  <script src="/monitor-analytics.js" defer></script>
+  <script src="/monitor-ui.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead">
+      <a href="/" class="brand" aria-label="{{homeLabel}}"><span class="brand-icon">R<span>↗</span></span><span>REVIEW<span class="brand-sub">OBSERVATORY</span></span></a>
+      <div class="header-right"><span class="live" id="connection">{{connecting}}</span><span id="clock" class="clock"></span><button id="refresh" class="button">{{refreshButton}}</button></div>
+    </header>
+    <section class="intro"><div><p class="eyebrow">GITHUB CODE REVIEW / OPERATIONS</p><h1>{{dashboardTitle}}<span class="title-dot">.</span></h1><p class="subtitle">{{intro}}</p></div><div class="update-info"><span>{{refreshCadence}}</span><strong id="last-update">{{waitingSnapshot}}</strong></div></section>
+    <div id="notice" class="notice" role="status">{{initialNotice}}</div>
+    <section class="kpis" aria-label="{{metricsLabel}}">
+      <div class="kpi"><div class="kpi-label"><span>{{activeTitle}}</span><span class="kpi-symbol blue">↗</span></div><strong id="running">—</strong><p id="running-detail">OCR + CR Agent</p></div>
+      <div class="kpi"><div class="kpi-label"><span>{{queueTitle}}</span><span class="kpi-symbol amber">◷</span></div><strong id="queued">—</strong><p id="queue-detail">{{queueSubtitle}}</p></div>
+      <div class="kpi"><div class="kpi-label"><span>{{attentionTitle}}</span><span class="kpi-symbol rose">!</span></div><strong id="findings">—</strong><p id="findings-detail">{{attentionSubtitle}}</p></div>
+      <div class="kpi"><div class="kpi-label"><span>{{usageTitle}}</span><span class="kpi-symbol mint">⌁</span></div><strong id="tokens">—</strong><p id="tokens-detail">{{usageWaiting}}</p></div>
+    </section>
+    <section class="panel work-panel"><div class="panel-heading"><h2><span class="dot blue-dot"></span>{{workTitle}}</h2><span class="muted" id="work-count"></span></div><div id="work" class="work-grid"></div></section>
+    <section class="panel analytics-panel" id="analytics-panel" hidden>
+      <div class="panel-heading"><div><h2>{{analyticsTitle}}</h2><p class="section-note" id="analytics-scope"></p></div><div class="filters" aria-label="{{analyticsPeriod}}"><button class="filter selected" data-period="today">{{today}}</button><button class="filter" data-period="week">{{thisWeek}}</button><button class="filter" data-period="month">{{last30Days}}</button><button class="filter" data-period="retained">{{retainedHistory}}</button></div></div>
+      <div id="analytics-notice" class="analytics-notice" role="status"></div>
+      <div id="analytics-stats" class="analytics-stats"></div>
+      <div class="analytics-charts">
+        <div class="trend-panel"><div class="trend-heading"><h3>{{trendTitle}}</h3><div class="chart-controls"><select id="trend-metric" aria-label="{{trendMetric}}"><option value="totalTokens">Token</option><option value="findings">{{findingOccurrences}}</option><option value="completed">{{finishedReviews}}</option><option value="nativeSeconds">{{nativeTime}}</option></select><select id="trend-grain" aria-label="{{trendGrain}}"><option value="daily">{{dailyView}}</option><option value="weekly">{{weeklyView}}</option></select></div></div><div id="analytics-chart" class="analytics-chart"></div></div>
+        <div class="phase-panel"><h3>{{phaseTitle}}</h3><p class="section-note">{{phaseScope}}</p><div id="analytics-phases"></div></div>
+      </div>
+      <p class="analytics-definition">{{analyticsDefinition}}</p>
+    </section>
+    <section class="panel analytics-pulls-panel" id="analytics-pulls-panel" hidden>
+      <div class="panel-heading"><div><h2>{{pullAnalyticsTitle}}</h2><p class="section-note">{{pullAnalyticsScope}}</p></div><span id="analytics-pull-count" class="count"></span></div>
+      <div class="table-toolbar"><input type="search" id="analytics-search" placeholder="{{analyticsSearch}}" aria-label="{{analyticsSearch}}"><select id="analytics-sort" aria-label="{{analyticsSort}}"><option value="recent">{{sortRecent}}</option><option value="tokens">{{sortTokens}}</option><option value="findings">{{sortFindings}}</option><option value="duration">{{sortDuration}}</option></select></div>
+      <div class="table-scroll"><table><thead><tr><th>PR</th><th>{{latestFinding}}</th><th>{{reviewCounts}}</th><th>Token</th><th>{{nativeTime}}</th><th>{{retryResume}}</th><th>{{details}}</th></tr></thead><tbody id="analytics-pulls"></tbody></table></div>
+      <div class="table-foot"><span>{{pullAnalyticsHint}}</span><button id="analytics-more" class="button">{{showMore}}</button></div>
+    </section>
+    <dialog id="analytics-dialog" class="analytics-dialog"><div class="panel-heading"><div><h2 id="analytics-detail-title"></h2><p class="section-note">{{detailScope}}</p></div><button id="analytics-close" class="button">{{close}}</button></div><div id="analytics-detail" class="table-scroll"></div></dialog>
+    <div class="main-grid">
+      <main class="panel pr-panel">
+        <div class="panel-heading"><div><h2>Pull Requests</h2><p class="section-note">{{prSubtitle}}</p></div><span class="count" id="pr-count">—</span></div>
+        <div class="table-toolbar"><div class="filters" role="group" aria-label="{{filterLabel}}"><button class="filter selected" data-filter="tracked">{{trackedFilter}}</button><button class="filter" data-filter="attention">{{attentionFilter}}</button><button class="filter" data-filter="all">{{allFilter}}</button></div><input id="search" type="search" placeholder="{{searchPlaceholder}}" aria-label="{{searchPlaceholder}}"></div>
+        <div class="table-scroll"><table><thead><tr><th class="pr-heading">{{prColumn}}</th><th>OCR</th><th>CR Agent</th><th>{{updatedColumn}}</th></tr></thead><tbody id="pulls"></tbody></table></div>
+        <div class="table-foot"><span id="coverage">{{waitingCoverage}}</span><span><i class="legend-dot"></i> {{coverageNote}}</span></div>
+      </main>
+      <aside class="sidebar">
+        <section class="panel"><div class="panel-heading"><h2>{{servicesTitle}}</h2><span class="eyebrow">LIVE</span></div><div id="services"></div></section>
+        <section class="panel resource-panel"><div class="panel-heading"><h2>{{resourcesTitle}}</h2><span class="muted">{{liveSnapshot}}</span></div><div id="resources"></div></section>
+      </aside>
+    </div>
+    <section class="panel history-panel"><div class="panel-heading"><div><h2>{{historyTitle}}</h2><p class="section-note">{{historySubtitle}}</p></div><span class="eyebrow">RECENT ACTIVITY</span></div><div class="history-scroll"><table><thead><tr><th>{{historyPRColumn}}</th><th>{{engineColumn}}</th><th>{{resultColumn}}</th><th>Token</th><th>{{finishedColumn}}</th></tr></thead><tbody id="history"></tbody></table></div></section>
+    <footer><span>REVIEW OBSERVATORY <span class="footer-sep">/</span> {{readOnlyFooter}}</span><span>{{usageFooter}}</span></footer>
+  </div>
+  <script type="application/json" id="copy">{{copy}}</script>
+</body>
+</html>
