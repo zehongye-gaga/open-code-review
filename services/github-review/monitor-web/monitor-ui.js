@@ -28,6 +28,8 @@ function ago(value) {
   return `${duration(Math.max(0, (Date.now() - Date.parse(value)) / 1000))}${t("ago")}`;
 }
 const time = (value) => value ? new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "—";
+let repository = new URLSearchParams(location.search).get("repository")?.toLowerCase() || "";
+let refreshAgain = false;
 let snapshot = null, filter = "tracked", busy = false, disconnected = false;
 
 function link(label, url, className) {
@@ -80,7 +82,7 @@ function renderWork(data) {
   }
   for (const job of data.work) {
     const card = node("div", `work-card${job.overdue ? " overdue" : ""}`), top = node("div", "work-card-top");
-    top.append(link(`#${job.number}`, `https://github.com/${job.repository}/pull/${job.number}`), badge(job.state === "running" ? "running" : "pending", t(job.state === "queued" && job.attempt > 0 ? "retry" : job.state)));
+    top.append(link(`${job.repository} #${job.number}`, `https://github.com/${job.repository}/pull/${job.number}`), badge(job.state === "running" ? "running" : "pending", t(job.state === "queued" && job.attempt > 0 ? "retry" : job.state)));
     const pr = data.pulls.find((p) => p.repository === job.repository && p.number === job.number);
     const relation = !pr ? "" : ` · ${t(pr.head === job.head ? "current" : "previous")}`;
     card.append(top, node("p", "work-meta", `${t(job.engine)} · ${String(job.head || "").slice(0, 8)}${relation}`),
@@ -116,7 +118,7 @@ function renderPulls(data) {
 function renderHistory(data) {
   const tbody = $("history"); tbody.replaceChildren();
   for (const job of data.history.slice(0, 35)) {
-    const row = node("tr"), pr = node("td"); pr.append(link(`#${job.number}`, job.resultURL || `https://github.com/${job.repository}/pull/${job.number}`, "pr-number"), node("span", "mono muted", String(job.head || "").slice(0, 8)));
+    const row = node("tr"), pr = node("td"); pr.append(link(`${job.repository} #${job.number}`, job.resultURL || `https://github.com/${job.repository}/pull/${job.number}`, "pr-number"), node("span", "mono muted", String(job.head || "").slice(0, 8)));
     const result = node("td");
     let label = t(job.state);
     if (job.state === "complete" && job.findings !== null) label = job.findings > 0 ? `${job.findings} ${t("findings")}` : t("clean");
@@ -135,6 +137,11 @@ function render() {
     set("connection", t(connection)); $("connection").className = `live${disconnected ? " rose" : ""}`;
     return;
   }
+  const selector = $("repository");
+  selector.replaceChildren(node("option", "", t("allRepositories")), ...(data.repositories || []).map((name) => {
+    const option = node("option", "", name); option.value = name; return option;
+  }));
+  selector.options[0].value = ""; selector.value = repository;
   const localStale = data.stale || Date.now() - Date.parse(data.collectedAt) > 45000;
   const githubStale = data.github.stale || data.github.error || Date.now() - Date.parse(data.github.updatedAt) > 180000;
   const services = Object.values(data.services).filter(Boolean), warnings = [];
@@ -149,9 +156,9 @@ function render() {
   set("connection", t(connection));
   $("connection").className = `live${disconnected || localStale ? " rose" : ""}`;
   set("last-update", `${t("updated")} ${time(data.collectedAt)} · ${t("githubUpdated")} ${ago(data.github.updatedAt)}`);
-  set("running", services.reduce((n, s) => n + s.running, 0));
-  set("running-detail", services.map((s, i) => `${i === 0 ? "OCR" : "CR Agent"} ${s.running}/${s.concurrency || "?"}`).join(" · "));
-  set("queued", services.reduce((n, s) => n + s.queued, 0));
+  set("running", Object.values(data.scopedCounts || data.services).filter(Boolean).reduce((n, s) => n + s.running, 0));
+  set("running-detail", services.map((s, i) => `${i === 0 ? "OCR" : "CR Agent"} ${data.scopedCounts?.[i === 0 ? "ocr" : "cragent"]?.running ?? s.running}`).join(" · "));
+  set("queued", Object.values(data.scopedCounts || data.services).filter(Boolean).reduce((n, s) => n + s.queued, 0));
   const attention = data.pulls.filter((pr) => pr.inScope && needsAction(pr));
   set("findings", data.github.updatedAt ? attention.length : "—");
   set("findings-detail", `${t("failure")} ${attention.filter((pr) => [pr.ocr, pr.cragent].some((s) => s.state === "failure")).length} · ${t("error")} ${attention.filter((pr) => [pr.ocr, pr.cragent].some((s) => s.state === "error")).length}`);
@@ -162,22 +169,39 @@ function render() {
   for (const volume of host.volumes) resources.append(resource(volume.label, volume.totalBytes === null ? null : volume.totalBytes - volume.availableBytes, volume.totalBytes, `${bytes(volume.availableBytes)} ${t("available")} / ${bytes(volume.totalBytes)}`));
   resources.append(resource(t("memoryUsed"), host.memoryTotalBytes - host.memoryAvailableBytes, host.memoryTotalBytes, `${bytes(host.memoryAvailableBytes)} ${t("available")} / ${bytes(host.memoryTotalBytes)}`));
   const load = node("div", "load-row"); load.append(node("span", "", t("load")), node("span", "mono", `${host.load[0].toFixed(2)} / ${host.cpuCount} ${t("cores")}`)); resources.append(load);
+  if (host.cpu) resources.append(resource(t("cpuUsage"), host.cpu.busy, 100, `${t("kernelUsage")} ${host.cpu.system.toFixed(1)}% · ${t("ioWait")} ${host.cpu.iowait.toFixed(1)}%`));
+  if (host.swapTotalBytes) resources.append(resource(t("swapUsage"), host.swapTotalBytes - host.swapFreeBytes, host.swapTotalBytes, `${bytes(host.swapFreeBytes)} / ${bytes(host.swapTotalBytes)}`));
+  for (const volume of host.volumes) if (volume.totalInodes) resources.append(resource(`${volume.label} ${t("inodeUsage")}`, volume.totalInodes - volume.freeInodes, volume.totalInodes, `${compact(volume.freeInodes)} ${t("available")}`));
+  resources.append(node("p", "section-note", t("resourceThresholds")));
+  renderAudit(data);
   renderWork(data); renderPulls(data); renderHistory(data); window.OCRAnalytics.render(data);
 }
 
 async function refresh() {
-  if (busy) return;
+  if (busy) { refreshAgain = true; return; }
+  const requestedRepository = repository;
   busy = true; $("refresh").disabled = true;
   try {
-    const response = await fetch("/api/status", { cache: "no-store", signal: AbortSignal.timeout(8000) });
+    const response = await fetch(`/api/status?${new URLSearchParams({ repository: requestedRepository })}`, { cache: "no-store", signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error("Snapshot unavailable");
-    snapshot = await response.json(); disconnected = false;
+    const next = await response.json();
+    if (requestedRepository === repository) { snapshot = next; disconnected = false; }
   } catch { disconnected = true; }
   finally { busy = false; $("refresh").disabled = false; }
   if (!snapshot && disconnected) { set("notice", t("fetchError")); $("notice").className = "notice danger"; set("connection", t("disconnected")); }
-  else render();
+  else if (snapshot?.repository === repository) render();
+  if (refreshAgain) { refreshAgain = false; void refresh(); }
 }
 
+$("repository").addEventListener("change", () => {
+  repository = $("repository").value;
+  const url = new URL(location.href);
+  if (repository) url.searchParams.set("repository", repository); else url.searchParams.delete("repository");
+  history.replaceState(null, "", url);
+  if ($("analytics-dialog").open) $("analytics-dialog").close();
+  set("notice", t("loading"));
+  void refresh();
+});
 $("refresh").addEventListener("click", refresh);
 $("search").addEventListener("input", () => { if (snapshot?.ready) renderPulls(snapshot); });
 document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => {
@@ -189,3 +213,26 @@ setInterval(() => set("clock", new Date().toLocaleTimeString("zh-CN", { hour12: 
 setInterval(refresh, 10000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refresh(); });
 void refresh();
+
+function renderAudit(data) {
+  const usage = $("repo-usage"); usage.replaceChildren();
+  for (const r of data.repositoryUsage || []) {
+    const row = node("tr");
+    for (const value of [r.repository, `${r.pullRequests} / ${r.reviews}${r.usageMissingJobs ? ` · ${r.usageMissingJobs} ${t("missingUsageJobs")}` : ""}`, r.sessions ? compact(r.totalTokens) : t("tokenUnknown"), `${compact(r.inputTokens)} / ${compact(r.outputTokens)}`, compact(r.cacheReadTokens)]) row.append(node("td", "mono", value));
+    usage.append(row);
+  }
+  const body = $("audit"), query = $("audit-search").value.toLowerCase().trim(); body.replaceChildren();
+  for (const r of (data.audit || []).filter((r) => `${r.repository} #${r.number} ${r.head} ${r.jobId}`.toLowerCase().includes(query))) {
+    const row = node("tr"), name = node("td"), route = node("td"), status = node("td"), stages = node("td", "audit-stages");
+    name.append(link(`${r.repository} #${r.number || "—"}`, r.number ? `https://github.com/${r.repository}/pull/${r.number}` : `https://github.com/${r.repository}`), node("p", "mono muted", `${String(r.head || "").slice(0, 8)} · ${r.jobId || "—"}`));
+    route.append(badge(r.actualRoute === "direct_fallback" ? "pending" : "neutral", t(r.actualRoute)), node("p", "muted", `${t("plannedRoute")}: ${t(r.requestedRoute)}${r.reused ? ` · ${t("reusedTask")}` : ""}`));
+    if (r.profile) route.append(node("p", "mono muted", `${r.profile} · ${t("budgetLabel")} ${r.budget === 0 ? t("unlimited") : r.budget == null ? "—" : compact(r.budget)}`));
+    status.append(badge(r.state === "failed" || r.blocking > 0 ? "failure" : r.state === "complete" ? "success" : ["ignored", "expanded", "superseded"].includes(r.state) ? "neutral" : "pending", t(r.state)));
+    if (r.findings != null) status.append(node("p", "muted", `${r.findings} ${t("findings")} / ${r.blocking || 0} blocked`));
+    if (r.fallbackReason) status.append(node("p", "muted", r.fallbackReason));
+    for (const stage of r.stages) stages.append(node("div", "", `${t(stage.stage)} · ${time(stage.at)}`));
+    row.append(name, node("td", "", t(r.ingress)), route, status, stages); body.append(row);
+  }
+  if (!body.children.length) { const row = node("tr"), cell = node("td", "empty-cell", t("auditEmpty")); cell.colSpan = 5; row.append(cell); body.append(row); }
+}
+$("audit-search").addEventListener("input", () => { if (snapshot?.ready) renderAudit(snapshot); });
