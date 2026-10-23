@@ -209,7 +209,7 @@
   "allRepositories": "全部仓库",
   "globalServicesNote": "审查数据随仓库切换；服务健康和服务器资源为全局数据",
   "repoUsageTitle": "仓库 Token 消耗排行",
-  "repoUsageNote": "OCR：已留存原生会话的 Token；Agent：已绑定 PR 会话的平台报告 Token，尚未确认是否完整包含 sub-agent。缺失显示 —，不代表零消耗或账单金额。",
+  "repoUsageNote": "OCR：已留存原生会话的 Token；Agent：已绑定 PR 父会话及平台可读取子会话的 Token（递归去重汇总）。缺失显示 —，不代表零消耗或账单金额。",
   "inputOutput": "输入 / 输出",
   "auditTitle": "审计链路记录",
   "auditNote": "展示最近 200 条接收记录，可按仓库切换；多个入口可复用同一任务，历史缺失信息显示未知。",

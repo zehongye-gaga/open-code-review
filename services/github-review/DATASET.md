@@ -27,3 +27,14 @@ The dataset is observational, not ground truth. A model finding or successful CI
 prove correctness. Human acceptance/rejection, fix linkage, false-positive adjudication and
 post-merge outcomes require a separate labeling step. Source reports removed before collection
 cannot be reconstructed. Monitor health exposes dataset write errors and Agent usage staleness.
+
+Agent usage now follows `/v1/agent-chat/session-children` recursively, including
+pagination, and sums each reachable session's own input/output counters once.
+`components` contains hashed session identities, depth and counters;
+`childInputTokens`, `childOutputTokens` and `childSessions` expose the child share.
+Repeated polls replace cumulative observations; do not sum snapshots across time.
+Traversal failures, missing counters, cycles or cross-PR attribution conflicts
+retain the previous snapshot and flag an error instead of publishing partial totals.
+Coverage is limited to bound PR roots and child sessions visible to the API credential;
+deleted/inaccessible history or legacy unlinked tasks cannot be inferred as zero.
+Native OCR worker usage remains in `ocr_run`, separate from InsightFlow sessions.
