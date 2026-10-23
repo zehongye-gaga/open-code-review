@@ -9,6 +9,8 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { auditRows, repositoryUsage, cpuSample } = require("./monitor-audit.js");
+const { AgentUsage } = require("./agent-usage.js");
+const { ReviewDataset, resultRecords } = require("./review-dataset.js");
 const { Analytics } = require("./analytics.js");
 const { runRows, summarize } = require("./analytics-summary.js");
 
@@ -187,6 +189,8 @@ class Monitor {
     this.config.repositories = this.config.repositories.map((repository) => ({ ...repository, name: canonicalRepo(repository.name) }));
     this.reports = new ReportCache(this.config.stateDirectory);
     this.analytics = options.analytics ? new Analytics(this.config, options.analytics) : null;
+    this.agentUsage = options.analytics ? new AgentUsage(this.config.infrastructure?.agentDispatch, options.analytics.directory) : null;
+    this.dataset = options.analytics ? new ReviewDataset(options.analytics.directory) : null;
     this.local = null;
     this.remote = { pulls: [], updatedAt: null, error: false, remaining: null };
     this.localBusy = false; this.githubBusy = false;
@@ -210,6 +214,7 @@ class Monitor {
         if (state.version !== 1 || !Array.isArray(state.jobs)) throw new Error("Invalid OCR state");
         nativeJobs = state.jobs;
         audit = auditRows(state);
+        void this.agentUsage?.collect(state.agentSessions);
         ocrJobs = state.jobs.map(ocrRow);
       } catch { ocrError = true; ocrJobs = previous?.ocrJobs || []; }
       for (const source of this.options.cragent?.states || []) {
@@ -247,7 +252,14 @@ class Monitor {
           analytics = { ...await this.analytics.collect(nativeJobs, now), error: false };
         } catch { analytics = { ...analytics, error: true }; }
       }
-      this.local = { audit, collectedAt: new Date(this.now()).toISOString(), ocrJobs, crJobs, usage, analytics, completedUsage: completed.map((job) => ({ repository: canonicalRepo(job.repository), report: reports.get(String(job.id)) || null })),
+      let datasetError = false;
+      try {
+        this.dataset?.append("dispatch", audit);
+        if (this.dataset) this.dataset.append("review_result", resultRecords(nativeJobs, this.config.stateDirectory));
+        if (this.analytics) this.dataset?.append("ocr_run", runRows(this.analytics.ledger));
+        this.dataset?.append("agent_usage", (this.agentUsage?.snapshot().sessions || []).map(({ observedAt, ...r }) => r));
+      } catch { datasetError = true; }
+      this.local = { datasetError, audit, collectedAt: new Date(this.now()).toISOString(), ocrJobs, crJobs, usage, analytics, completedUsage: completed.map((job) => ({ repository: canonicalRepo(job.repository), report: reports.get(String(job.id)) || null })),
         resources: this.resources(this.options.volumes || [{ label: "Root", path: "/" }, { label: "Review data", path: this.config.stateDirectory }]),
         services: {
           ocr: { ...ocrUnit, ...ocrCounts, running: health.running ?? ocrCounts.running, queued: health.queued ?? ocrCounts.queued,
@@ -328,6 +340,7 @@ class Monitor {
       services, resources: local.resources, usage, analytics,
       audit: (local.audit || []).filter(matches).slice(0, 200),
       repositoryUsage: repositoryUsage(analytics?.pulls || []),
+      agentUsage: this.agentUsage?.snapshot(repository) || null, dataset: { enabled: Boolean(this.dataset), error: local.datasetError },
       work: latest(work)
         .map((job) => ({ ...job, elapsedSeconds: age(job.startedAt || job.createdAt || job.updatedAt, now),
           overdue: job.state === "running" && age(job.startedAt || job.updatedAt, now) > (services[job.engine]?.timeoutSeconds || 2700) + 120 })),

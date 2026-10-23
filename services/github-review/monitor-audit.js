@@ -20,6 +20,11 @@ function auditRows(state) {
       ["published", event.published?.at]].map(([stage, at]) => ({ stage, at: date(at) })).filter((s) => s.at).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     return { id: String(event.id || event.request_id || job?.id), ingress, repository: repo(event.repository || job?.repository),
       number: event.number || event.pull_number || job?.number, head: event.head || event.head_sha || job?.head,
+      base: event.base || event.base_sha || job?.base || null, baseRef: event.base_ref || job?.baseRef || null,
+      action: event.action || null, reviewMode: job?.range?.mode || null, rangeFrom: job?.range?.from || null,
+      model: job?.settings?.options?.model || null, effort: job?.settings?.options?.effort || null,
+      reviewAttempts: job?.attempt || 0, retryBudget: job?.retryBudget ?? null,
+      coverage: job?.progress ? { selected: job.progress.selected ?? null, complete: job.progress.complete === true, budgetExceeded: job.progress.budgetExceeded === true } : null,
       jobId: job ? String(job.id) : null, requestedRoute: event.route || "unknown", actualRoute: actual,
       reused: event.dispatchMethod === "reused_existing", state: job?.state || event.state,
       dispatchState: event.state, attempts: event.attempts || event.dispatchAttempts || 0,

@@ -216,21 +216,34 @@ void refresh();
 
 function renderAudit(data) {
   const usage = $("repo-usage"); usage.replaceChildren();
-  for (const r of data.repositoryUsage || []) {
-    const row = node("tr");
-    for (const value of [r.repository, `${r.pullRequests} / ${r.reviews}${r.usageMissingJobs ? ` · ${r.usageMissingJobs} ${t("missingUsageJobs")}` : ""}`, r.sessions ? compact(r.totalTokens) : t("tokenUnknown"), `${compact(r.inputTokens)} / ${compact(r.outputTokens)}`, compact(r.cacheReadTokens)]) row.append(node("td", "mono", value));
+  const agents = new Map();
+  for (const r of data.agentUsage?.sessions || []) {
+    const a = agents.get(r.repository) || { total: 0, input: 0, output: 0, count: 0 };
+    a.total += r.totalTokens; a.input += r.inputTokens; a.output += r.outputTokens; a.count++; agents.set(r.repository, a);
+  }
+  const repos = new Map((data.repositoryUsage || []).map((r) => [r.repository, r]));
+  for (const repository of agents.keys()) if (!repos.has(repository)) repos.set(repository, { repository, pullRequests: 0, reviews: 0, sessions: 0 });
+  for (const r of [...repos.values()].sort((a,b) => (b.totalTokens || 0) + (agents.get(b.repository)?.total || 0) - (a.totalTokens || 0) - (agents.get(a.repository)?.total || 0))) {
+    const row = node("tr"), agent = agents.get(r.repository);
+    for (const value of [r.repository, `${r.pullRequests} / ${r.reviews}${r.usageMissingJobs ? ` · ${r.usageMissingJobs} ${t("missingUsageJobs")}` : ""}`, agent ? compact(agent.total) : "—", r.sessions ? compact(r.totalTokens) : t("tokenUnknown"), `${compact(r.inputTokens)} / ${compact(r.outputTokens)}`, compact(r.cacheReadTokens)]) row.append(node("td", "mono", value));
+    if (agent) row.children[2].append(node("p", "muted", `${compact(agent.input)} / ${compact(agent.output)}`));
     usage.append(row);
   }
+  set("agent-usage-note", `${t("agentUsageNote")} ${data.agentUsage?.collectedAt ? time(data.agentUsage.collectedAt) : t("never")}${data.agentUsage?.error || data.agentUsage?.stale ? ` · ${t("agentUsageStale")}` : ""} · ${t(data.dataset?.error ? "datasetError" : "datasetReady")}`);
+  const taskReceipts = new Map();
+  for (const r of data.audit || []) if (r.jobId) taskReceipts.set(r.jobId, (taskReceipts.get(r.jobId) || 0) + 1);
   const body = $("audit"), query = $("audit-search").value.toLowerCase().trim(); body.replaceChildren();
   for (const r of (data.audit || []).filter((r) => `${r.repository} #${r.number} ${r.head} ${r.jobId}`.toLowerCase().includes(query))) {
     const row = node("tr"), name = node("td"), route = node("td"), status = node("td"), stages = node("td", "audit-stages");
     name.append(link(`${r.repository} #${r.number || "—"}`, r.number ? `https://github.com/${r.repository}/pull/${r.number}` : `https://github.com/${r.repository}`), node("p", "mono muted", `${String(r.head || "").slice(0, 8)} · ${r.jobId || "—"}`));
     route.append(badge(r.actualRoute === "direct_fallback" ? "pending" : "neutral", t(r.actualRoute)), node("p", "muted", `${t("plannedRoute")}: ${t(r.requestedRoute)}${r.reused ? ` · ${t("reusedTask")}` : ""}`));
+    if (taskReceipts.get(r.jobId) > 1) route.append(node("p", "shared-task", `${t("sharedTask")} · ${taskReceipts.get(r.jobId)} ${t("ingressReceipts")}`));
     if (r.profile) route.append(node("p", "mono muted", `${r.profile} · ${t("budgetLabel")} ${r.budget === 0 ? t("unlimited") : r.budget == null ? "—" : compact(r.budget)}`));
     status.append(badge(r.state === "failed" || r.blocking > 0 ? "failure" : r.state === "complete" ? "success" : ["ignored", "expanded", "superseded"].includes(r.state) ? "neutral" : "pending", t(r.state)));
     if (r.findings != null) status.append(node("p", "muted", `${r.findings} ${t("findings")} / ${r.blocking || 0} blocked`));
     if (r.fallbackReason) status.append(node("p", "muted", r.fallbackReason));
-    for (const stage of r.stages) stages.append(node("div", "", `${t(stage.stage)} · ${time(stage.at)}`));
+    const detail = node("details"), summary = node("summary", "", `${r.stages.length} ${t("stageCount")} · ${time(r.updatedAt)}`); detail.append(summary);
+    for (const stage of r.stages) detail.append(node("div", "", `${t(stage.stage)} · ${time(stage.at)}`)); stages.append(detail);
     row.append(name, node("td", "", t(r.ingress)), route, status, stages); body.append(row);
   }
   if (!body.children.length) { const row = node("tr"), cell = node("td", "empty-cell", t("auditEmpty")); cell.colSpan = 5; row.append(cell); body.append(row); }
