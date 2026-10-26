@@ -1,0 +1,20 @@
+[Unit]
+Description=OCR PR failure notifications to Feishu
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/root/.local/bin/node /data/crg/ocr-review/alerts-current/services/github-review/pr-alerts.js /etc/ocr-review/pr-alerts.json
+TimeoutStartSec=90
+MemoryMax=128M
+CPUQuota=10%
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+StateDirectory=ocr-pr-alerts
+ReadWritePaths=/var/lib/ocr-pr-alerts
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true

@@ -1,0 +1,18 @@
+{
+ "failed":"❌ OCR 审查执行失败",
+ "blocked":"⚠️ OCR 审查发现阻断问题（审查已完成）",
+ "repository":"仓库", "time":"失败时间", "reason":"原因", "rawReason":"原始原因",
+ "job":"任务", "attempt":"执行次数", "retries":"预算翻倍次数", "budget":"当前预算上限（Token）",
+ "route":"调度链路", "notice":"通知生成时间", "event":"告警编号", "unknown":"未知",
+ "test":"✅ OCR PR 失败告警已接通（连通性测试，不代表实际 PR 失败）。\n后续将通知仓库、PR、commit、北京时间、失败原因、预算及重试次数。执行失败和发现阻断问题会分别标明。",
+ "reasons":{
+  "Token budget guard stopped review before full coverage":"Token 预算耗尽，重试后仍未完成审查覆盖",
+  "n8n_tracking_stalled":"n8n 后台跟踪心跳中断",
+  "review_deadline_exceeded":"审查超过总等待时限",
+  "repository_access_failed":"无法访问 GitHub 仓库",
+  "dispatch_configuration_or_access_error":"调度配置或访问权限错误",
+  "dispatch_retries_exhausted":"调度重试次数已用尽",
+  "review_incomplete_or_failed":"审查未完成或执行失败",
+  "fetch failed":"网络请求失败，需结合任务日志确认具体阶段"
+ }
+}

@@ -24,11 +24,15 @@ npm run service:github-review -- /etc/ocr-review/config.json
 ```
 
 Copy `config.example.json`, replace `owner/repository` and its base branch, and
-create the configured private credential files. The GitHub credential needs
-repository contents read, pull requests write, issues write (summary comments)
-and commit statuses write. A classic PAT with access to the repositories also
-works. The token file is reread on every request, so it can be rotated without
-restarting. Installation-token generation for GitHub Apps is not included.
+create the configured private credential files. GitHub App installation authentication
+is the production path for API access, Git fetches, the monitor and benchmark
+collector, including automatic token renewal. See [GitHub App setup](GITHUB_APP.md).
+PAT mode remains an explicit rollback option, with no silent fallback from App mode.
+
+The deployed integration accepts both organization CI and repository webhooks
+through n8n. n8n selects the Agent path or default fallback; native OCR performs
+the actual review. See [current deployment](CURRENT_DEPLOYMENT.md),
+[organization CI](ORG-CI.md), and [infrastructure](INFRASTRUCTURE.md).
 
 First configure the native provider under the service account's `HOME`.
 `--provider` selects an existing OCR configuration entry, so sharing Codex
