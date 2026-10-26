@@ -34,10 +34,15 @@ function createMonitorServer(monitor, { bearerToken } = {}) {
       const supplied = Buffer.from(req.headers.authorization || ""), expected = Buffer.from(`Bearer ${bearerToken}`);
       if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return send(401, { error: "Unauthorized" });
     }
-    if (req.url === "/api/status") return send(200, monitor.snapshot());
     let url;
     try { url = new URL(req.url, "http://localhost"); }
     catch { return send(400, { error: "Invalid URL" }); }
+    if (url.pathname === "/api/status") {
+      const repository = url.searchParams.get("repository") || "";
+      if (repository && !/^[\w.-]+\/[\w.-]+$/.test(repository)) return send(400, { error: "Invalid repository" });
+      try { return send(200, monitor.snapshot(repository)); }
+      catch (error) { return send(error.status || 503, { error: error.status === 404 ? "Unknown repository" : "Snapshot unavailable" }); }
+    }
     if (url.pathname === "/api/analytics/pr") {
       const repository = url.searchParams.get("repository"), number = Number(url.searchParams.get("number"));
       if (!/^[\w.-]+\/[\w.-]+$/.test(repository || "") || !Number.isSafeInteger(number) || number < 1) {
@@ -50,7 +55,7 @@ function createMonitorServer(monitor, { bearerToken } = {}) {
       const snapshot = monitor.snapshot();
       return send(snapshot.ready && !snapshot.stale ? 200 : 503, { ready: snapshot.ready, collectedAt: snapshot.collectedAt });
     }
-    const asset = assets.get(req.url);
+    const asset = assets.get(url.pathname);
     if (!asset) return send(404, { error: "Not found" });
     res.writeHead(200, { "content-type": asset.type });
     res.end(asset.body);

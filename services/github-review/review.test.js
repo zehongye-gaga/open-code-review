@@ -162,15 +162,17 @@ test("real publisher shows an incomplete warning and a neutral skipped result", 
       listComments: async () => ({ data: [], headers: {} }),
       createComment: async ({ body }) => { bodies.push(body); return { data: { id: 1, html_url: "https://github.com/owner/repo/pull/1#issuecomment-1" } }; },
     };
+    h.github.rest.pulls.listReviews = async () => ({ data: [] });
+    h.github.rest.pulls.createReview = h.github.rest.issues.createComment;
     await publishReview({ ...h, directory });
     assert.equal(bodies.length, 1);
     assert.doesNotMatch(bodies[0], /✅/);
     if (state === "partial") {
-      assert.match(bodies[0], /incomplete review/);
+      assert.ok(bodies[0].includes(require("./round-summary.en.json").incomplete));
       assert.doesNotMatch(bodies[0], /Looks good to me/);
       assert.equal(h.failures.length, 1);
     } else {
-      assert.match(bodies[0], /No reviewable files/);
+      assert.ok(bodies[0].includes(require("./round-summary.en.json").skippedBody));
       assert.equal(h.failures.length, 0);
     }
   }
@@ -277,4 +279,18 @@ setInterval(() => {}, 1000);
   controller.abort();
   await running;
   assert.equal(fs.readFileSync(path.join(directory, "signals"), "utf8"), "TERM\n");
+});
+
+test("service summaries omit the legacy visible range note", async (t) => {
+  const directory = temp(t), h = harness();
+  saveResult(directory);
+  const file = path.join(directory, "metadata.json");
+  const metadata = JSON.parse(fs.readFileSync(file));
+  metadata.range = { mode: "checkpoint", from: base };
+  fs.writeFileSync(file, JSON.stringify(metadata));
+  await publishReview({ ...h, directory, post: async (args) => {
+    assert.equal(args.rangeFrom, undefined);
+    assert.equal(args.rangeMode, "checkpoint");
+    args.core.setOutput("summary_comment_url", "https://example.test/review");
+  } });
 });

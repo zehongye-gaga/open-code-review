@@ -207,3 +207,30 @@ test("incremental finding revalidation includes changed and previously flagged f
   assert.equal(retry.resume, sessionId);
   assert.deepEqual(retry.metadata.incrementalExclude, ["settled.go"]);
 });
+
+test("authorized unlimited retries resume settled work while semantic changes still invalidate it", async (t) => {
+  const h = fixture(t);
+  const oldConfig = { ...h.config, budget: 500000 };
+  const oldIdentity = await fingerprint({ ...h, config: oldConfig });
+  const progress = { fingerprint: oldIdentity, sessionId, selected: 30, workspace: h.cwd,
+    head: next, base, budgetExceeded: true, directory: "/previous-budget-run",
+    range: { mode: "full", from: base, to: next } };
+  const increase = { directory: progress.directory, reason: "native_budget_guard", from: 500000, to: 0 };
+  const options = { ...h, identify: undefined, config: { ...h.config, budget: 0 },
+    job: { progress, budgetRetries: [increase] } };
+  const resumed = await planReview(options);
+  assert.equal(resumed.resume, sessionId);
+  assert.equal(resumed.metadata.range.reason, "retry");
+  assert.equal(resumed.metadata.range.from, base);
+  assert.notEqual(resumed.metadata.fingerprint, oldIdentity);
+  for (const change of [
+    { config: { ...options.config, model: "changed-model" } },
+    { job: { progress, budgetRetries: [] } },
+    { job: { progress: { ...progress, head }, budgetRetries: [increase] } },
+    { job: { progress: { ...progress, workspace: "/another-worker" }, budgetRetries: [increase] } },
+    { job: { progress, budgetRetries: [{ ...increase, directory: "/different-run" }] } },
+    { config: { ...options.config, budget: 250000 } },
+  ]) assert.equal((await planReview({ ...options, ...change })).resume, undefined);
+  fs.writeFileSync(path.join(h.directory, "metadata.json"), JSON.stringify({ ...h.metadata, background: "New requirements" }));
+  assert.equal((await planReview(options)).resume, undefined);
+});

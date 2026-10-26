@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
   <title>{{pageTitle}}</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/monitor.css">
@@ -18,6 +18,7 @@
       <div class="header-right"><span class="live" id="connection">{{connecting}}</span><span id="clock" class="clock"></span><button id="refresh" class="button">{{refreshButton}}</button></div>
     </header>
     <section class="intro"><div><p class="eyebrow">GITHUB CODE REVIEW / OPERATIONS</p><h1>{{dashboardTitle}}<span class="title-dot">.</span></h1><p class="subtitle">{{intro}}</p></div><div class="update-info"><span>{{refreshCadence}}</span><strong id="last-update">{{waitingSnapshot}}</strong></div></section>
+    <div class="repository-toolbar"><label for="repository">{{repositoryLabel}}</label><select id="repository"><option value="">{{allRepositories}}</option></select><span class="muted">{{globalServicesNote}}</span></div>
     <div id="notice" class="notice" role="status">{{initialNotice}}</div>
     <section class="kpis" aria-label="{{metricsLabel}}">
       <div class="kpi"><div class="kpi-label"><span>{{activeTitle}}</span><span class="kpi-symbol blue">↗</span></div><strong id="running">—</strong><p id="running-detail">OCR + CR Agent</p></div>
@@ -25,6 +26,12 @@
       <div class="kpi"><div class="kpi-label"><span>{{attentionTitle}}</span><span class="kpi-symbol rose">!</span></div><strong id="findings">—</strong><p id="findings-detail">{{attentionSubtitle}}</p></div>
       <div class="kpi"><div class="kpi-label"><span>{{usageTitle}}</span><span class="kpi-symbol mint">⌁</span></div><strong id="tokens">—</strong><p id="tokens-detail">{{usageWaiting}}</p></div>
     </section>
+    <section class="panel"><div class="panel-heading"><div><h2>{{repoUsageTitle}}</h2><p class="section-note">{{repoUsageNote}}</p></div></div><div class="table-scroll"><table><thead><tr><th>{{repositoryLabel}}</th><th>PR / {{reviewCounts}}</th><th>{{agentTokens}}</th><th>OCR Token</th><th>{{inputOutput}}</th></tr></thead><tbody id="repo-usage"></tbody></table></div><p id="agent-usage-note" class="analytics-definition"></p></section>
+    <section class="panel"><div class="panel-heading"><div><h2>{{auditTitle}}</h2><p class="section-note">{{auditNote}}</p></div><input id="audit-search" type="search" placeholder="{{auditSearch}}" aria-label="{{auditSearch}}"></div><div class="audit-scroll"><table><thead><tr><th>PR / Commit</th><th>{{ingress}}</th><th>{{route}}</th><th>{{resultColumn}}</th><th>{{timeline}}</th></tr></thead><tbody id="audit"></tbody></table></div></section>
+      <aside class="sidebar" id="host-overview">
+        <section class="panel"><div class="panel-heading"><h2>{{servicesTitle}}</h2><span class="eyebrow">LIVE</span></div><div id="services"></div></section>
+        <section class="panel resource-panel"><div class="panel-heading"><h2>{{resourcesTitle}}</h2><span class="muted">{{liveSnapshot}}</span></div><div id="resources"></div></section>
+      </aside>
     <section class="panel work-panel"><div class="panel-heading"><h2><span class="dot blue-dot"></span>{{workTitle}}</h2><span class="muted" id="work-count"></span></div><div id="work" class="work-grid"></div></section>
     <section class="panel analytics-panel" id="analytics-panel" hidden>
       <div class="panel-heading"><div><h2>{{analyticsTitle}}</h2><p class="section-note" id="analytics-scope"></p></div><div class="filters" aria-label="{{analyticsPeriod}}"><button class="filter selected" data-period="today">{{today}}</button><button class="filter" data-period="week">{{thisWeek}}</button><button class="filter" data-period="month">{{last30Days}}</button><button class="filter" data-period="retained">{{retainedHistory}}</button></div></div>
@@ -47,13 +54,10 @@
       <main class="panel pr-panel">
         <div class="panel-heading"><div><h2>Pull Requests</h2><p class="section-note">{{prSubtitle}}</p></div><span class="count" id="pr-count">—</span></div>
         <div class="table-toolbar"><div class="filters" role="group" aria-label="{{filterLabel}}"><button class="filter selected" data-filter="tracked">{{trackedFilter}}</button><button class="filter" data-filter="attention">{{attentionFilter}}</button><button class="filter" data-filter="all">{{allFilter}}</button></div><input id="search" type="search" placeholder="{{searchPlaceholder}}" aria-label="{{searchPlaceholder}}"></div>
-        <div class="table-scroll"><table><thead><tr><th class="pr-heading">{{prColumn}}</th><th>OCR</th><th>CR Agent</th><th>{{updatedColumn}}</th></tr></thead><tbody id="pulls"></tbody></table></div>
+        <div class="table-scroll"><table><thead><tr><th class="pr-heading">{{prColumn}}</th><th>OCR</th><th>{{legacyAgent}}</th><th>{{updatedColumn}}</th></tr></thead><tbody id="pulls"></tbody></table></div>
         <div class="table-foot"><span id="coverage">{{waitingCoverage}}</span><span><i class="legend-dot"></i> {{coverageNote}}</span></div>
       </main>
-      <aside class="sidebar">
-        <section class="panel"><div class="panel-heading"><h2>{{servicesTitle}}</h2><span class="eyebrow">LIVE</span></div><div id="services"></div></section>
-        <section class="panel resource-panel"><div class="panel-heading"><h2>{{resourcesTitle}}</h2><span class="muted">{{liveSnapshot}}</span></div><div id="resources"></div></section>
-      </aside>
+
     </div>
     <section class="panel history-panel"><div class="panel-heading"><div><h2>{{historyTitle}}</h2><p class="section-note">{{historySubtitle}}</p></div><span class="eyebrow">RECENT ACTIVITY</span></div><div class="history-scroll"><table><thead><tr><th>{{historyPRColumn}}</th><th>{{engineColumn}}</th><th>{{resultColumn}}</th><th>Token</th><th>{{finishedColumn}}</th></tr></thead><tbody id="history"></tbody></table></div></section>
     <footer><span>REVIEW OBSERVATORY <span class="footer-sep">/</span> {{readOnlyFooter}}</span><span>{{usageFooter}}</span></footer>

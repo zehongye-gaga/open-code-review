@@ -83,8 +83,8 @@ async function main() {
   const configFile = process.argv[2] || process.env.OCR_SERVICE_CONFIG;
   if (!configFile) throw new Error("Usage: node services/github-review/server.js /path/to/config.json");
   const config = JSON.parse(fs.readFileSync(configFile, "utf8"));
-  const github = createGitHub({ tokenFile: config.githubTokenFile, token: process.env.OCR_GITHUB_TOKEN });
-  github.getToken();
+  const github = createGitHub({ githubAuth: config.githubAuth, tokenFile: config.githubTokenFile, token: process.env.OCR_GITHUB_TOKEN });
+  await github.getToken();
   const service = new ReviewService({ config, github });
   const secret = (file, value) => file ? fs.readFileSync(file, "utf8").trim() : value;
   const server = createServer(service, {

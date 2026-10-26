@@ -53,7 +53,6 @@ window.OCRAnalytics = (() => {
       const reviews = appendCell(row, String(p.reviews));
       reviews.append(node("span", "status-note", `${t("failed")} ${p.failed} · ${t("findingOccurrences")} ${p.findings}`));
       const tokens = appendCell(row, p.sessions ? compact(p.usage.totalTokens) : "—", "mono"); tokens.title = p.sessions ? integer(p.usage.totalTokens) : t("usageMissing");
-      tokens.append(node("span", "status-note", `${t("cacheRate")} ${percent(p.usage.inputTokens ? p.usage.cacheReadTokens / p.usage.inputTokens : null)}`));
       appendCell(row, p.sessions ? duration(p.nativeSeconds) : "—", "mono");
       appendCell(row, `${p.retries} / ${p.resumed}`, "mono");
       const actions = appendCell(row, ""), button = node("button", "button detail-button", t("viewRuns"));
@@ -127,7 +126,7 @@ window.OCRAnalytics = (() => {
     $("analytics-stats").replaceChildren(
       stat(t("finishedReviews"), integer(p.completed), `${p.pullRequests} PR · ${t("failed")} ${p.failed} · ${t("completionRate")} ${percent(p.completionRate)}`),
       stat(t("findingOccurrences"), integer(p.findings), `${t("withFindings")} ${p.withFindings} · ${t("clean")} ${p.clean} · ${t("highSeverity")} ${p.severities.high + p.severities.critical}`),
-      stat("Token", compact(u.totalTokens), `${t("inputShort")} ${compact(u.inputTokens)} · ${t("outputShort")} ${compact(u.outputTokens)} · ${t("cacheRate")} ${percent(p.cacheHitRatio)}`),
+      stat("Token", compact(u.totalTokens), `${t("inputShort")} ${compact(u.inputTokens)} · ${t("outputShort")} ${compact(u.outputTokens)}`),
       stat(t("endToEndAverage"), duration(p.endToEnd.mean), `P95 ${duration(p.endToEnd.p95)} · ${t("queueWait")} ${duration(p.queueWait.mean)}`),
       stat(t("modelRequests"), integer(u.requests), `${t("responseCount")} ${u.responses} · ${t("error")} ${u.errors} · ${t("toolCalls")} ${u.toolCalls}`),
       stat(t("retryResume"), `${p.retries} / ${p.resumed}`, `${t("nativeSessions")} ${p.sessions} · ${t("failedAttempts")} ${p.failedSessions} · ${duration(p.nativeSeconds)}`),

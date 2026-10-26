@@ -1,0 +1,19 @@
+[Unit]
+Description=Read-only OCR benchmark feedback collection
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/root/.local/bin/node /data/crg/ocr-review/benchmark-current/services/github-review/benchmark-feedback.js /etc/ocr-review/config.json /data/crg/ocr-review/analytics
+TimeoutStartSec=180
+MemoryMax=192M
+CPUQuota=15%
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/data/crg/ocr-review/analytics/benchmark
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true

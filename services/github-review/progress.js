@@ -61,7 +61,7 @@ async function planReview({ config, job, checkpoint, directory, cwd, signal, ide
   if (!compatible && previous?.budgetExceeded) {
     const increase = (job.budgetRetries || []).find((retry) => retry.directory === previous.directory &&
       retry.reason === "native_budget_guard" && Number.isSafeInteger(retry.from) && retry.from > 0 &&
-      retry.to === config.budget && retry.to > retry.from);
+      retry.to === config.budget && (retry.to === 0 || retry.to > retry.from));
     // A recorded budget increase changes capacity, not completed review evidence.
     if (increase) compatible = previous.fingerprint === await identify({
       config: { ...config, budget: increase.from }, metadata, cwd,

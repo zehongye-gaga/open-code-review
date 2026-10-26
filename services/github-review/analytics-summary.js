@@ -132,7 +132,7 @@ function summarize(ledger, options, now, health = {}) {
     const stats = bucket(""); for (const job of p.runs) if (endStates.has(job.state)) jobInto(stats, job);
     const latest = p.runs[0];
     return { repository: p.repository, number: p.number, usage: p.usage, sessions: p.sessions, resumed: p.resumed,
-      nativeSeconds: p.nativeSeconds, reviews: p.runs.length, completed: stats.completed, failed: stats.failed,
+      nativeSeconds: p.nativeSeconds, reviews: p.runs.length, usageMissingJobs: p.runs.filter((r) => !r.sessions).length, completed: stats.completed, failed: stats.failed,
       findings: stats.findings, findingReports: stats.findingReports, retries: p.runs.reduce((n, r) => n + Math.max(0, r.attempt - 1), 0),
       endToEnd: distribution(stats.elapsed), queueWait: distribution(stats.waits),
       latest: latest ? { head: latest.head, state: latest.state, findings: latest.findings, updatedAt: latest.updatedAt,

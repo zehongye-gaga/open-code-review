@@ -90,6 +90,7 @@ function validateInfrastructure(config) {
   if (infra.budgetRetry !== undefined) validate(infra.budgetRetry, { type: "object", properties: {
     enabled: { type: "boolean" }, maxRetries: { type: "integer", minimum: 0, maximum: 5 },
     multiplier: { type: "integer", minimum: 2, maximum: 4 },
+    unlimitedAfter: { type: "integer", minimum: 1 },
   }, required: ["enabled", "maxRetries", "multiplier"] }, "budgetRetry");
   const ids = new Set();
   for (const client of infra.clients || []) {

@@ -3,18 +3,15 @@
 
 "use strict";
 
-const fs = require("node:fs");
+const { GitHubAuth } = require("./github-auth.js");
 
-function createGitHub({ tokenFile, token, api = "https://api.github.com", fetchImpl = fetch }) {
-  const getToken = () => {
-    const value = tokenFile ? fs.readFileSync(tokenFile, "utf8").trim() : token;
-    if (!value) throw new Error("A GitHub repository credential is required");
-    return value;
-  };
+function createGitHub({ tokenFile, token, githubAuth, api = "https://api.github.com", fetchImpl = fetch }) {
+  const auth = new GitHubAuth({ githubAuth, githubTokenFile: tokenFile, token }, fetchImpl);
+  const getToken = () => auth.getToken();
   async function request(method, route, body) {
-    const response = await fetchImpl(`${api}${route}`, {
+    const response = await auth.request(`${api}${route}`, {
       method, redirect: "error", signal: AbortSignal.timeout(30000),
-      headers: { authorization: `Bearer ${getToken()}`, accept: "application/vnd.github+json",
+      headers: { accept: "application/vnd.github+json",
         "content-type": "application/json", "user-agent": "open-code-review-service",
         "x-github-api-version": "2022-11-28" },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -37,6 +34,7 @@ function createGitHub({ tokenFile, token, api = "https://api.github.com", fetchI
   const omit = (p, keys) => Object.fromEntries(Object.entries(p).filter(([k]) => !keys.includes(k)));
   const rest = {
     pulls: {
+      updateReview: (p) => request("PUT", `${pullPath(p)}/reviews/${p.review_id}`, { body: p.body }),
       get: (p) => request("GET", pullPath(p)),
       list: (p) => request("GET", `${repoPath(p)}/pulls${page(p)}&state=open&sort=updated&direction=desc`),
       listForHead: (p) => request("GET", `${repoPath(p)}/pulls${page(p)}&state=open&head=${encodeURIComponent(p.head)}`),
@@ -51,13 +49,17 @@ function createGitHub({ tokenFile, token, api = "https://api.github.com", fetchI
       updateComment: (p) => request("PATCH", `${repoPath(p)}/issues/comments/${p.comment_id}`, { body: p.body }),
     },
     checks: { listForRef: (p) => request("GET", `${repoPath(p)}/commits/${encodeURIComponent(p.ref)}/check-runs${page(p)}`) },
-    users: { getAuthenticated: () => request("GET", "/user") },
+    users: { getAuthenticated: () => auth.app ? auth.user() : request("GET", "/user") },
     repos: {
       getCombinedStatusForRef: (p) => request("GET", `${repoPath(p)}/commits/${encodeURIComponent(p.ref)}/status${page(p)}`),
       createCommitStatus: (p) => request("POST", `${repoPath(p)}/statuses/${p.sha}`, omit(p, ["owner", "repo", "sha"])),
     },
   };
-  return { rest, getToken };
+  return { rest, getToken, graphql: async (query, variables) => {
+    const { data } = await request("POST", "/graphql", { query, variables });
+    if (data.errors?.length) throw new Error("GitHub GraphQL response incomplete");
+    return data.data;
+  } };
 }
 
 module.exports = { createGitHub };

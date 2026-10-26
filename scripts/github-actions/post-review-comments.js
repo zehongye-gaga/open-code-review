@@ -88,6 +88,7 @@ async function runPostReviewComments({
   resultPath = "/tmp/ocr-result.json",
   stderrPath = "/tmp/ocr-stderr.log",
   stickySummary = true,
+  summaryPublisher,
   incremental = false,
   incrementalOverlapThreshold = DEFAULT_OVERLAP_THRESHOLD,
   reviewCommentBatchSize = DEFAULT_BATCH_SIZE,
@@ -282,7 +283,7 @@ async function runPostReviewComments({
         `${SUMMARY_MARKER}\n⚠️ **OpenCodeReview** encountered an error:\n${fencedBlock(stderr)}`,
         null
       );
-      const posted = await postSummary({ github, owner, repo, prNumber, body, sticky: stickySummary, preserveMarker, log });
+      const posted = await (summaryPublisher || postSummary)({ github, owner, repo, prNumber, body, sticky: stickySummary, preserveMarker, log });
       stats.summaryUrl = posted.url;
     }
     setStatsOutputs(out, stats);
@@ -308,7 +309,7 @@ async function runPostReviewComments({
     const message = result.message || fallbackMessage;
     // A clean run is still a complete run: this path advances the checkpoint.
     const body = appendCheckpoint(`${SUMMARY_MARKER}\n✅ **OpenCodeReview**: ${message}${rangeNote}`, result.manifest);
-    const posted = await postSummary({ github, owner, repo, prNumber, body, sticky: stickySummary, preserveMarker, log });
+    const posted = await (summaryPublisher || postSummary)({ github, owner, repo, prNumber, body, sticky: stickySummary, preserveMarker, log });
     stats.summaryUrl = posted.url;
     setStatsOutputs(out, stats);
     return;
@@ -440,7 +441,7 @@ async function runPostReviewComments({
   // without line info — all known upfront); final posting statistics are
   // written in the finalize phase below, once the review has landed.
   const wrapSummary = (content) => `${SUMMARY_MARKER}\n${SUMMARY_TAG}\n${content}`;
-  const anchor = await ensureSummaryAnchor({
+  const anchor = summaryPublisher ? null : await ensureSummaryAnchor({
     github,
     owner,
     repo,
@@ -543,7 +544,8 @@ async function runPostReviewComments({
   // where the anchor phase was skipped because the read API was unavailable.
   // Returns null only when the summary could not be written without risking a
   // duplicate; the review content remains available via inline comments.
-  const finalized = await finalizeSummary({
+  if (summaryPublisher && failedCount > outsideDiffCount) throw new Error("Inline publication incomplete; retry before publishing the round summary");
+  const finalized = await (summaryPublisher || finalizeSummary)({
     github,
     owner,
     repo,

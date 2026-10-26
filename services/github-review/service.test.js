@@ -622,3 +622,34 @@ test("Git fetch credentials are separate from the GitHub API credential", async 
   await h.service.tick();
   assert.equal(job.state, "complete");
 });
+test("App mode uses a fresh installation token for Git and ignores the legacy PAT file", async(t)=>{
+ const h=setup(t);h.service.config.githubAuth={mode:"app"};h.service.config.gitTokenFile="/must-not-read-pat";
+ h.service.github.getToken=async()=>"installation-token";const prepare=h.service.prepare;
+ h.service.prepare=async(args)=>{assert.equal(args.token,"installation-token");return prepare(args);};
+ const job=h.service.accept(repository,pr());await h.service.tick();assert.equal(job.state,"complete");
+});
+
+test("unlimited retry completes with zero passed to the runner without mutating the agent request", async (t) => {
+  const { resolveOptions } = require("./options.js");
+  const h = setup(t);
+  h.service.config.infrastructure = { dispatchEnabled: true, allowUnlimitedBudget: true, budgetRetry: { enabled: true, maxRetries: 2, multiplier: 2, unlimitedAfter: 500000 },
+    limits: { budget: 2000000 }, clients: [{ id: "agent", role: "agent", repositories: [repository] }] };
+  const job = h.service.accept(repository, pr(), { settings: resolveOptions(h.service.config, h.service.repo(repository), "deep"), requestedBy: "agent" });
+  let runs = 0, publications = 0;
+  h.service.run = async ({ directory, budget }) => {
+    assert.equal(budget, runs === 0 ? 500000 : 0);
+    runs++;
+    writeReport(directory, { state: runs === 1 ? "partial" : "complete", budgetExceeded: runs === 1 });
+  };
+  h.service.publish = async () => { publications++; return { comments: [] }; };
+  await h.service.tick();
+  assert.equal(job.retryBudget, 0);
+  assert.equal(h.service.increaseRetryBudget(job), false);
+  assert.equal(publications, 0);
+  job.nextAt = 0; await h.service.tick();
+  assert.equal(job.state, "complete");
+  assert.equal(publications, 1);
+  assert.equal(job.settings.options.budget, 500000);
+  assert.equal(job.budgetRetries.length, 1);
+  assert.equal(h.statuses.at(-1).state, "success");
+});

@@ -8,8 +8,11 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const { auditRows, repositoryUsage, cpuSample } = require("./monitor-audit.js");
+const { AgentUsage } = require("./agent-usage.js");
+const { ReviewDataset, resultRecords } = require("./review-dataset.js");
 const { Analytics } = require("./analytics.js");
-const { runRows } = require("./analytics-summary.js");
+const { runRows, summarize } = require("./analytics-summary.js");
 
 const execute = promisify(execFile);
 const activeStates = new Set(["running", "publishing", "error_publishing"]);
@@ -37,13 +40,17 @@ function readText(file) {
 function filesystem(directory, label) {
   try {
     const stat = fs.statfsSync(directory);
-    return { label, totalBytes: stat.blocks * stat.bsize, availableBytes: stat.bavail * stat.bsize };
+    return { label, totalBytes: stat.blocks * stat.bsize, availableBytes: stat.bavail * stat.bsize, totalInodes: stat.files, freeInodes: stat.ffree };
   } catch { return { label, totalBytes: null, availableBytes: null }; }
 }
 
+let previousCPU;
 function hostResources(volumes) {
+  const sample = cpuSample(readText("/proc/stat"), previousCPU); previousCPU = sample.counter;
+  const mem = readText("/proc/meminfo") || "";
+  const memValue = (key) => Number(new RegExp(`^${key}:\\s+(\\d+)`, "m").exec(mem)?.[1] || 0) * 1024;
   const available = /^MemAvailable:\s+(\d+)/m.exec(readText("/proc/meminfo") || "");
-  return { memoryTotalBytes: os.totalmem(), memoryAvailableBytes: available ? Number(available[1]) * 1024 : os.freemem(),
+  return { cpu: sample.usage, swapTotalBytes: memValue("SwapTotal"), swapFreeBytes: memValue("SwapFree"), memoryTotalBytes: os.totalmem(), memoryAvailableBytes: available ? Number(available[1]) * 1024 : os.freemem(),
     load: os.loadavg(), cpuCount: os.cpus().length, uptimeSeconds: os.uptime(),
     volumes: volumes.map((volume) => filesystem(volume.path, volume.label)) };
 }
@@ -108,7 +115,7 @@ function joinPulls(githubPulls, config, ocrJobs, crJobs) {
   return githubPulls.map((pr) => {
     const repository = config.repositories.find((item) => item.name === pr.repository);
     const inScope = !pr.isDraft && Boolean(repository) &&
-      (!repository.baseBranches?.length || repository.baseBranches.includes(pr.baseRefName));
+      (!repository.baseBranches?.length || repository.baseBranches.includes("*") || repository.baseBranches.includes(pr.baseRefName));
     return { repository: pr.repository, number: pr.number, title: String(pr.title || ""), url: safeURL(pr.url),
       head: pr.headRefOid, base: pr.baseRefName, draft: Boolean(pr.isDraft), inScope, updatedAt: iso(pr.updatedAt),
       ocr: statusFor(pr, config.statusContext || "ocr-review", ocrJobs.filter((job) => job.repository === pr.repository)),
@@ -147,14 +154,13 @@ const query = `query($owner:String!,$name:String!,$after:String){
 }`;
 
 async function githubPulls(config, request = fetch) {
-  const token = fs.readFileSync(config.githubTokenFile, "utf8").trim();
-  if (!token) throw new Error("Missing GitHub credential");
+  const auth = require("./github-auth.js").githubAuth(config, request);
   const pulls = []; let remaining = null;
   for (const repository of config.repositories) {
     const [owner, name] = repository.name.split("/"); let after = null;
     for (let page = 0; page < 10; page++) {
-      const response = await request("https://api.github.com/graphql", { method: "POST", redirect: "error",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "user-agent": "ocr-review-monitor" },
+      const response = await auth.request("https://api.github.com/graphql", { method: "POST", redirect: "error",
+        headers: { "content-type": "application/json", "user-agent": "ocr-review-monitor" },
         signal: AbortSignal.timeout(20000), body: JSON.stringify({ query, variables: { owner, name, after } }) });
       if (!response.ok) throw new Error("GitHub request failed");
       const body = await response.json(), batch = body.data?.repository?.pullRequests;
@@ -182,6 +188,8 @@ class Monitor {
     this.config.repositories = this.config.repositories.map((repository) => ({ ...repository, name: canonicalRepo(repository.name) }));
     this.reports = new ReportCache(this.config.stateDirectory);
     this.analytics = options.analytics ? new Analytics(this.config, options.analytics) : null;
+    this.agentUsage = options.analytics ? new AgentUsage(this.config.infrastructure?.agentDispatch, options.analytics.directory) : null;
+    this.dataset = options.analytics ? new ReviewDataset(options.analytics.directory) : null;
     this.local = null;
     this.remote = { pulls: [], updatedAt: null, error: false, remaining: null };
     this.localBusy = false; this.githubBusy = false;
@@ -198,12 +206,14 @@ class Monitor {
         this.options.cragent ? this.unit(this.options.cragent.unit || "cragent.service") : null,
         this.health(this.options.ocrHealthURL || "http://127.0.0.1:8787/healthz"),
       ]);
-      let ocrJobs = [], nativeJobs = [], ocrError = false, crError = false, crJobs = [];
+      let audit = previous?.audit || [], ocrJobs = [], nativeJobs = [], ocrError = false, crError = false, crJobs = [];
       const crSources = [];
       try {
         const state = readJSON(path.join(this.config.stateDirectory, "state.json"));
         if (state.version !== 1 || !Array.isArray(state.jobs)) throw new Error("Invalid OCR state");
         nativeJobs = state.jobs;
+        audit = auditRows(state);
+        void this.agentUsage?.collect(state.agentSessions);
         ocrJobs = state.jobs.map(ocrRow);
       } catch { ocrError = true; ocrJobs = previous?.ocrJobs || []; }
       for (const source of this.options.cragent?.states || []) {
@@ -241,7 +251,14 @@ class Monitor {
           analytics = { ...await this.analytics.collect(nativeJobs, now), error: false };
         } catch { analytics = { ...analytics, error: true }; }
       }
-      this.local = { collectedAt: new Date(this.now()).toISOString(), ocrJobs, crJobs, usage, analytics,
+      let datasetError = false;
+      try {
+        this.dataset?.append("dispatch", audit);
+        if (this.dataset) this.dataset.append("review_result", resultRecords(nativeJobs, this.config.stateDirectory));
+        if (this.analytics) this.dataset?.append("ocr_run", runRows(this.analytics.ledger));
+        this.dataset?.append("agent_usage", (this.agentUsage?.snapshot().sessions || []).map(({ observedAt, ...r }) => r));
+      } catch { datasetError = true; }
+      this.local = { datasetError, audit, collectedAt: new Date(this.now()).toISOString(), ocrJobs, crJobs, usage, analytics, completedUsage: completed.map((job) => ({ repository: canonicalRepo(job.repository), report: reports.get(String(job.id)) || null })),
         resources: this.resources(this.options.volumes || [{ label: "Root", path: "/" }, { label: "Review data", path: this.config.stateDirectory }]),
         services: {
           ocr: { ...ocrUnit, ...ocrCounts, running: health.running ?? ocrCounts.running, queued: health.queued ?? ocrCounts.queued,
@@ -256,7 +273,7 @@ class Monitor {
             pollSeconds: this.options.cragent.pollSeconds || 120, timeoutSeconds: this.options.cragent.timeoutSeconds || 2700 } : null,
         },
         history: latest([...ocrJobs.filter((job) => ["complete", "checkpointed", "failed"].includes(job.state)),
-          ...crJobs.filter((job) => job.state.startsWith("reviewed_") || ["error", "error_published", "error_closed_unpublished"].includes(job.state))]).slice(0, 80)
+          ...crJobs.filter((job) => job.state.startsWith("reviewed_") || ["error", "error_published", "error_closed_unpublished"].includes(job.state))])
           .map((job) => ({ ...job, usage: job.engine === "ocr" ? reports.get(job.id) || null : null })) };
     } finally { this.localBusy = false; }
   }
@@ -279,8 +296,15 @@ class Monitor {
       error: this.local.analytics.error, runs };
   }
 
-  snapshot() {
+  snapshot(repository = "") {
+    repository = canonicalRepo(repository);
     const now = this.now(), local = this.local;
+    const repositories = [...new Set([...this.config.repositories.map((r) => r.name),
+      ...(local?.audit || []).map((r) => r.repository),
+      ...(local?.ocrJobs || []).map((r) => r.repository), ...(local?.crJobs || []).map((r) => r.repository),
+      ...Object.values(this.analytics?.ledger.jobs || {}).map((r) => canonicalRepo(r.repository))])].filter(Boolean).sort();
+    if (repository && !repositories.includes(repository)) throw Object.assign(new Error("Unknown repository"), { status: 404 });
+    const matches = (row) => !repository || canonicalRepo(row.repository) === repository;
     if (!local) return { version: 1, ready: false, collectedAt: null };
     const stale = age(local.collectedAt, now) > 45;
     const githubStale = !this.remote.updatedAt || age(this.remote.updatedAt, now) > 180;
@@ -290,14 +314,37 @@ class Monitor {
       const sources = service.sources?.map((source) => ({ ...source, stale: !source.lastPoll || age(source.lastPoll, now) > Math.max(90, service.pollSeconds * 3) }));
       return [key, { ...service, sources, pollStale, healthy: service.healthy && !pollStale && !stale }];
     }));
-    return { version: 1, ready: true, collectedAt: local.collectedAt, stale,
+    let usage = local.usage, analytics = local.analytics;
+    if (repository) {
+      const completed = local.completedUsage.filter(matches);
+      usage = { totalTokens: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reports: 0, expectedReports: completed.length };
+      for (const row of completed) if (row.report) {
+        usage.reports++;
+        for (const key of ["totalTokens", "inputTokens", "outputTokens", "cacheReadTokens"]) usage[key] += row.report[key];
+      }
+      if (this.analytics && local.analytics.collectedAt) {
+        const ledger = this.analytics.ledger;
+        const scoped = { ...ledger, jobs: Object.fromEntries(Object.entries(ledger.jobs).filter(([, row]) => matches(row))),
+          sessions: Object.fromEntries(Object.entries(ledger.sessions).filter(([, row]) => matches(row))) };
+        analytics = summarize(scoped, this.analytics.options, now, { error: local.analytics.error });
+      }
+    }
+    const work = [...local.ocrJobs, ...local.crJobs].filter(matches).filter((job) => activeStates.has(job.state) || queuedStates.has(job.state));
+    const scopedCounts = Object.fromEntries(["ocr", "cragent"].map((engine) => [engine, {
+      running: work.filter((job) => job.engine === engine && activeStates.has(job.state)).length,
+      queued: work.filter((job) => job.engine === engine && queuedStates.has(job.state)).length,
+    }]));
+    return { version: 1, ready: true, repositories, repository, scopedCounts, collectedAt: local.collectedAt, stale,
       github: { updatedAt: this.remote.updatedAt, stale: githubStale, error: this.remote.error, remaining: this.remote.remaining },
-      services, resources: local.resources, usage: local.usage, analytics: local.analytics,
-      work: latest([...local.ocrJobs, ...local.crJobs].filter((job) => activeStates.has(job.state) || queuedStates.has(job.state)))
+      services, resources: local.resources, usage, analytics,
+      audit: (local.audit || []).filter(matches).slice(0, 200),
+      repositoryUsage: repositoryUsage(analytics?.pulls || []),
+      agentUsage: this.agentUsage?.snapshot(repository) || null, dataset: { enabled: Boolean(this.dataset), error: local.datasetError },
+      work: latest(work)
         .map((job) => ({ ...job, elapsedSeconds: age(job.startedAt || job.createdAt || job.updatedAt, now),
           overdue: job.state === "running" && age(job.startedAt || job.updatedAt, now) > (services[job.engine]?.timeoutSeconds || 2700) + 120 })),
-      pulls: joinPulls(this.remote.pulls, { ...this.config, cragentContext: this.options.cragent?.statusContext }, local.ocrJobs, local.crJobs),
-      history: local.history };
+      pulls: joinPulls(this.remote.pulls.filter(matches), { ...this.config, cragentContext: this.options.cragent?.statusContext }, local.ocrJobs, local.crJobs),
+      history: local.history.filter(matches).slice(0, 80) };
   }
 }
 
