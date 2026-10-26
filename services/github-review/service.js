@@ -192,7 +192,7 @@ class ReviewService {
 
   async execute(job, signal, slot = 0) {
     const options = executionOptions(job.settings);
-    if (job.retryBudget) {
+    if (job.retryBudget != null) {
       const infra = this.config.infrastructure || {};
       if (!infra.budgetRetry?.enabled || (infra.dispatchEnabled === false && !job.ciRequestId)) throw Object.assign(new Error("Budget retry is disabled by policy"), { retryable: false });
       const { Infrastructure } = require("./infrastructure.js");
@@ -216,7 +216,7 @@ class ReviewService {
     const context = { repo: this.coordinates(job.repository), eventName: "ocr_service",
       issue: { number: job.number }, allowDraft: !!job.ciRequestId, runId: job.id, runAttempt: job.attempt };
     const current = await this.github.rest.pulls.get({ ...context.repo, pull_number: job.number });
-    if (!this.eligible(job.repository, current.data, job) || ((!job.snapshot || job.retryBudget) &&
+    if (!this.eligible(job.repository, current.data, job) || ((!job.snapshot || job.retryBudget != null) &&
         (current.data.head.sha !== job.head || current.data.base.sha !== job.base || current.data.base.ref !== job.baseRef))) {
       this.refresh(job, current.data);
       return { stale: true };
@@ -336,12 +336,12 @@ class ReviewService {
     const infra = this.config.infrastructure || {}, policy = infra.budgetRetry;
     if (!policy?.enabled || (infra.dispatchEnabled === false && !job.ciRequestId) || !job.settings || job.settings.preview || job.replacement ||
         job.attempt >= this.config.maxAttempts || (job.budgetRetries || []).length >= policy.maxRetries) return false;
-    const current = job.retryBudget || job.settings.options.budget;
+    const current = job.retryBudget ?? job.settings.options.budget;
     const repository = this.repo(job.repository);
     if (!repository || !Number.isSafeInteger(current) || current < 1) return false;
     const limit = repository.limits?.budget ?? infra.limits?.budget ?? 1000000;
-    const next = Math.min(limit, current * policy.multiplier);
-    if (next <= current) return false;
+    const next = policy.unlimitedAfter && current >= policy.unlimitedAfter ? 0 : Math.min(limit, current * policy.multiplier);
+    if (next !== 0 && next <= current) return false;
     resolveOptions(this.config, repository, job.settings.profile, { ...job.settings.options, budget: next });
     (job.budgetRetries ||= []).push({ attempt: job.attempt, from: current, to: next,
       directory: job.directory, reason: "native_budget_guard", at: new Date().toISOString() });
@@ -375,7 +375,7 @@ class ReviewService {
           if (budgetRetry) job.pendingSent = false;
           job.nextAt = Date.now() + this.config.retrySeconds * 1000 * 2 ** (job.attempt - 1);
           try { await this.status(job, job.state === "queued" ? "pending" : "error",
-            budgetRetry ? `OCR budget guard; retry scheduled with ${job.retryBudget} tokens` :
+            budgetRetry ? `OCR budget guard; retry scheduled with ${job.retryBudget === 0 ? "unlimited tokens" : `${job.retryBudget} tokens`}` :
               job.state === "queued" ? "OCR incomplete; retry scheduled" : job.error); }
           catch (statusError) { this.log("status_failed", { id: job.id, error: statusError.message }); }
         }

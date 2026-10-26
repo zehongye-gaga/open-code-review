@@ -15,10 +15,11 @@ The deployed policy has PR concurrency 8 and the following configuration fragmen
 
 ```json
 {
-  "maxAttempts": 4,
+  "maxAttempts": 5,
   "prConcurrency": 8,
   "infrastructure": {
-    "budgetRetry": { "enabled": true, "maxRetries": 3, "multiplier": 2 },
+    "allowUnlimitedBudget": true,
+    "budgetRetry": { "enabled": true, "maxRetries": 4, "multiplier": 2, "unlimitedAfter": 2000000 },
     "limits": { "budget": 4000000, "concurrency": 8, "timeoutSeconds": 3600 }
   }
 }
@@ -27,7 +28,11 @@ The deployed policy has PR concurrency 8 and the following configuration fragmen
 Merge this fragment with a complete service configuration; it is not a standalone
 configuration. Existing unrelated infrastructure settings must be retained.
 For a task initially assigned 500,000 tokens, budget retries are 1,000,000,
-2,000,000 and 4,000,000. The global attempt limit also includes other execution
+2,000,000 and then unlimited (`budget: 0`). Existing 4,000,000-token attempts
+can also transition to unlimited on their next budget retry. Five total attempts
+allow this migration; an already unlimited run cannot escalate again. The numeric
+limit still bounds finite requested budgets; unlimited retries require explicit
+`allowUnlimitedBudget` authorization. Timeouts remain in effect. The global attempt limit also includes other execution
 failures, so unrelated failures can consume retry opportunities. Repository
 limits can be stricter. Matching snapshots resume saved native sessions; changed
 head/base snapshots must not reuse incompatible review evidence. Raising the cap
@@ -83,3 +88,5 @@ systemctl stop ocr-pr-alerts.service
 GitHub App rollback is available at
 `/etc/ocr-review/rollback-github-app-20261026/rollback.sh` on the host.
 Review data and feedback candidates are described in [DATASET.md](DATASET.md).
+
+Large-PR tracking: [BUDGET_CASES.md](BUDGET_CASES.md).

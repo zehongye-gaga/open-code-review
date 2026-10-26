@@ -39,7 +39,7 @@ const hash = (x) => crypto.createHash("sha256").update(JSON.stringify(canonical(
 function safeJob(j) {
   return { job_id: j.id, repository: j.repository, pull_number: j.number, head_sha: j.head, base_sha: j.base,
     state: j.state, preview: j.settings?.preview || false, profile: j.settings?.profile,
-    options: j.settings?.options, effective_budget: j.retryBudget || j.settings?.options.budget,
+    options: j.settings?.options, effective_budget: j.retryBudget ?? j.settings?.options.budget,
     budget_retries: j.budgetRetries || [], policy_version: j.settings?.policyVersion,
     attempt: j.attempt, created_at: j.createdAt, updated_at: j.updatedAt,
     result: j.result, failure: j.error ? "Review incomplete; see operator logs" : undefined,

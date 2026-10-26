@@ -73,6 +73,7 @@ var scannedNames = map[string]bool{"Makefile": true}
 // allowedPrefixes exempts paths whose non-English content is expected. Keep
 // each entry narrow and justified; a temporary entry must say what removes it.
 var allowedPrefixes = []struct{ prefix, reason string }{
+	{"services/github-review/pr-alerts.zh-CN.json", "translated notification copy for the PR alert observer"},
 	{"pages/src/i18n/", "translated UI copy for the docs site"},
 	{"services/github-review/monitor-web/i18n/", "translated UI copy for the review monitoring dashboard"},
 	{"extensions/vscode/package.nls.", "translated UI copy for the extension manifest bundles"},
