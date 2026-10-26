@@ -90,3 +90,17 @@ GitHub App rollback is available at
 Review data and feedback candidates are described in [DATASET.md](DATASET.md).
 
 Large-PR tracking: [BUDGET_CASES.md](BUDGET_CASES.md).
+
+## Per-commit review summaries
+
+The service publishes a concise native COMMENT review after inline publication,
+bound to the reviewed head/base snapshot. It no longer rewrites the historical
+sticky summary. Existing inline formatting, positioning, overlap deduplication,
+fallback and thread-resolution behavior are unchanged. Findings without valid
+inline locations remain in the round summary. Snapshot markers deduplicate
+summary publication retries; final status links point to the round review.
+
+Deployment records active jobs before restarting, preserves progress and queue
+state, refreshes pending receipt heartbeat timestamps while the service is
+stopped, and resubmits pending receipt identities through n8n after startup.
+Verify resumed session IDs and advancing n8n heartbeats, not only health status.

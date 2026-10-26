@@ -162,15 +162,17 @@ test("real publisher shows an incomplete warning and a neutral skipped result", 
       listComments: async () => ({ data: [], headers: {} }),
       createComment: async ({ body }) => { bodies.push(body); return { data: { id: 1, html_url: "https://github.com/owner/repo/pull/1#issuecomment-1" } }; },
     };
+    h.github.rest.pulls.listReviews = async () => ({ data: [] });
+    h.github.rest.pulls.createReview = h.github.rest.issues.createComment;
     await publishReview({ ...h, directory });
     assert.equal(bodies.length, 1);
     assert.doesNotMatch(bodies[0], /✅/);
     if (state === "partial") {
-      assert.match(bodies[0], /incomplete review/);
+      assert.ok(bodies[0].includes(require("./round-summary.zh-CN.json").incomplete));
       assert.doesNotMatch(bodies[0], /Looks good to me/);
       assert.equal(h.failures.length, 1);
     } else {
-      assert.match(bodies[0], /No reviewable files/);
+      assert.ok(bodies[0].includes(require("./round-summary.zh-CN.json").skippedBody));
       assert.equal(h.failures.length, 0);
     }
   }

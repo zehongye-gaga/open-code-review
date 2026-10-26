@@ -11,6 +11,7 @@ const { runPostReviewComments } = require("../../scripts/github-actions/post-rev
 
 const exec = promisify(execFile);
 const { cliArguments } = require("./options.js");
+const { publishRoundSummary } = require("./round-summary.js");
 const SHA = /^[0-9a-f]{40}$/;
 
 function childEnvironment(source = process.env) {
@@ -165,7 +166,7 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
   }
 }
 
-async function publishReview({ github, context, core, directory, post = runPostReviewComments }) {
+async function publishReview({ github, context, core, directory, blockSeverity = "high", post = runPostReviewComments }) {
   const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
   const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: metadata.number });
   if (pr.state !== "open" || (pr.draft && !context.allowDraft) || pr.head.sha !== metadata.head || pr.base.sha !== metadata.base ||
@@ -199,6 +200,7 @@ async function publishReview({ github, context, core, directory, post = runPostR
   await post({
     github, context, fs, prNumber: metadata.number, resultPath: publicationPath, stderrPath: path.join(directory, "stderr.log"),
     stickySummary: true, incremental: true,
+    summaryPublisher: (args) => publishRoundSummary({ ...args, metadata, result, blockSeverity, incomplete, skipped }),
     checkpointEnabled: Boolean(metadata.fingerprint), checkpointBaseRef: metadata.base_ref,
     checkpointMergeBase: metadata.merge_base, checkpointFingerprint: metadata.fingerprint,
     rangeMode: metadata.range?.mode, rangeFrom: metadata.range?.from, rangeTo: metadata.head,

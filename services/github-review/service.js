@@ -289,7 +289,7 @@ class ReviewService {
       if (progress?.budgetExceeded) throw Object.assign(new Error("Token budget guard stopped review before full coverage"), { retryable: false, budgetExceeded: true });
       throw new Error("Native review incomplete; inspect job artifacts");
     }
-    const result = await this.publish({ github: this.github, context, core, directory: job.directory });
+    const result = await this.publish({ github: this.github, context, core, directory: job.directory, blockSeverity: effective.blockSeverity });
     if (signal.aborted) return { stale: true };
     if (result?.stale) {
       this.refresh(job, (await this.github.rest.pulls.get({ ...context.repo, pull_number: job.number })).data);
