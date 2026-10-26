@@ -50,7 +50,10 @@ class OrgCI {
   async current(r) {
     const { data } = await this.s.github.rest.pulls.get({ ...this.s.coordinates(r.repository), pull_number: r.pull_number });
     if (!this.s.eligible(r.repository, data, { ciRequestId: r.request_id }) ||
-        data.head.sha !== r.head_sha || data.base.sha !== r.base_sha || data.base.ref !== r.base_ref) fail("PR snapshot is no longer current", 409);
+        data.head.sha !== r.head_sha || data.base.sha !== r.base_sha || data.base.ref !== r.base_ref) {
+      const error = new Error("PR snapshot is no longer current");
+      error.status = 409; error.prClosed = data.state !== "open"; throw error;
+    }
     return data;
   }
   stop(r, state, reason) {
@@ -76,7 +79,7 @@ class OrgCI {
     if (!["direct", "agent"].includes(route)) fail("Invalid n8n route");
     return this.lock(normalized.request_id, async () => {
       let r = this.receipts[normalized.request_id];
-      if (r) { await this.refresh(r); return this.view(r); }
+      if (r) { await this.reopen(r); await this.refresh(r); return this.view(r); }
       await this.current(normalized);
       if (Object.keys(this.receipts).length >= 25000) fail("CI receipt capacity reached", 503);
       for (const old of Object.values(this.receipts)) {
@@ -91,6 +94,34 @@ class OrgCI {
     });
   }
   async status(input) { const r = this.lookup(input); await this.lock(r.request_id, () => this.refresh(r)); return this.view(r); }
+  async reopen(r) {
+    if (r.state !== "superseded" || !["pr_closed", "pr_changed_or_closed"].includes(r.reason)) return;
+    await this.current(r);
+    const newer = Object.values(this.receipts).some((other) => other.repository === r.repository &&
+      other.pull_number === r.pull_number && other.sequence > r.sequence);
+    if (newer) return;
+    const job = this.s.state.data.jobs.find((j) => j.id === r.jobId);
+    if (this.dispatching.has(r.request_id) || [...this.s.workers.values()].some((w) => w.job.id === r.jobId)) {
+      fail("Previous PR dispatch is still stopping; retry acceptance", 503);
+    }
+    if (r.jobId && !job) return;
+    if (job && (job.replacement || !["cancelled", "complete"].includes(job.state))) return;
+    const now = Date.now();
+    (r.reopenHistory ||= []).push({ at: now, previousState: r.state, previousReason: r.reason,
+      createdAt: r.createdAt, finishedAt: r.finishedAt, jobId: r.jobId || null, dispatchAttempts: r.dispatchAttempts });
+    r.state = "accepted"; r.createdAt = now; r.heartbeatAt = now; r.nextDispatchAt = 0; r.dispatchAttempts = 0;
+    r.sequence = ++this.s.state.data.sequence;
+    for (const key of ["reason", "finishedAt", "finalStatus", "published", "lastWorkerStatus", "fallbackAt", "fallbackReason", "dispatchMethod"]) delete r[key];
+    if (job) {
+      if (job.state === "cancelled") {
+        job.state = "queued"; job.nextAt = 0; job.pendingSent = false;
+        delete job.error;
+      }
+      r.state = "queued";
+    }
+    this.s.state.save();
+    await this.publish(r, "pending", "OCR reaccepted after PR reopened");
+  }
   async submitReview(args, actor) {
     const id = args.request_id?.replace(/^github:/, "");
     const r = this.receipts[id];
@@ -193,7 +224,7 @@ class OrgCI {
     if (!terminal.has(r.state)) {
       try { await this.current(r); }
       catch (error) {
-        if (error.status === 409) this.stop(r, "superseded", "pr_changed_or_closed");
+        if (error.status === 409) this.stop(r, "superseded", error.prClosed ? "pr_closed" : "pr_snapshot_changed");
         else if ([401, 403, 404].includes(error.status)) this.stop(r, "failed", "repository_access_failed");
         else throw error;
       }

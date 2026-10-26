@@ -183,3 +183,36 @@ test("feedback cleanup removes only sent entries older than retention", async (t
   assert.deepEqual(s.state.data.agentFeedback.map((x) => x.id), ["recent", "pending", "failed"]);
   assert.equal(JSON.parse(fs.readFileSync(s.state.file)).agentFeedback.length, 3);
 });
+test("reopened closed PR reaccepts the same receipt and dispatches only once", async (t) => {
+  const { ci, s, p, pr, statuses } = fixture(t);
+  await ci.submit(p, "direct"); pr.state = "closed"; await ci.refresh(ci.receipts[p.request_id]);
+  assert.equal(ci.receipts[p.request_id].reason, "pr_closed");
+  await assert.rejects(ci.submit(p, "direct"), /no longer current/);
+  pr.state = "open";
+  await Promise.all([ci.submit(p, "direct"), ci.submit(p, "direct")]);
+  const r = ci.receipts[p.request_id]; assert.equal(r.state, "accepted"); assert.equal(r.reopenHistory.length, 1);
+  assert.equal(statuses.at(-1).state, "pending");
+  await ci.dispatch(r); assert.equal(s.state.data.jobs.length, 1);
+});
+test("legacy closed receipt can reopen but changed snapshots and newer receipts cannot", async (t) => {
+  const { ci, p, pr } = fixture(t); await ci.submit(p, "direct");
+  const r = ci.receipts[p.request_id]; ci.stop(r, "superseded", "pr_changed_or_closed");
+  pr.head.sha = "c".repeat(40); await assert.rejects(ci.submit(p, "direct"), /no longer current/);
+  pr.head.sha = p.head_sha; ci.receipts.newer = { ...r, sequence:r.sequence + 1, request_id:"newer" };
+  assert.equal((await ci.submit(p, "direct")).state, "superseded"); delete ci.receipts.newer;
+  assert.equal((await ci.submit(p, "direct")).state, "accepted");
+});
+test("cancelled OCR job is reused only after worker and dispatch shutdown", async (t) => {
+  const { ci, s, p, pr } = fixture(t); await ci.submit(p, "direct"); await ci.dispatch(ci.receipts[p.request_id]);
+  const r=ci.receipts[p.request_id], job=s.state.data.jobs[0]; job.snapshot={ retained:true };
+  pr.state="closed"; await ci.refresh(r); pr.state="open";
+  ci.dispatching.add(r.request_id); await assert.rejects(ci.submit(p,"direct"), /still stopping/);ci.dispatching.clear();
+  s.workers.set(0,{job});await assert.rejects(ci.submit(p,"direct"), /still stopping/);s.workers.clear();
+  await ci.submit(p,"direct"); assert.equal(r.jobId,job.id);assert.equal(job.state,"queued");assert.deepEqual(job.snapshot,{retained:true});
+  await ci.dispatch(r);assert.equal(s.state.data.jobs.length,1);
+});
+test("snapshot changes are not resurrected when a branch returns to the old commit", async(t)=>{
+ const {ci,p,pr}=fixture(t);await ci.submit(p,"direct");const r=ci.receipts[p.request_id];
+ pr.head.sha="c".repeat(40);await ci.refresh(r);assert.equal(r.reason,"pr_snapshot_changed");
+ pr.head.sha=p.head_sha;assert.equal((await ci.submit(p,"direct")).state,"superseded");
+});
