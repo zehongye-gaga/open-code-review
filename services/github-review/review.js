@@ -200,7 +200,7 @@ async function publishReview({ github, context, core, directory, blockSeverity =
   await post({
     github, context, fs, prNumber: metadata.number, resultPath: publicationPath, stderrPath: path.join(directory, "stderr.log"),
     stickySummary: true, incremental: true,
-    summaryPublisher: (args) => publishRoundSummary({ ...args, metadata, result, blockSeverity, incomplete, skipped }),
+    summaryPublisher: (args) => publishRoundSummary({ ...args, metadata, result, blockSeverity, incomplete, skipped, runId: context.runId }),
     checkpointEnabled: Boolean(metadata.fingerprint), checkpointBaseRef: metadata.base_ref,
     checkpointMergeBase: metadata.merge_base, checkpointFingerprint: metadata.fingerprint,
     rangeMode: metadata.range?.mode, rangeTo: metadata.head,

@@ -29,3 +29,25 @@ test("round summary preserves non-inline findings and rejects stale publication"
   h.metadata.head = "d".repeat(40); h.github.rest.pulls.get = async () => ({ data: { state: "closed" } });
   await assert.rejects(publishRoundSummary(h), /PR changed/); assert.equal(h.reviews.length, 1);
 });
+
+test("summary updates the first inline batch without creating another review", async () => {
+  const h = fixture(); h.runId = 123;
+  h.reviews.push({ id: 10, user: { login: "ocr[bot]" }, commit_id: h.metadata.head, body: "<!-- ocr-review-run:123-1 -->", html_url: "https://example.test/inline" });
+  h.reviews.push({ id: 11, user: { login: "ocr[bot]" }, commit_id: h.metadata.head, body: "<!-- ocr-review-run:123-1 -->" });
+  h.github.rest.pulls.updateReview = async ({ review_id, body }) => {
+    const r = h.reviews.find(r => r.id === review_id); r.body = body; return { data: r };
+  };
+  const first = await publishRoundSummary(h); const again = await publishRoundSummary(h);
+  assert.equal(first.id, 10); assert.equal(again.id, 10); assert.equal(h.reviews.length, 2);
+  assert.match(h.reviews[0].body, /ocr-review-run:123-1/);
+  assert.match(h.reviews[0].body, /ocr-round:v1/);
+  assert.doesNotMatch(h.reviews[1].body, /ocr-round:v1/);
+});
+
+test("empty-body fallback review is identified by its own inline comment marker", async () => {
+  const h = fixture(); h.runId = 123; h.result.comments = [{ severity: "medium" }];
+  h.reviews.push({ id: 10, user: { login: "ocr[bot]" }, commit_id: h.metadata.head, body: "", html_url: "https://example.test/inline" });
+  h.github.rest.pulls.listReviewComments = async () => ({ data: [{ user: { login: "ocr[bot]" }, body: "<!-- ocr-123-1-abcd -->", pull_request_review_id: 10 }] });
+  h.github.rest.pulls.updateReview = async ({ review_id, body }) => { assert.equal(review_id, 10); h.reviews[0].body = body; return { data: h.reviews[0] }; };
+  assert.equal((await publishRoundSummary(h)).id, 10); assert.equal(h.reviews.length, 1);
+});

@@ -34,6 +34,7 @@ function createGitHub({ tokenFile, token, githubAuth, api = "https://api.github.
   const omit = (p, keys) => Object.fromEntries(Object.entries(p).filter(([k]) => !keys.includes(k)));
   const rest = {
     pulls: {
+      updateReview: (p) => request("PUT", `${pullPath(p)}/reviews/${p.review_id}`, { body: p.body }),
       get: (p) => request("GET", pullPath(p)),
       list: (p) => request("GET", `${repoPath(p)}/pulls${page(p)}&state=open&sort=updated&direction=desc`),
       listForHead: (p) => request("GET", `${repoPath(p)}/pulls${page(p)}&state=open&head=${encodeURIComponent(p.head)}`),

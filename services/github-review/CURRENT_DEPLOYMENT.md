@@ -93,7 +93,10 @@ Large-PR tracking: [BUDGET_CASES.md](BUDGET_CASES.md).
 
 ## Per-commit review summaries
 
-The service publishes a concise native COMMENT review after inline publication,
+After inline publication, the service writes the concise English summary into
+the first native COMMENT review that carries this job's inline comments. Batch
+and per-comment fallback reviews are identified by existing job markers. When
+no inline review exists, it creates a standalone COMMENT review. Both paths are
 bound to the reviewed head/base snapshot. It no longer rewrites the historical
 sticky summary. Existing inline formatting, positioning, overlap deduplication,
 fallback and thread-resolution behavior are unchanged. Findings without valid
