@@ -203,7 +203,7 @@ async function publishReview({ github, context, core, directory, blockSeverity =
     summaryPublisher: (args) => publishRoundSummary({ ...args, metadata, result, blockSeverity, incomplete, skipped }),
     checkpointEnabled: Boolean(metadata.fingerprint), checkpointBaseRef: metadata.base_ref,
     checkpointMergeBase: metadata.merge_base, checkpointFingerprint: metadata.fingerprint,
-    rangeMode: metadata.range?.mode, rangeFrom: metadata.range?.from, rangeTo: metadata.head,
+    rangeMode: metadata.range?.mode, rangeTo: metadata.head,
     reviewIncomplete: incomplete, reviewSkipped: skipped && !incomplete,
     core: { ...core, setOutput(name, value) {
       if (name === "comments_failed") failedComments = Number(value);

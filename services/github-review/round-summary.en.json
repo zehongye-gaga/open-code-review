@@ -1,0 +1,11 @@
+{
+  "review": "Review complete",
+  "rereview": "Re-review complete",
+  "incomplete": "Review incomplete",
+  "skipped": "Review skipped",
+  "incompleteBody": "Review or comment publication is incomplete. See the diagnostics below.",
+  "skippedBody": "No reviewable content was selected for this run.",
+  "findings": "This review found **{total} issue(s)**, including **{blocking} blocking issue(s)**.",
+  "clean": "No findings in this review.",
+  "cleanIncremental": "No findings in this incremental review."
+}

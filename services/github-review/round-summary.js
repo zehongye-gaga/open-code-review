@@ -3,7 +3,7 @@
 
 "use strict";
 const crypto = require("node:crypto");
-const copy = require("./round-summary.zh-CN.json");
+const copy = require("./round-summary.en.json");
 
 async function publishRoundSummary({ github, owner, repo, prNumber, body, metadata, result, blockSeverity, incomplete, skipped }) {
   const key = crypto.createHash("sha256").update(JSON.stringify([metadata.head, metadata.base])).digest("hex");
