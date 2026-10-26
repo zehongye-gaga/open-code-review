@@ -5,7 +5,7 @@ const fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypt
 const copy=require("./pr-alerts.zh-CN.json");
 const values=v=>Array.isArray(v)?v:Object.values(v||{});
 const clean=v=>String(v||"unknown").replace(/(?:github_pat_|gh[pousr]_|goclaw_)[A-Za-z0-9_.-]+/g,"[REDACTED]").replace(/Bearer\s+[^\s]+/gi,"Bearer [REDACTED]").replace(/https:\/\/open\.feishu\.cn\/open-apis\/bot\/v2\/hook\/[^\s]+/g,"[WEBHOOK REDACTED]").slice(0,1200);
-function events(state, notifyBlocking=true) {
+function events(state, notifyBlocking=false) {
  const rows=[],covered=new Set(),jobs=new Map(values(state.jobs).map(j=>[String(j.id),j]));
  for(const j of jobs.values()) {
   const blocked=j.state==="complete" && j.result?.blocking>0;
@@ -47,7 +47,7 @@ class Alerts {
   if(!r.ok)throw Error(`Feishu HTTP ${r.status}`);const b=await r.json();if((b.code??b.StatusCode)!==0)throw Error("Feishu rejected notification");
  }
  async collect(source,now=Date.now()){
-  const current=events(source,this.config.notifyBlocking!==false),map=new Map(current.map(e=>[e.key,e]));
+  const current=events(source,this.config.notifyBlocking===true),map=new Map(current.map(e=>[e.key,e]));
   if(!this.state){this.state={initializedAt:now,seen:Object.fromEntries(current.map(e=>[e.key,{baseline:true,at:now}])),pending:{}};this.save();return {baseline:current.length,sent:0};}
   for(const e of current)if(!this.state.seen[e.key]&&!this.state.pending[e.key])this.state.pending[e.key]={attempts:0,nextAt:0};
   for(const key of Object.keys(this.state.pending))if(!map.has(key)){delete this.state.pending[key];this.state.seen[key]={suppressed:true,at:now};}

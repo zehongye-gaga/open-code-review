@@ -8,7 +8,7 @@ function setup(t,request){const dir=fs.mkdtempSync(path.join(os.tmpdir(),"pr-ale
 test("terminal job and CI failure are one event; retries and normal cancellations are quiet",()=>{
  assert.equal(events({jobs:[job],ciReceipts:{r:{state:"failed",jobId:1,repository:"org/repo",pull_number:2}}}).length,1);
  assert.equal(events({jobs:[{...job,state:"queued"},{...job,state:"cancelled"}]}).length,0);
- assert.equal(events({jobs:[{...job,state:"complete",result:{blocking:2}}]})[0].type,"blocked");
+ assert.equal(events({jobs:[{...job,state:"complete",result:{blocking:2}}]},true)[0].type,"blocked");
  assert.equal(events({jobs:[{...job,state:"complete",result:{blocking:2}}]},false).length,0);
  const text=message({...events({jobs:[job]})[0],reason:"Bearer secret github_pat_sensitive ghs_private"});
  assert.match(text,/2026\/10\/26 10:00:00/);assert.ok(!text.includes("secret"));assert.ok(!text.includes("ghs_private"));assert.match(text,/4000000/);

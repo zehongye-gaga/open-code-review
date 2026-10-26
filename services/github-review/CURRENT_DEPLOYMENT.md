@@ -49,7 +49,7 @@ Example `/etc/ocr-review/pr-alerts.json`:
   "stateFile": "/data/crg/ocr-review/state/state.json",
   "directory": "/var/lib/ocr-pr-alerts",
   "webhookFile": "/etc/ocr-review/pr-failure-webhook",
-  "notifyBlocking": true
+  "notifyBlocking": false
 }
 ```
 
@@ -58,9 +58,9 @@ Install the supplied service/timer with host-appropriate paths. The deployed
 entry point is under `/data/crg/ocr-review/alerts-current/services/github-review/`.
 
 The first collection baselines historical failures without sending them. New
-terminal execution/dispatch failures and completed blocking reviews are reported
-separately, with repository, PR URL, commit, Beijing time, reason, task, route,
-attempt count and effective budget. Queued retries, normal closure and supersession
+terminal execution/dispatch failures are reported; completed reviews with code
+findings are silent by default (`notifyBlocking: false`), with repository, PR URL, commit, Beijing time, reason, task, route,
+attempt count and effective budget. Optional `notifyBlocking: true` enables code-finding alerts. Queued retries, normal closure and supersession
 are silent. Job-linked CI/webhook failures deduplicate into one notification.
 
 Delivery state is persisted in `alerts.json`. Failed deliveries back off from

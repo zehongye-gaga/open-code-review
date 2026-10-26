@@ -4,7 +4,7 @@
  "repository":"仓库", "time":"失败时间", "reason":"原因", "rawReason":"原始原因",
  "job":"任务", "attempt":"执行次数", "retries":"预算翻倍次数", "budget":"当前预算上限（Token）",
  "route":"调度链路", "notice":"通知生成时间", "event":"告警编号", "unknown":"未知",
- "test":"✅ OCR PR 失败告警已接通（连通性测试，不代表实际 PR 失败）。\n后续将通知仓库、PR、commit、北京时间、失败原因、预算及重试次数。执行失败和发现阻断问题会分别标明。",
+ "test":"✅ OCR PR 失败告警已接通（连通性测试，不代表实际 PR 失败）。\n后续将通知仓库、PR、commit、北京时间、失败原因、预算及重试次数。仅通知执行故障，不通知代码审查发现的问题。",
  "reasons":{
   "Token budget guard stopped review before full coverage":"Token 预算耗尽，重试后仍未完成审查覆盖",
   "n8n_tracking_stalled":"n8n 后台跟踪心跳中断",
