@@ -46,14 +46,15 @@ function observation(repository, number, thread, pr, comparison, jobs) {
 class FeedbackCollector {
   constructor(config, directory, request = fetch) {
     this.config = config; this.directory = directory; this.request = request;
+    this.auth = require("./github-auth.js").githubAuth(config, request);
     this.dataset = new ReviewDataset(path.join(directory, "benchmark"));
     this.stateFile = path.join(directory, "benchmark", "collector.json");
     try { this.state = JSON.parse(fs.readFileSync(this.stateFile)); } catch { this.state = { pulls: {} }; }
   }
   async api(route, body) {
     if (Date.now() > this.deadline || ++this.calls > 100) throw Error("Request budget reached");
-    const response = await this.request(`https://api.github.com${route}`, { method: body ? "POST" : "GET", redirect: "error",
-      signal: AbortSignal.timeout(20000), headers: { authorization: `Bearer ${fs.readFileSync(this.config.githubTokenFile, "utf8").trim()}`,
+    const response = await this.auth.request(`https://api.github.com${route}`, { method: body ? "POST" : "GET", redirect: "error",
+      signal: AbortSignal.timeout(20000), headers: {
         "user-agent": "ocr-benchmark-observer", "content-type": "application/json", accept: "application/vnd.github+json" },
       body: body ? JSON.stringify(body) : undefined });
     if (!response.ok) throw Error(`GitHub HTTP ${response.status}`);

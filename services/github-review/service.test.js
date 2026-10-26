@@ -622,3 +622,9 @@ test("Git fetch credentials are separate from the GitHub API credential", async 
   await h.service.tick();
   assert.equal(job.state, "complete");
 });
+test("App mode uses a fresh installation token for Git and ignores the legacy PAT file", async(t)=>{
+ const h=setup(t);h.service.config.githubAuth={mode:"app"};h.service.config.gitTokenFile="/must-not-read-pat";
+ h.service.github.getToken=async()=>"installation-token";const prepare=h.service.prepare;
+ h.service.prepare=async(args)=>{assert.equal(args.token,"installation-token");return prepare(args);};
+ const job=h.service.accept(repository,pr());await h.service.tick();assert.equal(job.state,"complete");
+});

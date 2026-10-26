@@ -229,7 +229,7 @@ class ReviewService {
     fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
     await this.status(job, "pending", `OCR reviewing ${job.head.slice(0, 8)} (attempt ${job.attempt})`);
     await this.prepare({ github: this.github, context, core, prNumber: job.number, cwd,
-      temp: path.join(this.config.stateDirectory, "runs"), token: this.config.gitTokenFile ? fs.readFileSync(this.config.gitTokenFile, "utf8").trim() : this.github.getToken(),
+      temp: path.join(this.config.stateDirectory, "runs"), token: this.config.githubAuth?.mode === "app" ? await this.github.getToken() : this.config.gitTokenFile ? fs.readFileSync(this.config.gitTokenFile, "utf8").trim() : await this.github.getToken(),
       checkoutBase: true, signal, expectedHead: job.head, expectedBase: job.base, snapshot: job.snapshot,
       expectedBaseRef: job.baseRef,
       gitTimeoutMs: effective.fetchTimeoutSeconds * 1000 });
