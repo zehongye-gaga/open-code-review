@@ -14,7 +14,7 @@ async function publishRoundSummary({ github, owner, repo, prNumber, body, metada
   for (let page = 1; ; page++) {
     const { data: reviews } = await github.rest.pulls.listReviews({ owner, repo, pull_number: prNumber, per_page: 100, page });
     candidates.push(...reviews.filter((r) => r.user?.login === user.login && r.commit_id === metadata.head));
-    const existing = reviews.find((r) => r.user?.login === user.login && r.commit_id === metadata.head && r.body?.includes(marker));
+    const existing = reviews.find((r) => r.user?.login === user.login && r.commit_id === metadata.head && r.body?.includes(marker) && (skipped || incomplete || !r.body.includes(`**${copy.skipped} ·`)));
     if (existing) return { id: existing.id, url: existing.html_url };
     if (reviews.length < 100) break;
   }

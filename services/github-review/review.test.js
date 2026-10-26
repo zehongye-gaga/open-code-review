@@ -294,3 +294,24 @@ test("service summaries omit the legacy visible range note", async (t) => {
     args.core.setOutput("summary_comment_url", "https://example.test/review");
   } });
 });
+
+test("documentation-only skipped ranges are retried once with explicit Markdown inclusion", async (t) => {
+  const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const directory = temp(t), h = harness();
+  git(directory, "init", "-q"); git(directory, "config", "user.email", "test@example.test"); git(directory, "config", "user.name", "Test");
+  fs.writeFileSync(path.join(directory, "README.md"), "before\n"); git(directory, "add", "."); git(directory, "commit", "-qm", "base");
+  const from = git(directory, "rev-parse", "HEAD").trim();
+  fs.writeFileSync(path.join(directory, "README.md"), "after\n"); git(directory, "commit", "-qam", "docs");
+  const to = git(directory, "rev-parse", "HEAD").trim();
+  saveResult(directory); fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify({ head: to, merge_base: from, background: "docs" }));
+  const binary = path.join(directory, "ocr");
+  fs.writeFileSync(binary, `#!${process.execPath}\nconst fs=require('fs');const args=process.argv.slice(2);fs.appendFileSync('calls.jsonl',JSON.stringify(args)+'\\n');process.stdout.write(JSON.stringify({status:'skipped',manifest:{terminal_state:'skipped'}}));\n`, { mode: 0o700 });
+  await runReview({ ...h, directory, binary, cwd: directory, options: { exclude: "private.md" } });
+  const calls = fs.readFileSync(path.join(directory, "calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(calls.length, 2);
+  for (const args of calls) { assert.equal(args[args.indexOf("--from") + 1], from); assert.equal(args[args.indexOf("--exclude") + 1], "private.md"); }
+  assert.ok(calls[1].includes("--rule"));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"))).documentationFallback, true);
+  assert.ok(fs.existsSync(path.join(directory, "documentation-skipped-result.json")));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "result.json"))).status, "skipped");
+});

@@ -252,9 +252,9 @@ class ReviewService {
     job.range = metadata.range;
     this.log("review_range", { id: job.id, ...metadata.range, resume: resume || null });
     this.state.save();
-    const saved = job.progress?.fingerprint === metadata.fingerprint && (job.progress.complete || job.progress.skipped) &&
+    const saved = job.progress?.fingerprint === metadata.fingerprint && job.progress.complete &&
       readProgress(job.progress.directory, metadata);
-    if (saved?.complete || saved?.skipped) {
+    if (saved?.complete) {
       job.directory = job.progress.directory;
       this.log("reuse_completed_review", { id: job.id, sessionId: saved.sessionId });
     } else {

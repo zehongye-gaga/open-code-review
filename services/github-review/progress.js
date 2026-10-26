@@ -70,6 +70,7 @@ async function planReview({ config, job, checkpoint, directory, cwd, signal, ide
   compatible &&= previous?.head === metadata.head && previous?.base === metadata.base;
   if (!compatible) delete metadata.incrementalExclude;
   let range;
+  if (compatible && previous.documentationFallback) metadata.documentationFallback = true;
   if (compatible) {
     range = { ...previous.range, reason: "retry" };
   } else {
@@ -120,13 +121,14 @@ async function planReview({ config, job, checkpoint, directory, cwd, signal, ide
 }
 
 function readProgress(directory, metadata) {
-  let result, exitCode = 1;
+  let result, documentationFallback = false, exitCode = 1;
   try {
     result = JSON.parse(fs.readFileSync(path.join(directory, "result.json"), "utf8"));
   } catch { return null; }
   // A supervisor crash can leave the native report but no recorded process exit.
   // Its session remains resumable; it cannot certify a completed checkpoint yet.
   try { exitCode = JSON.parse(fs.readFileSync(path.join(directory, "exit-code.json"), "utf8")); } catch { /* Unknown exit. */ }
+  try { documentationFallback = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8")).documentationFallback === true; } catch { /* Older artifacts have no fallback metadata. */ }
   const m = result?.manifest, coverage = m?.coverage;
   if (m?.schema_version !== "ocr.run-manifest/v1" || m.operation !== "review" ||
       !UUID.test(result.session_id) || result.session_id !== m.run_id || m.input?.mode !== "range" ||
@@ -143,7 +145,7 @@ function readProgress(directory, metadata) {
     coverage.selected.every((item) => item.item_id && covered.has(item.item_id));
   const skipped = exitCode === 0 && result.status === "skipped" && m.terminal_state === "skipped" &&
     !m.run_failure && Object.values(coverage).every((items) => Array.isArray(items) && items.length === 0);
-  return { sessionId: result.session_id, selected: coverage.selected.length, complete, skipped,
+  return { documentationFallback, sessionId: result.session_id, selected: coverage.selected.length, complete, skipped,
     budgetExceeded: result.summary?.budget_exceeded === true,
     findingPaths: result.comments.every((comment) => typeof comment.path === "string" && comment.path)
       ? [...new Set(result.comments.map((comment) => comment.path))] : [],

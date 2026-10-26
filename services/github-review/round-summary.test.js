@@ -51,3 +51,11 @@ test("empty-body fallback review is identified by its own inline comment marker"
   h.github.rest.pulls.updateReview = async ({ review_id, body }) => { assert.equal(review_id, 10); h.reviews[0].body = body; return { data: h.reviews[0] }; };
   assert.equal((await publishRoundSummary(h)).id, 10); assert.equal(h.reviews.length, 1);
 });
+
+test("a recovered review supersedes a skipped summary and remains deduplicated", async () => {
+  const h = fixture(); await publishRoundSummary({ ...h, skipped: true });
+  await publishRoundSummary(h); await publishRoundSummary(h);
+  assert.equal(h.reviews.length, 2);
+  assert.match(h.reviews[0].body, /Review skipped/);
+  assert.match(h.reviews[1].body, /Re-review complete/);
+});
