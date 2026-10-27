@@ -260,3 +260,34 @@ test("an unavailable PR API cannot prevent an active execution deadline",async(t
  await ci.watchdog();assert.equal(ci.receipts[p.request_id].reason,"review_deadline_exceeded");
  assert.equal(ci.receipts[p.request_id].published.state,"failure");
 });
+
+test("snapshot changes during Agent dispatch supersede receipts without execution alerts", async(t)=>{
+ const {ci,s,p,pr}=fixture(t);s.config.infrastructure.orgCI.agentReady=true;
+ await ci.submit(p,"agent");ci.agentDispatch=async()=>{pr.head.sha="c".repeat(40);throw new Error("Agent response lost");};
+ await ci.dispatch(ci.receipts[p.request_id]);
+ const r=ci.receipts[p.request_id];assert.equal(r.state,"superseded");assert.equal(r.reason,"pr_snapshot_changed");
+ assert.equal(r.lastDispatchError.code,"PR_SNAPSHOT_CHANGED");
+ assert.equal(require('./pr-alerts.js').events(s.state.data).length,0);assert.equal(s.state.data.jobs.length,0);
+});
+test("configuration conflicts remain failures rather than being silently superseded", async(t)=>{
+ const {ci,s,p}=fixture(t);await ci.submit(p,"agent");
+ ci.reuseExisting=async()=>{throw Object.assign(new Error("Configuration conflict"),{status:409});};
+ await ci.dispatch(ci.receipts[p.request_id]);assert.equal(ci.receipts[p.request_id].state,"failed");
+ assert.equal(ci.receipts[p.request_id].reason,"dispatch_configuration_or_access_error");
+});
+test("App delivery acknowledgement immediately binds a matching Policy receipt",async(t)=>{
+ const {ci,s,p,pr}=fixture(t);await ci.submit(p,"agent");
+ const job=s.state.enqueue(p.repository,pr,{force:true});
+ const event={id:'app-event',repository:p.repository,number:p.pull_number,head:p.head_sha,base:p.base_sha,route:'agent'};
+ require('./delivery.js').acknowledgeDelivery(s,event,job,{id:'agent'});
+ assert.equal(ci.receipts[p.request_id].jobId,job.id);assert.equal(job.ciRequestId,p.request_id);
+ ci.agentDispatch=async()=>{throw new Error('Must not contact Agent again');};
+ await ci.dispatch(ci.receipts[p.request_id]);assert.equal(s.state.data.jobs.length,1);
+});
+test("refresh recovers a task missed by acknowledgement before heartbeat timeout",async(t)=>{
+ const {ci,s,p,pr}=fixture(t);await ci.submit(p,"agent");
+ const r=ci.receipts[p.request_id];r.heartbeatAt-=301000;
+ const job=s.state.enqueue(p.repository,pr,{force:true});
+ await ci.refresh(r);assert.equal(r.jobId,job.id);assert.equal(r.state,'queued');
+ assert.equal(job.state,'queued');assert.equal(s.state.data.jobs.length,1);
+});

@@ -32,6 +32,7 @@ function acknowledgeDelivery(service, event, job, actor) {
   if (actor.id === service.config.infrastructure?.agentDispatch?.clientId && !event.fallbackAt) {
     event.agentAcknowledgedAt ||= new Date().toISOString();
   }
+  service.orgCI?.adoptPending(job);
   service.state.save();
 }
 module.exports = { fallbackActor, matchesDelivery, deliveryJob, submissionDelivery, acknowledgeDelivery };

@@ -55,7 +55,7 @@ class OrgCI {
     if (!this.s.eligible(r.repository, data, { ciRequestId: r.request_id }) ||
         data.head.sha !== r.head_sha || data.base.sha !== r.base_sha || data.base.ref !== r.base_ref) {
       const error = new Error("PR snapshot is no longer current");
-      error.status = 409; error.prClosed = data.state !== "open"; throw error;
+      error.status = 409; error.code = "PR_SNAPSHOT_CHANGED"; error.prClosed = data.state !== "open"; throw error;
     }
     return data;
   }
@@ -150,6 +150,9 @@ class OrgCI {
   async reuseExisting(r) {
     if (terminal.has(r.state) || r.jobId) return !!r.jobId;
     await this.current(r);
+    return this.adoptExisting(r);
+  }
+  adoptExisting(r) {
     if (terminal.has(r.state) || r.jobId) return !!r.jobId;
     const job = this.s.state.data.jobs.findLast((j) => j.repository === r.repository &&
       j.number === r.pull_number && j.head === r.head_sha && j.base === r.base_sha &&
@@ -163,6 +166,11 @@ class OrgCI {
     if (["complete", "failed", "checkpointed"].includes(job.state)) r.state = "queued";
     this.s.state.save();
     return true;
+  }
+  adoptPending(job) {
+    for (const r of Object.values(this.receipts)) {
+      if (r.repository === job.repository && r.pull_number === job.number && !r.jobId && !terminal.has(r.state)) this.adoptExisting(r);
+    }
   }
   async dispatch(r) {
     if (this.dispatching.has(r.request_id) || r.jobId || terminal.has(r.state) || Date.now() < r.nextDispatchAt) return;
@@ -190,8 +198,11 @@ class OrgCI {
     } catch (error) {
       if (error.persistence) throw error;
       if (terminal.has(r.state) || r.jobId) return;
+      r.lastDispatchError = { status: error.status || null, code: error.code || null, at: Date.now() };
+      this.s.log("ci_dispatch_rejected", { id: r.request_id, status: error.status, code: error.code, error: error.message });
       const permanent = error.status && error.status < 500 && ![408, 429].includes(error.status);
-      if (permanent || r.dispatchAttempts >= 3) this.stop(r, "failed", permanent ? "dispatch_configuration_or_access_error" : "dispatch_retries_exhausted");
+      if (error.code === "PR_SNAPSHOT_CHANGED") this.stop(r, "superseded", error.prClosed ? "pr_closed" : "pr_snapshot_changed");
+      else if (permanent || r.dispatchAttempts >= 3) this.stop(r, "failed", permanent ? "dispatch_configuration_or_access_error" : "dispatch_retries_exhausted");
       else { r.state = "retrying"; r.nextDispatchAt = Date.now() + 30000 * r.dispatchAttempts; }
       this.s.state.save();
     } finally { this.dispatching.delete(r.request_id); }
@@ -219,6 +230,7 @@ class OrgCI {
     await this.publish(r, state, description, target);
   }
   async refresh(r) {
+    if (!terminal.has(r.state) && !r.jobId) this.adoptExisting(r);
     const now = Date.now(), j = this.s.state.data.jobs.find((job) => job.id === r.jobId);
     const observed = jobOutcome(j);
     if (!terminal.has(r.state) && !observed?.terminal) {
