@@ -221,6 +221,11 @@ class OrgCI {
   }
   async refresh(r) {
     const now = Date.now(), j = this.s.state.data.jobs.find((job) => job.id === r.jobId);
+    const observed = jobOutcome(j);
+    if (!terminal.has(r.state) && !observed?.terminal) {
+      if (now - r.createdAt > (this.config.totalSeconds || 7200) * 1000) this.stop(r, "failed", "review_deadline_exceeded");
+      else if (!j && now - r.heartbeatAt > (this.config.heartbeatSeconds || 300) * 1000) this.stop(r, "failed", "n8n_tracking_stalled");
+    }
     if (!terminal.has(r.state)) {
       try { await this.current(r); }
       catch (error) {
@@ -233,9 +238,6 @@ class OrgCI {
         r.state = result.receiptState; r.reason = result.reason; r.finalStatus = result.commitStatus;
         r.finishedAt = now; this.s.state.save();
       }
-      if (!terminal.has(r.state) && now - r.createdAt > (this.config.totalSeconds || 7200) * 1000) this.stop(r, "failed", "review_deadline_exceeded");
-      // Once accepted by the backend, execution does not depend on n8n polling.
-      if (!j && !terminal.has(r.state) && now - r.heartbeatAt > (this.config.heartbeatSeconds || 300) * 1000) this.stop(r, "failed", "n8n_tracking_stalled");
     }
     if (terminal.has(r.state)) {
       const result = receiptOutcome(r, j);

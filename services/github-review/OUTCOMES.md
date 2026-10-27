@@ -34,7 +34,7 @@ Isolated GitHub integration PR: https://github.com/lexmount/OCR-Test-Public/pull
 
 The integration test uses a dedicated target branch outside production routing, separate backend state, real Git fetches and GitHub App status/Review writes, and deterministic native-result fixtures. Model failures and GitHub publication failures are injected. No model or Feishu webhook is called by these test cases. Intentional failing `ocr-state-test/*` statuses demonstrate error handling rather than production incidents.
 
-Cases: normal skip, clean completion, blocking findings, successful publication retry, exhausted publication retry, execution failure, lost tracker with an accepted job, and cancellation. Duplicate CI submissions retain one job. A publication retry retains one native execution.
+Cases: normal skip, clean completion, blocking findings, successful publication retry, exhausted publication retry, execution failure, lost tracker with an accepted job, cancellation, and an expired execution deadline while the PR API is unavailable. Duplicate CI submissions retain one job. A publication retry retains one native execution.
 
 ## Rollout and rollback
 

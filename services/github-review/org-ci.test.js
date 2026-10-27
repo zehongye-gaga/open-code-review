@@ -250,3 +250,11 @@ test("lost tracker does not cancel an accepted backend job, but execution deadli
   r.createdAt-=8000000;await ci.watchdog();assert.equal(j.state,"cancelled");assert.equal(r.state,"failed");
   assert.equal(r.reason,"review_deadline_exceeded");
 });
+
+test("an unavailable PR API cannot prevent an active execution deadline",async(t)=>{
+ const {ci,s,p}=fixture(t);await ci.submit(p,"direct");await ci.dispatch(ci.receipts[p.request_id]);
+ ci.receipts[p.request_id].createdAt-=8000000;
+ s.github.rest.pulls.get=async()=>{throw Error("GitHub unreachable");};
+ await ci.watchdog();assert.equal(ci.receipts[p.request_id].reason,"review_deadline_exceeded");
+ assert.equal(ci.receipts[p.request_id].published.state,"failure");
+});
