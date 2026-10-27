@@ -71,7 +71,7 @@ function queueFeedback(service, job) {
     jobId: job.id, state: "pending", attempts: 0, nextAt: 0, createdAt: new Date().toISOString(),
     payload: { repository: job.repository, pull_number: job.number, job_id: job.id, head_sha: job.head,
       base_sha: job.base, status: outcome.receiptState, outcome: outcome.kind, failure_phase: job.failurePhase, attempt: job.attempt, budget: job.retryBudget ?? job.settings?.options?.budget,
-      budget_retries: job.budgetRetries || [], coverage_complete: job.progress?.complete || false,
+      budget_retries: job.budgetRetries || [], resume_recoveries: job.resumeFallbacks || [], coverage_complete: job.progress?.complete || false,
       findings: job.progress?.findings, summary_url: job.result?.summaryURL, error: job.error,
       automatic_retry_scheduled: job.state === "queued" } });
 }

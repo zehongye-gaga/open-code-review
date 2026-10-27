@@ -42,7 +42,7 @@ class State {
     // even if their asynchronous GitHub lookups complete at the same time.
     if (deduplicateSnapshot && !settings?.preview) {
       const same = this.data.jobs.findLast((j) => j.repository === repository && j.number === pr.number &&
-        j.head === pr.head.sha && j.base === pr.base.sha && j.baseRef === pr.base.ref && !j.settings?.preview &&
+        j.head === pr.head.sha && j.base === pr.base.sha && j.baseRef === pr.base.ref && !j.settings?.preview && require("./review-policy.js").compatiblePolicy(j, settings) &&
         ["queued", "running", "complete", "failed", "checkpointed"].includes(j.state));
       if (same) {
         if (ciRequestId && !same.ciRequestId) { same.ciRequestId = ciRequestId; this.save(); }

@@ -103,10 +103,11 @@ async function prepareReview({ github, context, core, prNumber, cwd = process.cw
 async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd = process.cwd(),
   model = process.env.OCR_CODEX_MODEL || "gpt-6-astra",
   budget = process.env.OCR_MAX_TOKENS_BUDGET || "0", provider = "openai-codex",
-  signal, timeoutMs = 25 * 60 * 1000, resume, options = {} }) {
+  signal, timeoutMs = 25 * 60 * 1000, resume, requireResume = false, onResumeFallback, onFreshStart, options = {} }) {
   const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
   const from = metadata.range?.from || metadata.merge_base;
   if (!SHA.test(metadata.head) || !SHA.test(from)) throw new Error("Invalid review range");
+  if (requireResume && !resume) throw Object.assign(new Error("Budget recovery requires a compatible saved session"), { retryable: false, code: "RESUME_REQUIRED" });
   if (resume && !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(resume)) throw new Error("Invalid resume session");
   if (!/^(0|[1-9][0-9]*)$/.test(String(budget)) || !Number.isSafeInteger(Number(budget))) {
     throw new Error("OCR_MAX_TOKENS_BUDGET must be a non-negative integer");
@@ -123,7 +124,7 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
   const stderr = fs.openSync(path.join(directory, "stderr.log"), "w", 0o600);
   const env = childEnvironment();
   if (options.requestTimeoutSeconds) env.OCR_LLM_TIMEOUT = String(options.requestTimeoutSeconds);
-  let code = 1;
+  let code = 1, startError;
   try {
     code = await new Promise((resolve, reject) => {
       const child = spawn(binary, ["review", "--repo", cwd, "--from", from,
@@ -149,10 +150,14 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
         clearTimeout(timer);
         clearTimeout(forceTimer);
         signal?.removeEventListener("abort", terminate);
-        resolve(exitCode === null ? 1 : exitCode);
+        if (startError) reject(startError);
+        else resolve(exitCode === null ? 1 : exitCode);
       });
+      try { if (!resume && child.pid && onFreshStart) onFreshStart(child.pid); }
+      catch (error) { startError = error; terminate(); }
     });
   } catch (error) {
+    if (startError || error.persistence) throw error;
     fs.writeSync(stderr, `Could not run installed OCR: ${error.message}\n`);
   } finally {
     fs.closeSync(stdout);
@@ -160,7 +165,7 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
   }
   fs.writeFileSync(path.join(directory, "exit-code.json"), JSON.stringify(code));
   core.info(`OCR exited with code ${code}; report and diagnostics are saved in the job directory`);
-  if (code === 0 && !signal?.aborted && !options.preview && !options.rule && !metadata.documentationFallback) {
+  if (code === 0 && !signal?.aborted && !requireResume && !options.preview && !options.rule && !metadata.documentationFallback) {
     const report = JSON.parse(fs.readFileSync(path.join(directory, "result.json"), "utf8"));
     if (report.status === "skipped" && report.manifest?.terminal_state === "skipped") {
       const { stdout: changed } = await exec("git", ["-c", "core.hooksPath=/dev/null", "diff", "--name-only", "--diff-filter=AMRT", "-z", from, metadata.head, "--"],
@@ -173,18 +178,20 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
         metadata.documentationFallback = true;
         fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify(metadata, null, 2), { mode: 0o600 });
         core.notice("Retrying the unchanged documentation-only range with Markdown enabled; explicit exclusions still apply");
-        return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, options });
+        return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, onResumeFallback, onFreshStart, options });
       }
     }
   }
   if (resume && code !== 0 && !signal?.aborted && fs.statSync(path.join(directory, "result.json")).size === 0 &&
       /^Error: (load resume session:|resume rejected:|resume session ")/m.test(fs.readFileSync(path.join(directory, "stderr.log"), "utf8"))) {
+    if (requireResume && !onResumeFallback) throw Object.assign(new Error("Budget recovery session was rejected; recovery must be recorded before a full rerun"), { retryable: false, code: "RESUME_REJECTED" });
+    if (onResumeFallback) await onResumeFallback("native_resume_rejected");
     for (const name of ["result.json", "stderr.log", "exit-code.json"]) {
       fs.renameSync(path.join(directory, name), path.join(directory, `resume-rejected-${name}`));
     }
     core.notice("The saved session could not be resumed; starting this snapshot afresh");
     if (metadata.incrementalExclude?.length) options = { ...options, exclude: options.exclude.split(",").filter((p) => !metadata.incrementalExclude.includes(p)).join(",") };
-    return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, options });
+    return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, onResumeFallback, onFreshStart, options });
   }
 }
 

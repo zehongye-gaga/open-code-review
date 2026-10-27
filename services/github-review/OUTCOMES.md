@@ -20,8 +20,8 @@ A normal native skip requires a valid zero-item native manifest and a published 
 1. Ingress persists a receipt and attaches a job using the existing repository/PR/head/base identity. A second ingress reuses the job.
 2. Native progress validates coverage. The executor records the phase (`preparation`, `review`, `publication`) and preserves artifacts for retries.
 3. CI refresh validates that the PR snapshot is still current, then consumes the job outcome **before** applying receipt timeouts. A completed job is not converted into a failure because polling arrived late.
-4. The n8n heartbeat watchdog applies while no backend job has been attached. Once attached, the backend worker/retry queue owns progress; the existing total execution deadline remains enforced.
-5. n8n consumes `terminal` and `commit_status`; Policy and Ruleset need no schema changes. GitHub status publication failures remain retryable by the watchdog without starting another review.
+4. The backend dispatcher owns both accepted receipts and attached jobs. n8n heartbeat loss never determines execution failure. The total execution deadline remains enforced.
+5. n8n forwards admission/status responses without background tracking. Policy consumes the versioned admission contract; Ruleset enforcement remains a separate choice. GitHub status publication failures remain retryable by the watchdog without starting another review.
 6. Alerts use the same job outcome. Legacy completed records missing newer evidence do not generate new historical alerts. Failed ingress records cannot override a verified completed job.
 
 GitHub Commit Status has no `skipped` value. A normal skip therefore uses `success` with `OCR skipped: no reviewable items`; this is not a claim that code was reviewed.
@@ -41,3 +41,5 @@ Cases: normal skip, clean completion, blocking findings, successful publication 
 Stage the service, alert collector and their shared outcome module together. Preserve configuration, state storage, credentials, n8n, Policy and Ruleset. Wait for an idle worker window before switching the release pointer; keep previous release pointers and a state backup. If a job arrives during the cutover check, abort the rollout and keep the old release running.
 
 Rollback switches code pointers to the previous releases. Do not restore an old state file over newly accepted tasks. Terminal receipts created by this version remain compatible with the preceding skipped-state release.
+
+See [CONTROL-PLANE.md](CONTROL-PLANE.md) for the shared dispatcher, direct unlimited-budget recovery, migration and coordinated rollback.

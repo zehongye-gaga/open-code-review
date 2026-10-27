@@ -47,7 +47,7 @@ class OrgCI {
   }
   view(r) {
     return { ...identity(r), outcome: receiptOutcome(r, this.s.state.data.jobs.find((j) => j.id === r.jobId)).kind, state: r.state, durable: true, task_id: r.request_id,
-      status_published: !!r.published, commit_status: r.published?.state || null,
+      acceptance: "accepted", scheduler: "backend", contract_version: 2, status_published: !!r.published, commit_status: r.published?.state || null,
       job_id: r.jobId || null, reason: r.reason || null, terminal: terminal.has(r.state) && !!r.published && r.published.state !== "pending" };
   }
   async current(r) {
@@ -55,7 +55,7 @@ class OrgCI {
     if (!this.s.eligible(r.repository, data, { ciRequestId: r.request_id }) ||
         data.head.sha !== r.head_sha || data.base.sha !== r.base_sha || data.base.ref !== r.base_ref) {
       const error = new Error("PR snapshot is no longer current");
-      error.status = 409; error.prClosed = data.state !== "open"; throw error;
+      error.status = 409; error.code = "PR_SNAPSHOT_CHANGED"; error.prClosed = data.state !== "open"; throw error;
     }
     return data;
   }
@@ -81,7 +81,7 @@ class OrgCI {
     if (!["direct", "agent"].includes(route)) fail("Invalid n8n route");
     return this.lock(normalized.request_id, async () => {
       let r = this.receipts[normalized.request_id];
-      if (r) { await this.reopen(r); await this.refresh(r); return this.view(r); }
+      if (r) { await this.retrySubmission(r, input.retry_key); await this.reopen(r); await this.refresh(r); return this.view(r); }
       await this.current(normalized);
       if (Object.keys(this.receipts).length >= 25000) fail("CI receipt capacity reached", 503);
       for (const old of Object.values(this.receipts)) {
@@ -89,11 +89,25 @@ class OrgCI {
       }
       r = this.receipts[normalized.request_id] = { ...normalized, route, state: "accepted", sequence: ++this.s.state.data.sequence,
         createdAt: Date.now(), heartbeatAt: Date.now(), dispatchAttempts: 0, nextDispatchAt: 0 };
+      if (input.retry_key !== undefined) await this.retrySubmission(r, input.retry_key);
       this.s.state.save();
       if (await this.reuseExisting(r)) await this.refresh(r);
       else await this.publish(r, "pending", "OCR accepted; waiting for background dispatch");
       return this.view(r);
     });
+  }
+  async retrySubmission(r, retryKey) {
+    if (retryKey === undefined) return;
+    if (typeof retryKey !== "string" || !/^[0-9]+:[0-9]+$/.test(retryKey) || retryKey.length > 80) fail("Invalid retry key");
+    if (Number(retryKey.split(":")[1]) < 2 || (r.retryKeys || []).includes(retryKey)) return;
+    (r.retryKeys ||= []).push(retryKey); this.s.state.save();
+    if (r.state !== "failed" || r.jobId || this.dispatching.has(r.request_id)) return;
+    await this.current(r);
+    (r.retryHistory ||= []).push({ state: r.state, reason: r.reason, finishedAt: r.finishedAt, dispatchAttempts: r.dispatchAttempts });
+    r.state = "accepted"; r.createdAt = Date.now(); r.nextDispatchAt = 0; r.dispatchAttempts = 0;
+    r.sequence = ++this.s.state.data.sequence;
+    for (const key of ["reason", "finishedAt", "finalStatus", "published", "lastDispatchError"]) delete r[key];
+    this.s.state.save();
   }
   async status(input) { const r = this.lookup(input); await this.lock(r.request_id, () => this.refresh(r)); return this.view(r); }
   async reopen(r) {
@@ -139,7 +153,7 @@ class OrgCI {
       if (terminal.has(r.state)) fail("CI receipt became terminal", 409);
       const settings = resolveOptions(this.s.config, repository, args.profile || repository.defaultProfile || "standard", args.options || {});
       if (!["low", "medium"].includes(settings.options.blockSeverity)) settings.options.blockSeverity = "medium";
-      settings.executorVersion = crypto.createHash("sha256").update(fs.readFileSync(this.s.config.binary)).digest("hex");
+      require("./review-policy.js").bindPolicy(this.s, repository, settings);
       settings.preview = false; settings.options.fullReview = false;
       const j = this.s.accept(r.repository, pr, { force: true, fullReview: false, deduplicateSnapshot: true, settings, ciRequestId: id,
         identity: id, requestId: args.request_id, requestedBy: actor.id });
@@ -150,10 +164,13 @@ class OrgCI {
   async reuseExisting(r) {
     if (terminal.has(r.state) || r.jobId) return !!r.jobId;
     await this.current(r);
+    return this.adoptExisting(r);
+  }
+  adoptExisting(r) {
     if (terminal.has(r.state) || r.jobId) return !!r.jobId;
     const job = this.s.state.data.jobs.findLast((j) => j.repository === r.repository &&
       j.number === r.pull_number && j.head === r.head_sha && j.base === r.base_sha &&
-      j.baseRef === r.base_ref && !j.settings?.preview &&
+      j.baseRef === r.base_ref && !j.settings?.preview && require("./review-policy.js").currentPolicy(this.s, j) &&
       (!j.ciRequestId || j.ciRequestId === r.request_id) &&
       ["queued", "running", "complete", "failed", "checkpointed"].includes(j.state));
     if (!job) return false;
@@ -164,11 +181,17 @@ class OrgCI {
     this.s.state.save();
     return true;
   }
+  adoptPending(job) {
+    for (const r of Object.values(this.receipts)) {
+      if (r.repository === job.repository && r.pull_number === job.number && !r.jobId && !terminal.has(r.state)) this.adoptExisting(r);
+    }
+  }
   async dispatch(r) {
     if (this.dispatching.has(r.request_id) || r.jobId || terminal.has(r.state) || Date.now() < r.nextDispatchAt) return;
     this.dispatching.add(r.request_id); r.state = "dispatching"; r.dispatchAttempts++; this.s.state.save();
     try {
-      if (await this.reuseExisting(r)) { await this.refresh(r); return; }
+      await this.refresh(r);
+      if (r.jobId || terminal.has(r.state)) return;
       if (r.route === "agent") {
         try {
           if (this.config.agentReady !== true) fail("Agent MCP cutover is not ready", 409);
@@ -190,9 +213,11 @@ class OrgCI {
     } catch (error) {
       if (error.persistence) throw error;
       if (terminal.has(r.state) || r.jobId) return;
-      const permanent = error.status && error.status < 500 && ![408, 429].includes(error.status);
-      if (permanent || r.dispatchAttempts >= 3) this.stop(r, "failed", permanent ? "dispatch_configuration_or_access_error" : "dispatch_retries_exhausted");
-      else { r.state = "retrying"; r.nextDispatchAt = Date.now() + 30000 * r.dispatchAttempts; }
+      r.lastDispatchError = { status: error.status || null, code: error.code || null, at: Date.now() };
+      this.s.log("ci_dispatch_rejected", { id: r.request_id, status: error.status, code: error.code, error: error.message });
+      const failure = require("./dispatch-control.js").dispatchFailure(error);
+      if (!failure.retryable || r.dispatchAttempts >= 3) this.stop(r, failure.state, failure.reason);
+      else { r.state = "retrying"; r.nextDispatchAt = Math.max(failure.retryAt || 0, Date.now() + 30000 * r.dispatchAttempts); }
       this.s.state.save();
     } finally { this.dispatching.delete(r.request_id); }
     await this.refresh(r);
@@ -200,10 +225,7 @@ class OrgCI {
   async tick(input) {
     const r = this.lookup(input); r.heartbeatAt = Date.now(); this.s.state.save();
     await this.lock(r.request_id, () => this.refresh(r));
-    if (!terminal.has(r.state)) this.dispatch(r).catch((error) => {
-      this.s.log("ci_dispatch_error", { id: r.request_id, error: error.message });
-      if (error.persistence) process.exit(1);
-    });
+    // Compatibility endpoint: the backend scheduler owns admission and recovery.
     return this.view(r);
   }
   async publishJobStatus(job, state, description, target) {
@@ -218,18 +240,38 @@ class OrgCI {
     }
     await this.publish(r, state, description, target);
   }
+  repairable(r) {
+    const job = this.s.state.data.jobs.find(j => j.id === r.jobId);
+    return r.state === "failed" && ["review_incomplete_or_failed", "n8n_tracking_stalled"].includes(r.reason) &&
+      ["complete", "blocked", "skipped"].includes(jobOutcome(job)?.kind) && require("./review-policy.js").currentPolicy(this.s, job);
+  }
+  async reconcileLegacy(r) {
+    if (!this.repairable(r)) return;
+    const previous = { state: r.state, reason: r.reason, published: r.published, finishedAt: r.finishedAt };
+    try { await this.current(r); }
+    catch (error) {
+      if (error.code !== "PR_SNAPSHOT_CHANGED") throw error;
+      r.reconciliation = { at: Date.now(), previous, result: "superseded" };
+      this.stop(r, "superseded", error.prClosed ? "pr_closed" : "pr_snapshot_changed"); return;
+    }
+    r.reconciliation = { at: Date.now(), previous, result: "verified_backend_outcome" };
+    r.state = "queued"; delete r.finalStatus; delete r.reason;
+    this.s.state.save();
+  }
   async refresh(r) {
+    await this.reconcileLegacy(r);
+    if (!terminal.has(r.state) && !r.jobId) this.adoptExisting(r);
     const now = Date.now(), j = this.s.state.data.jobs.find((job) => job.id === r.jobId);
     const observed = jobOutcome(j);
     if (!terminal.has(r.state) && !observed?.terminal) {
       if (now - r.createdAt > (this.config.totalSeconds || 7200) * 1000) this.stop(r, "failed", "review_deadline_exceeded");
-      else if (!j && now - r.heartbeatAt > (this.config.heartbeatSeconds || 300) * 1000) this.stop(r, "failed", "n8n_tracking_stalled");
+
     }
     if (!terminal.has(r.state)) {
       try { await this.current(r); }
       catch (error) {
-        if (error.status === 409) this.stop(r, "superseded", error.prClosed ? "pr_closed" : "pr_snapshot_changed");
-        else if ([401, 403, 404].includes(error.status)) this.stop(r, "failed", "repository_access_failed");
+        if (error.code === "PR_SNAPSHOT_CHANGED") this.stop(r, "superseded", error.prClosed ? "pr_closed" : "pr_snapshot_changed");
+        else if ([401, 403, 404].includes(error.status) && !require("./dispatch-control.js").dispatchFailure(error).retryable) this.stop(r, "failed", "repository_access_failed");
         else throw error;
       }
       const result = jobOutcome(j);
@@ -253,7 +295,7 @@ class OrgCI {
     this.watching = true;
     try {
       for (const r of Object.values(this.receipts)) {
-        if (terminal.has(r.state) && r.published?.state && r.published.state !== "pending") continue;
+        if (terminal.has(r.state) && r.published?.state && r.published.state !== "pending" && !this.repairable(r)) continue;
         try { await this.lock(r.request_id, () => this.refresh(r)); }
         catch (error) { this.s.log("ci_watchdog_retry", { id: r.request_id, error: error.message }); if (error.persistence) throw error; }
       }

@@ -25,6 +25,8 @@ function fixture(t) {
     eligible: (_repo, pull, job) => job.ciRequestId && pull.state === "open",
     github: { rest: { pulls: { get: async () => ({ data: pr }) }, repos: { createCommitStatus: async (args) => { statuses.push(args); } } } },
     accept: (repo, pull, options) => s.state.enqueue(repo, pull, options) };
+  const enqueue = s.state.enqueue.bind(s.state);
+  s.state.enqueue = (repo, pull, options = {}) => enqueue(repo, pull, { settings: require("./review-policy.js").bindPolicy(s,s.repo(repo),require("./options.js").resolveOptions(s.config, s.repo(repo))), ...options });
   const ci = new OrgCI(s); s.orgCI = ci;
   return { s, ci, statuses, p, pr };
 }
@@ -57,10 +59,10 @@ test("restart retains receipt and queued job identity", async (t) => {
   s.state = new State(path.dirname(s.state.file)); const next = new OrgCI(s);
   await next.submit(p, "direct"); await next.dispatch(next.receipts[p.request_id]); assert.equal(s.state.data.jobs.length, 1);
 });
-test("n8n loss is failed by independent watchdog", async (t) => {
+test("n8n loss cannot fail a durably accepted receipt", async (t) => {
   const { ci, p, statuses } = fixture(t); await ci.submit(p, "direct");
   ci.receipts[p.request_id].heartbeatAt -= 301000; await ci.watchdog();
-  assert.equal(statuses.at(-1).state, "failure"); assert.equal(ci.receipts[p.request_id].reason, "n8n_tracking_stalled");
+  assert.equal(statuses.at(-1).state, "pending"); assert.equal(ci.receipts[p.request_id].state, "accepted");
 });
 test("deadline failure survives GitHub outage and status retries", async (t) => {
   const { ci, s, p, statuses } = fixture(t); await ci.submit(p, "direct");
@@ -121,7 +123,7 @@ test("HTTP gateway enforces both credentials and supports submit/query/track", a
   const submitted = await send("ci_submit", { ...p, route: "direct" }); assert.equal(submitted.status, 202);
   const ack = await submitted.json(); assert.equal(ack.status_published, true);
   assert.equal((await send("ci_tick", ack)).status, 200);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await service.githubEvents.tick();
   assert.equal(service.state.data.jobs.length, 1);
   const job = service.state.data.jobs[0]; job.state = "complete"; job.progress = { complete: true }; job.result = { blocking: 0 };
   const result = await (await send("ci_status", p)).json(); assert.equal(result.commit_status, "success"); assert.equal(result.terminal, true);
@@ -259,4 +261,159 @@ test("an unavailable PR API cannot prevent an active execution deadline",async(t
  s.github.rest.pulls.get=async()=>{throw Error("GitHub unreachable");};
  await ci.watchdog();assert.equal(ci.receipts[p.request_id].reason,"review_deadline_exceeded");
  assert.equal(ci.receipts[p.request_id].published.state,"failure");
+});
+
+test("snapshot changes during Agent dispatch supersede receipts without execution alerts", async(t)=>{
+ const {ci,s,p,pr}=fixture(t);s.config.infrastructure.orgCI.agentReady=true;
+ await ci.submit(p,"agent");ci.agentDispatch=async()=>{pr.head.sha="c".repeat(40);throw new Error("Agent response lost");};
+ await ci.dispatch(ci.receipts[p.request_id]);
+ const r=ci.receipts[p.request_id];assert.equal(r.state,"superseded");assert.equal(r.reason,"pr_snapshot_changed");
+ assert.equal(r.lastDispatchError.code,"PR_SNAPSHOT_CHANGED");
+ assert.equal(require('./pr-alerts.js').events(s.state.data).length,0);assert.equal(s.state.data.jobs.length,0);
+});
+test("configuration conflicts remain failures rather than being silently superseded", async(t)=>{
+ const {ci,s,p}=fixture(t);await ci.submit(p,"agent");
+ ci.current=async()=>{throw Object.assign(new Error("Configuration conflict"),{status:409});};
+ await ci.dispatch(ci.receipts[p.request_id]);assert.equal(ci.receipts[p.request_id].state,"failed");
+ assert.equal(ci.receipts[p.request_id].reason,"dispatch_configuration_or_access_error");
+});
+test("App delivery acknowledgement immediately binds a matching Policy receipt",async(t)=>{
+ const {ci,s,p,pr}=fixture(t);await ci.submit(p,"agent");
+ const job=s.state.enqueue(p.repository,pr,{force:true});
+ const event={id:'app-event',repository:p.repository,number:p.pull_number,head:p.head_sha,base:p.base_sha,route:'agent'};
+ require('./delivery.js').acknowledgeDelivery(s,event,job,{id:'agent'});
+ assert.equal(ci.receipts[p.request_id].jobId,job.id);assert.equal(job.ciRequestId,p.request_id);
+ ci.agentDispatch=async()=>{throw new Error('Must not contact Agent again');};
+ await ci.dispatch(ci.receipts[p.request_id]);assert.equal(s.state.data.jobs.length,1);
+});
+test("refresh recovers a task missed by acknowledgement before heartbeat timeout",async(t)=>{
+ const {ci,s,p,pr}=fixture(t);await ci.submit(p,"agent");
+ const r=ci.receipts[p.request_id];r.heartbeatAt-=301000;
+ const job=s.state.enqueue(p.repository,pr,{force:true});
+ await ci.refresh(r);assert.equal(r.jobId,job.id);assert.equal(r.state,'queued');
+ assert.equal(job.state,'queued');assert.equal(s.state.data.jobs.length,1);
+});
+
+test("backend scheduler recovers persisted admission without any n8n tick", async(t)=>{
+ const {ci,s,p}=fixture(t);await ci.submit(p,"direct");
+ s.state=new State(path.dirname(s.state.file));s.orgCI=new OrgCI(s);
+ s.config.infrastructure.externalDispatch=true;
+ const events=s.githubEvents=new (require('./events.js').GitHubEvents)(s);
+ await Promise.all([events.tick(),events.tick()]);
+ assert.equal(s.state.data.jobs.length,1);assert.equal(s.orgCI.receipts[p.request_id].jobId,s.state.data.jobs[0].id);
+ assert.equal(s.orgCI.view(s.orgCI.receipts[p.request_id]).scheduler,'backend');
+});
+test("explicit Actions rerun reopens failed admission once and never revives superseded work",async(t)=>{
+ const {ci,p}=fixture(t);await ci.submit(p,'direct');const r=ci.receipts[p.request_id];ci.stop(r,'failed','dispatch_retries_exhausted');
+ await ci.submit(p,'direct');assert.equal(r.state,'failed');
+ await ci.submit({...p,retry_key:'123:2'},'direct');assert.equal(r.state,'accepted');
+ ci.stop(r,'failed','dispatch_retries_exhausted');await ci.submit({...p,retry_key:'123:2'},'direct');assert.equal(r.state,'failed');
+ ci.stop(r,'superseded','pr_snapshot_changed');await ci.submit({...p,retry_key:'123:3'},'direct');assert.equal(r.state,'superseded');
+});
+test("Policy cannot adopt a weaker verdict threshold or a changed policy",async(t)=>{
+ for(const change of [{options:{blockSeverity:'high'}},{policyVersion:'obsolete'}]){
+  const {ci,s,p,pr}=fixture(t);const settings=require('./options.js').resolveOptions(s.config,s.repo(p.repository));
+  const old=s.state.enqueue(p.repository,pr,{force:true,settings:{...settings,...change}});
+  old.state='complete';old.progress={complete:true};old.result={findings:1,blocking:0};
+  await ci.submit(p,'direct');await ci.dispatch(ci.receipts[p.request_id]);
+  assert.notEqual(ci.receipts[p.request_id].jobId,old.id);assert.equal(s.state.data.jobs.length,2);
+ }
+});
+test("both ingresses classify real configuration conflicts as failures",()=>{
+ const {dispatchFailure}=require('./dispatch-control.js');
+ assert.equal(dispatchFailure({status:409}).state,'failed');
+ assert.equal(dispatchFailure({status:409,code:'PR_SNAPSHOT_CHANGED'}).state,'superseded');
+ for(const status of [408,429,500,502,503])assert.equal(dispatchFailure({status}).retryable,true);
+ for(const status of [400,401,403,404,409,422])assert.equal(dispatchFailure({status}).retryable,false);
+});
+test("App and CI share dispatch capacity and per-PR ownership",async(t)=>{
+ const {ci,s,p}=fixture(t);s.config.dispatchConcurrency=1;s.config.infrastructure.externalDispatch=true;
+ await ci.submit(p,'direct');const events=s.githubEvents=new(require('./events.js').GitHubEvents)(s);
+ let release;const gate=new Promise(r=>release=r);let calls=0;
+ ci.dispatch=async()=>{calls++;await gate;};
+ const first=events.tick();await events.tick();assert.equal(calls,1);assert.equal(events.activeDispatches.size,1);
+ release();await first;assert.equal(events.activeDispatches.size,0);
+});
+test("real Policy Python client accepts backend HTTP admission and all terminal projections",async(t)=>{
+ const client=process.env.OCR_POLICY_CLIENT || path.resolve(__dirname,'../../../github-policy-public/ocr/ci_client.py');
+ if(!fs.existsSync(client)){t.skip('Set OCR_POLICY_CLIENT to run the cross-repository contract test');return;}
+ const {ci,s,p,pr}=fixture(t);const dir=path.dirname(s.state.file);
+ const eventFile=path.join(dir,'event.json');fs.writeFileSync(eventFile,JSON.stringify({pull_request:pr}));
+ const gateway=require('node:http').createServer(async(req,res)=>{
+  try {let body='';for await(const chunk of req)body+=chunk;
+   const input=JSON.parse(body);assert.equal(req.headers.authorization,'Bearer fixture');
+   const view=req.url==='/ocr-ci-submit'?await ci.submit(input,'direct'):await ci.status(input);
+   res.writeHead(202,{'content-type':'application/json'});res.end(JSON.stringify(view));
+  }catch(e){res.writeHead(502);res.end('{}');}
+ });
+ await new Promise(r=>gateway.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>gateway.close(r)));
+ const script="import importlib.util,sys,json; s=importlib.util.spec_from_file_location('client',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);m.BASE_URL=sys.argv[2];sys.exit(m.main())";
+ await new Promise((resolve,reject)=>{
+  const child=require('node:child_process').spawn('python3',['-c',script,client,`http://127.0.0.1:${gateway.address().port}/`],{env:{...process.env,GITHUB_EVENT_NAME:'pull_request_target',GITHUB_REPOSITORY:p.repository,GITHUB_EVENT_PATH:eventFile,OCR_CI_TOKEN:'fixture'}});
+  let output='';child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>output+=b);child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(Error(output)));
+ });
+ assert.equal(s.state.data.jobs.length,0);
+ s.githubEvents=new(require('./events.js').GitHubEvents)(s);await s.githubEvents.tick();assert.equal(s.state.data.jobs.length,1);
+ const j=s.state.data.jobs[0],r=ci.receipts[p.request_id],rows=[];
+ for(const kind of ['complete','blocked','skipped','execution_failed','publication_failed','cancelled','superseded']){
+  r.state='queued';delete r.finalStatus;delete r.reason;
+  j.state=['execution_failed','publication_failed'].includes(kind)?'failed':['cancelled','superseded'].includes(kind)?kind:'complete';
+  j.failurePhase=kind==='publication_failed'?'publication':'review';
+  j.progress={complete:kind!=='skipped',skipped:kind==='skipped',selected:kind==='skipped'?0:1};
+  j.result={findings:kind==='blocked'?1:0,blocking:kind==='blocked'?1:0,skipped:kind==='skipped',summaryURL:'https://example.test/review'};
+  await ci.refresh(r);rows.push(ci.view(r));
+ }
+ const check="import importlib.util,sys,json;s=importlib.util.spec_from_file_location('client',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m);rows=json.load(sys.stdin);[m.check_identity(r,{k:r[k] for k in ['repository','pull_number','head_sha','base_sha','base_ref']}) for r in rows];assert all(m.verdict(r)==0 for r in rows)";
+ const result=require('node:child_process').spawnSync('python3',['-c',check,client],{input:JSON.stringify(rows),encoding:'utf8'});
+ assert.equal(result.status,0,result.stderr);assert.equal(rows.find(r=>r.outcome==='skipped').commit_status,'success');
+});
+
+test("legacy false failures reconcile only with verified evidence and current snapshot",async(t)=>{
+ for(const stale of [false,true]){
+  const {ci,s,p,pr}=fixture(t);await ci.submit(p,'direct');await ci.dispatch(ci.receipts[p.request_id]);
+  const r=ci.receipts[p.request_id],j=s.state.data.jobs[0];j.state='complete';
+  j.progress={skipped:true,selected:0};j.result={skipped:true,findings:0,blocking:0,summaryURL:'https://example.test/review'};
+  r.state='failed';r.reason='review_incomplete_or_failed';r.published={state:'failure'};
+  if(stale)pr.head.sha='c'.repeat(40);
+  await ci.watchdog();assert.equal(r.state,stale?'superseded':'skipped');assert.equal(r.published.state,stale?'failure':'success');
+  assert.equal(r.reconciliation.previous.state,'failed');assert.equal(s.state.data.jobs.length,1);
+ }
+});
+
+
+test("a retry key observed before failure cannot later reopen the receipt", async t => {
+  for (const initial of [false, true]) {
+    const { ci, p } = fixture(t);
+    await ci.submit(initial ? { ...p, retry_key: "456:2" } : p, "direct");
+    if (!initial) await ci.submit({ ...p, retry_key: "456:2" }, "direct");
+    const receipt = ci.receipts[p.request_id];
+    ci.stop(receipt, "failed", "dispatch_retries_exhausted");
+    await ci.submit({ ...p, retry_key: "456:2" }, "direct");
+    assert.equal(receipt.state, "failed");
+    await ci.submit({ ...p, retry_key: "456:3" }, "direct");
+    assert.equal(receipt.state, "accepted");
+  }
+});
+
+test("GitHub rate limits retry while genuine permission failures remain terminal", () => {
+  const { dispatchFailure } = require("./dispatch-control.js");
+  for (const response of [{ headers: { "retry-after": "60" } }, { headers: { "x-ratelimit-remaining": "0" } }, { data: { message: "API rate limit exceeded" } }]) {
+    const result = dispatchFailure({ status: 403, response });
+    assert.equal(result.retryable, true);
+    assert.equal(result.reason, "github_rate_limited");
+    assert.ok(result.retryAt > Date.now());
+  }
+  assert.equal(dispatchFailure({ status: 403 }).retryable, false);
+  assert.equal(dispatchFailure({ status: 403, code: "REPOSITORY_NOT_ALLOWED" }).reason, "repository_not_allowed");
+});
+
+test("legacy executor hashes remain reusable only under the same effective policy", t => {
+  const { s, p, pr } = fixture(t);
+  const policy = require("./review-policy.js");
+  const job = s.state.enqueue(p.repository, pr);
+  delete job.settings.policySignature;
+  job.settings.executorVersion = policy.legacyExecutorVersion(s.config.binary);
+  assert.equal(policy.currentPolicy(s, job), true);
+  s.config.model = "changed-model";
+  assert.equal(policy.currentPolicy(s, job), false);
 });

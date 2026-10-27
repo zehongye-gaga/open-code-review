@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+// SPDX-License-Identifier: Apache-2.0
 "use strict";
 const fs = require("node:fs"), path = require("node:path");
 const finite = (n) => typeof n === "number" && Number.isFinite(n) ? n : null;

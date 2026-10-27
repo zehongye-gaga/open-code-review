@@ -14,7 +14,7 @@ function fixture(t) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const tokenFile = path.join(directory, "token"); fs.writeFileSync(tokenFile, "fixture");
   const original = global.fetch; t.after(() => { global.fetch = original; });
-  return { config: { infrastructure: { agentDispatch: { url: "https://example.test/chat", model: "goclaw:test", tokenFile, clientId: "agent" } } },
+  return { config: { binary: __filename, provider: "test", model: "test", blockSeverity: "low", timeoutSeconds: 30, fetchTimeoutSeconds: 30, infrastructure: { agentDispatch: { url: "https://example.test/chat", model: "goclaw:test", tokenFile, clientId: "agent" } } },
     state: new State(directory), repo: () => ({ requiresAgent: true }), log() {} };
 }
 const reply = (key) => new Response(JSON.stringify({ session_key: key, choices: [{ message: { content: "ACK" } }] }),
@@ -26,7 +26,7 @@ test("PR bindings survive restart, isolate repositories and reuse a session acro
     if (body.tool_choice === "none") return reply("session-1");
     const event = s.event;
     s.state.data.jobs.push({ id: requests.length, repository: event.repository, number: event.number,
-      head: event.head, base: event.base, state: "queued", requestedBy: "agent", requestId: `github:${event.id}` });
+      settings: require("./review-policy.js").bindPolicy(s,s.repo(),require("./options.js").resolveOptions(s.config, s.repo())), head: event.head, base: event.base, state: "queued", requestedBy: "agent", requestId: `github:${event.id}` });
     return new Response('data: [DONE]\n\n', { headers: { "x-goclaw-session-key": "session-1" } });
   };
   s.event = { id: "first", repository: "org/repo", number: 1, head: "a", base: "b" };

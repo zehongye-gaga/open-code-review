@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+// SPDX-License-Identifier: Apache-2.0
 "use strict";
 const { test } = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");

@@ -94,7 +94,7 @@ function createInfrastructureHandler(service, legacyToken) {
     } catch (error) {
       service.log("infrastructure_failed", { actor: actor.id, error: error.message });
       if (error.persistence) { send(503, { error: "State persistence failed" }); throw error; }
-      send(error.status && error.status < 500 ? error.status : 502, { error: error.status && error.status < 500 ? error.message : "Upstream or internal failure; consult operator logs" });
+      send(error.status && error.status < 500 ? error.status : 502, { code: error.code || null, error: error.status && error.status < 500 ? error.message : "Upstream or internal failure; consult operator logs" });
     }
     return true;
   };

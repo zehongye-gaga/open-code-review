@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+// SPDX-License-Identifier: Apache-2.0
 "use strict";
 window.addEventListener("DOMContentLoaded", () => {
   const copy = JSON.parse(document.getElementById("copy").textContent), t = (key) => copy[key] || key;

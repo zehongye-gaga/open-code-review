@@ -671,3 +671,30 @@ test("publication retries of a zero-item skip never run the native reviewer agai
  job.nextAt=0;await h.service.tick();assert.equal(job.state,"complete");
  assert.equal(runs,1);assert.equal(publications,2);assert.equal(h.statuses.at(-1).description,"OCR skipped: no reviewable items");
 });
+
+test("publication has its own retry allowance after execution exhausts its attempt allowance",async(t)=>{
+ const h=setup(t);h.service.config.maxAttempts=1;h.service.config.publicationMaxAttempts=2;
+ let runs=0,publications=0;
+ h.service.run=async({directory})=>{runs++;writeReport(directory,{state:'complete'});};
+ h.service.publish=async()=>{publications++;throw Error('publication offline');};
+ const job=h.service.accept(repository,pr());await h.service.tick();assert.equal(job.state,'queued');
+ job.nextAt=0;await h.service.tick();assert.equal(job.state,'failed');assert.equal(job.failurePhase,'publication');
+ assert.equal(runs,1);assert.equal(publications,2);
+});
+
+test("Agent budget exhaustion switches directly to unlimited with attribution and compatible resume",async(t)=>{
+ const h=setup(t);Object.assign(h.service.config,{maxAttempts:1});
+ h.service.config.infrastructure={dispatchEnabled:true,allowUnlimitedBudget:true,limits:{budget:4000000},
+  clients:[{id:'agent',role:'agent',repositories:[repository]}],
+  budgetRetry:{enabled:true,mode:'unlimited',maxRetries:1,multiplier:2}};
+ const settings=require('./options.js').resolveOptions(h.service.config,h.service.repo(repository),'standard',{budget:500000});
+ const job=h.service.accept(repository,pr(),{force:true,settings,requestedBy:'agent'});
+ const budgets=[],resumes=[];
+ h.service.run=async({directory,budget,resume})=>{budgets.push(budget);resumes.push(resume);writeReport(directory,{state:budgets.length===1?'partial':'complete',budgetExceeded:budgets.length===1});};
+ h.service.publish=async()=>({comments:[]});
+ await h.service.tick();assert.equal(job.state,'queued');assert.equal(job.retryBudget,0);
+ assert.equal(job.budgetRetries[0].requestedBudget,500000);assert.equal(job.budgetRetries[0].requestedBy,'agent');
+ assert.equal(job.budgetRetries[0].policy,'unlimited');assert.equal(job.budgetRetries[0].sessionId,sessionId);
+ job.nextAt=0;await h.service.tick();assert.equal(job.state,'complete');assert.deepEqual(budgets,[500000,0]);
+ assert.equal(resumes[1],sessionId);assert.equal(job.settings.options.budget,500000);
+});

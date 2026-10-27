@@ -11,7 +11,7 @@ function events(state, notifyBlocking=false) {
  for(const j of jobs.values()) {
   const result=jobOutcome(j),blocked=result?.kind==="blocked";
   if(!(j.state==="failed" && result?.alert) && !(blocked && notifyBlocking))continue;
-  covered.add(String(j.id));rows.push({key:`job:${j.id}:${j.attempt}:${j.startedAt||j.createdAt}:${j.state}`,repository:j.repository,number:j.number,head:j.head,
+  covered.add(String(j.id));rows.push({key:`job:${j.id}:${j.state}`,repository:j.repository,number:j.number,head:j.head,
    type:blocked?"blocked":"failed",reason:blocked?`${j.result.blocking} blocking finding(s)`:result.reason,
    time:j.updatedAt,jobId:j.id,attempt:j.attempt,budget:j.retryBudget??j.settings?.options?.budget,
    retries:j.budgetRetries?.length||0,route:j.requestedBy||"default",link:j.result?.summaryURL});
@@ -20,7 +20,7 @@ function events(state, notifyBlocking=false) {
   if(e.state!=="failed" || (e.jobId && covered.has(String(e.jobId))))continue;
   const j=jobs.get(String(e.jobId));if(!receiptOutcome(e,j).alert)continue;
   if(e.jobId)covered.add(String(e.jobId));
-  rows.push({key:e.jobId?`job:${e.jobId}:${j?.attempt}:${j?.startedAt||j?.createdAt}:failed`:`${kind}:${e.request_id||e.id}:${e.createdAt}`,
+  rows.push({key:e.jobId?`job:${e.jobId}:failed`:`${kind}:${e.request_id||e.id}:${e.createdAt}`,
    repository:e.repository,number:e.pull_number||e.number||j?.number,head:e.head_sha||e.head||j?.head,type:"failed",
    reason:e.reason||e.error||e.lastError||j?.error,time:e.finishedAt||e.updatedAt||e.createdAt,jobId:e.jobId,
    attempt:j?.attempt||e.dispatchAttempts||e.attempts,budget:j?.retryBudget??j?.settings?.options?.budget,
@@ -53,6 +53,10 @@ class Alerts {
     (policy.infrastructure?.organizations||[]).some(o=>o.name?.toLowerCase()===e.repository.split("/")[0].toLowerCase());
   const current=events(source,this.config.notifyBlocking===true).filter(eligible),map=new Map(current.map(e=>[e.key,e]));
   if(!this.state){this.state={initializedAt:now,seen:Object.fromEntries(current.map(e=>[e.key,{baseline:true,at:now}])),pending:{}};this.save();return {baseline:current.length,sent:0};}
+  for(const e of current)if(e.jobId && !this.state.seen[e.key]) {
+   const legacy=Object.keys(this.state.seen).find(k=>k.startsWith(`job:${e.jobId}:`) && k.endsWith(`:${e.type === "blocked" ? "complete" : "failed"}`));
+   if(legacy)this.state.seen[e.key]={...this.state.seen[legacy],migratedFrom:legacy};
+  }
   for(const e of current)if(!this.state.seen[e.key]&&!this.state.pending[e.key])this.state.pending[e.key]={attempts:0,nextAt:0};
   for(const key of Object.keys(this.state.pending))if(!map.has(key)){delete this.state.pending[key];this.state.seen[key]={suppressed:true,at:now};}
   this.save();let sent=0,failed=0,processed=0;

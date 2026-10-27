@@ -40,7 +40,7 @@ function safeJob(j) {
   return { outcome: require("./outcome.js").jobOutcome(j), job_id: j.id, repository: j.repository, pull_number: j.number, head_sha: j.head, base_sha: j.base,
     state: j.state, preview: j.settings?.preview || false, profile: j.settings?.profile,
     options: j.settings?.options, effective_budget: j.retryBudget ?? j.settings?.options.budget,
-    budget_retries: j.budgetRetries || [], policy_version: j.settings?.policyVersion,
+    budget_retries: j.budgetRetries || [], resume_recoveries: j.resumeFallbacks || [], policy_version: j.settings?.policyVersion,
     attempt: j.attempt, created_at: j.createdAt, updated_at: j.updatedAt,
     result: j.result, failure: j.error ? "Review incomplete; see operator logs" : undefined,
     complete: j.progress?.complete === true, budget_exhausted: j.progress?.budgetExceeded === true };
@@ -49,8 +49,8 @@ class Infrastructure {
   constructor(service) { this.service = service; }
   authorize(name, actor, mutation = false) {
     const repository = this.service.repo(name);
-    if (!repository) fail("Repository is not allowed", 403);
-    if (actor.role !== "admin" && !(actor.repositories || []).some((p) => p.toLowerCase() === repository.name || p.toLowerCase() === `${repository.name.split("/")[0]}/*`)) fail("Repository is outside client scope", 403);
+    if (!repository) fail("Repository is not allowed", 403, "REPOSITORY_NOT_ALLOWED");
+    if (actor.role !== "admin" && !(actor.repositories || []).some((p) => p.toLowerCase() === repository.name || p.toLowerCase() === `${repository.name.split("/")[0]}/*`)) fail("Repository is outside client scope", 403, "CLIENT_SCOPE_DENIED");
     if (mutation && repository.requiresAgent && !["agent", "admin"].includes(actor.role)) fail("Repository requires agent dispatch", 403);
     if (mutation && !["agent", "dispatcher", "admin"].includes(actor.role)) fail("Client cannot submit tasks", 403);
     return repository;
@@ -64,7 +64,7 @@ class Infrastructure {
   async current(args, actor, mutation = false) {
     const repository = this.authorize(args.repository, actor, mutation);
     const { data } = await this.service.github.rest.pulls.get({ ...this.service.coordinates(repository.name), pull_number: args.pull_number });
-    if (args.head_sha && (data.head?.sha !== args.head_sha || data.base?.sha !== args.base_sha)) fail("PR changed; fetch context and decide again", 409);
+    if (args.head_sha && (data.head?.sha !== args.head_sha || data.base?.sha !== args.base_sha)) fail("PR changed; fetch context and decide again", 409, "PR_SNAPSHOT_CHANGED");
     return { repository, pr: data };
   }
   async call(name, args, actor = { role: "admin", id: "legacy" }) {
@@ -121,7 +121,7 @@ class Infrastructure {
     }
     if (name === "submit_review" || name === "preview_review" || name === "record_review_skip") {
       const { repository, pr: pull } = await this.current(args, actor, true);
-      if (!s.eligible(repository.name, pull)) fail("PR is closed, draft or outside allowed branches", 409);
+      if (!s.eligible(repository.name, pull)) fail("PR is closed, draft or outside allowed branches", 409, "PR_SNAPSHOT_CHANGED");
       if (name === "record_review_skip") {
         if (repository.allowSkip !== true) fail("Repository policy does not allow skipping", 403);
         const existing = s.state.data.jobs.findLast((j) => j.repository === repository.name && j.number === pull.number && j.head === pull.head.sha && j.base === pull.base.sha);
@@ -146,7 +146,7 @@ class Infrastructure {
       settings.preview = name === "preview_review";
       // Automated dispatch cannot override the server's incremental policy.
       if (!settings.preview && actor.role !== "admin") settings.options.fullReview = false;
-      settings.executorVersion = hash(fs.readFileSync(s.config.binary).toString("base64"));
+      require("./review-policy.js").bindPolicy(s, repository, settings);
       const identity = hash([repository.name, pull.number, pull.head.sha, pull.base.sha, pull.base.ref, settings]);
       const old = s.state.data.jobs.findLast((j) => j.identity === identity || args.request_id && j.requestedBy === actor.id && j.requestId === args.request_id);
       if (old) {
@@ -156,9 +156,10 @@ class Infrastructure {
       }
       if (!settings.preview && actor.role !== "admin") {
         const same = s.state.data.jobs.findLast((job) => job.repository === repository.name && job.number === pull.number &&
-          job.head === pull.head.sha && job.base === pull.base.sha && !job.settings?.preview &&
+          job.head === pull.head.sha && job.base === pull.base.sha && job.baseRef === pull.base.ref && !job.settings?.preview &&
+          require("./review-policy.js").compatiblePolicy(job, settings) &&
           ["queued", "running", "complete", "failed"].includes(job.state));
-        if (same) return { ...safeJob(same), deduplicated: true };
+        if (same) { acknowledgeDelivery(s, delivery, same, actor); return { ...safeJob(same), deduplicated: true }; }
       }
       const j = s.accept(repository.name, pull, { force: true, fullReview: settings.preview || settings.options.fullReview === true,
         settings, identity, requestId: args.request_id, requestedBy: actor.id, deduplicateSnapshot: !settings.preview && (actor.role !== "admin" || !!delivery) });
@@ -196,9 +197,10 @@ class Infrastructure {
       await this.current({ repository: j.repository, pull_number: j.number, head_sha: j.head, base_sha: j.base }, actor, true);
       if (!j.settings) fail("Legacy jobs must be resubmitted with explicit options", 409);
       const resolved = resolveOptions(s.config, s.repo(j.repository), j.settings.profile, j.settings.options);
-      if (hash({ ...resolved, preview: j.settings.preview, executorVersion: hash(fs.readFileSync(s.config.binary).toString("base64")) }) !== hash(j.settings)) fail("Policy changed; submit a new task", 409);
+      if (!require("./review-policy.js").currentPolicy(s, j)) fail("Policy changed; submit a new task", 409);
       if (!["failed", "cancelled"].includes(j.state)) return safeJob(j);
-      j.state = "queued"; j.attempt = 0; j.nextAt = 0; j.pendingSent = false;
+      (j.retryHistory ||= []).push({ at: new Date().toISOString(), attempt: j.attempt, publicationAttempts: j.publicationAttempts || 0 });
+      j.publicationAttempts = 0; j.state = "queued"; j.attempt = 0; j.nextAt = 0; j.pendingSent = false;
       delete j.error; delete j.cancelReason; s.state.save(); await s.flushStatuses(); return safeJob(j);
     }
   }

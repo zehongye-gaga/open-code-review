@@ -315,3 +315,34 @@ test("documentation-only skipped ranges are retried once with explicit Markdown 
   assert.ok(fs.existsSync(path.join(directory, "documentation-skipped-result.json")));
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "result.json"))).status, "skipped");
 });
+
+test("budget resume rejection never invokes a fresh native review",async(t)=>{
+ const directory=temp(t),h=harness();saveResult(directory);
+ const binary=path.join(directory,'ocr');
+ fs.writeFileSync(binary,`#!${process.execPath}\nrequire('fs').appendFileSync('invocations','x');process.stderr.write('Error: load resume session: missing session');process.exitCode=1;\n`,{mode:0o700});
+ await assert.rejects(runReview({...h,directory,binary,cwd:directory,requireResume:true,resume:'11111111-2222-3333-4444-555555555555'}),e=>e.code==='RESUME_REJECTED'&&e.retryable===false);
+ assert.equal(fs.readFileSync(path.join(directory,'invocations'),'utf8'),'x');
+ await assert.rejects(runReview({...h,directory,binary,cwd:directory,requireResume:true}),e=>e.code==='RESUME_REQUIRED');
+ assert.equal(fs.readFileSync(path.join(directory,'invocations'),'utf8'),'x');
+});
+
+test("confirmed native resume rejection records recovery before one fresh run",async(t)=>{
+ const directory=temp(t),h=harness();saveResult(directory);const binary=path.join(directory,'ocr');
+ fs.writeFileSync(binary,`#!${process.execPath}\nconst fs=require('fs');fs.appendFileSync('invocations',process.argv.includes('--resume')?'r':'f');if(process.argv.includes('--resume')){process.stderr.write('Error: resume rejected: missing session');process.exitCode=1;}else{if(!fs.existsSync('recorded'))process.exit(3);process.stdout.write('{}');}\n`,{mode:0o700});
+ let calls=0;
+ await runReview({...h,directory,binary,cwd:directory,requireResume:true,resume:'11111111-2222-3333-4444-555555555555',onResumeFallback:reason=>{assert.equal(reason,'native_resume_rejected');calls++;fs.writeFileSync(path.join(directory,'recorded'),'yes');}});
+ assert.equal(calls,1);assert.equal(fs.readFileSync(path.join(directory,'invocations'),'utf8'),'rf');
+ assert.equal(JSON.parse(fs.readFileSync(path.join(directory,'exit-code.json'))),0);
+});
+
+test("failure to persist a fresh recovery stops the child and propagates the persistence error", async t => {
+  const directory = temp(t), h = harness(); saveResult(directory);
+  const binary = path.join(directory, "ocr");
+  fs.writeFileSync(binary, `#!${process.execPath}\nsetInterval(()=>{},1000);\n`, { mode: 0o700 });
+  const error = Object.assign(new Error("state disk unavailable"), { persistence: true });
+  let pid;
+  await assert.rejects(runReview({ ...h, directory, binary, cwd: directory,
+    onFreshStart: child => { pid = child; throw error; } }), e => e === error);
+  assert.ok(pid);
+  assert.throws(() => process.kill(pid, 0), e => e.code === "ESRCH");
+});
