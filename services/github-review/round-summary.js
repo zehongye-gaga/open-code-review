@@ -30,7 +30,9 @@ async function publishRoundSummary({ github, owner, repo, prNumber, body, metada
         for (const c of inline) if (c.user?.login === user.login && c.body?.includes(`<!-- ocr-${runId}-`)) reviewIds.add(c.pull_request_review_id);
         if (inline.length < 100) break;
       }
-      target = candidates.find((r) => reviewIds.has(r.id));
+      // GitHub rejects updates to reviews created with an empty body.
+      // Preserve their inline comments and publish one deduplicated summary instead.
+      target = candidates.find((r) => reviewIds.has(r.id) && r.body?.trim());
     }
   }
   const comments = result?.comments || [];
