@@ -370,3 +370,27 @@ replace a task or Policy CI receipt's status. App, worker and Policy status writ
 are serialized per repository/commit/context, so a slow admission write cannot
 land after the final review result. A delivery that never creates a task settles
 its waiting status as an execution error or a normal skip when it terminates.
+
+### Resource/load history
+
+`resource-history.py` augments the host monitor with one JSONL sample per minute,
+kept for 90 UTC calendar days in `/var/lib/ocr-server-monitor/history`. Each sample
+records CPU interval start, memory/disk usage, kernel memory estimate, active
+review jobs, configured limits, App dispatch count, Policy dispatching receipts,
+queue size and oldest queued age. CPU is an interval average; concurrency is a
+point-in-time sample, not a sub-minute maximum.
+
+Rolling 24-hour summaries include first-attempt executor queue latency and latest
+attempt duration (p50/p95). These do not include pre-submission Agent latency.
+429/timeout counts cover persisted job errors only, not every internal model retry.
+Unavailable health/state reads are marked explicitly rather than reported as zero.
+
+Group the retained samples by observed review concurrency:
+
+```sh
+python3 /usr/local/lib/ocr-review/resource-history.py /var/lib/ocr-server-monitor/history --hours 24
+```
+
+The host monitor calls `record(...)` before notification delivery. Its systemd
+unit can write to `/var/lib/ocr-server-monitor`; no review-service restart is
+needed. The installation retains the previous monitor executable for rollback.
