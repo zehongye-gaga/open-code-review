@@ -177,23 +177,7 @@ class GitHubEvents {
     event.state = event.childDeliveries.length ? "expanded" : "ignored";
     event.reason = event.childDeliveries.length ? "associated_pull_requests" : "no_eligible_pull_request";
   }
-  async tick() {
-    if (this.service.stopping || !this.service.config.infrastructure?.externalDispatch) return;
-    const pending = (this.service.state.data.deliveries || []).filter((event) => event.admitted && !this.admissionWrites.has(event.id) &&
-      event.admissionPublished !== (event.state === "pending" ? "pending" : event.state === "failed" ? "error" : "success")).map((event) => this.publishAdmission(event));
-    for (const event of this.service.state.data.deliveries || []) {
-      if (this.activeDispatches.size >= this.service.config.dispatchConcurrency) break;
-      if (event.state !== "pending" || event.nextAt > Date.now()) continue;
-      const key = JSON.stringify([event.repository.toLowerCase(), event.kind === "push" ? event.ref : event.number]);
-      if (this.activeDispatches.has(key)) continue;
-      // Claim before the first await so overlapping timer ticks cannot dispatch twice.
-      this.activeDispatches.set(key, event.id);
-      pending.push(this.process(event, key));
-    }
-    const results = await Promise.allSettled(pending);
-    const failed = results.find((result) => result.status === "rejected");
-    if (failed) throw failed.reason;
-  }
+  async tick() { return require("./dispatch-control.js").dispatchTick(this.service, this); }
   async process(event, key) {
     try {
       event.attempts++; event.updatedAt = new Date().toISOString(); this.service.state.save();
@@ -228,10 +212,11 @@ class GitHubEvents {
     } catch (error) {
       if (error.persistence) throw error;
       this.service.log("github_delivery_failed", { delivery: event.id, error: error.message });
-      event.error = error.status === 409 ? "PR or dispatch policy changed" : "Dispatch failed; inspect service logs";
-      if (error.status === 409) event.state = "superseded";
-      else if ([400, 401, 403, 404, 422].includes(error.status) || (event.fallbackAt ? event.fallbackAttempts : event.attempts) >= 10) event.state = "failed";
-      else event.nextAt = Date.now() + Math.min(300, 2 ** (event.fallbackAt ? event.fallbackAttempts : event.attempts)) * 1000;
+      const failure = require("./dispatch-control.js").dispatchFailure(error);
+      event.lastDispatchError = { status: error.status || null, code: error.code || null, at: Date.now() };
+      event.error = failure.reason; event.reason = failure.reason;
+      if (!failure.retryable || (event.fallbackAt ? event.fallbackAttempts : event.attempts) >= 3) event.state = failure.state;
+      else event.nextAt = Math.max(failure.retryAt || 0, Date.now() + Math.min(300, 2 ** (event.fallbackAt ? event.fallbackAttempts : event.attempts)) * 1000);
     } finally {
       event.updatedAt = new Date().toISOString();
       try { this.service.state.save(); await this.publishAdmission(event); } finally { this.activeDispatches.delete(key); }

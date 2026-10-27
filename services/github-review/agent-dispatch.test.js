@@ -13,7 +13,8 @@ test("agent stream is verified against persisted tasks and supports retry recove
   const tokenFile = path.join(dir, "token"); fs.writeFileSync(tokenFile, "fixture");
   const e = { id: "delivery", repository: "org/repo", number: 1, head: "a", base: "b" };
   const job = { id: 123, repository: e.repository, number: 1, head: "a", base: "b", requestedBy: "agent", requestId: "github:delivery" };
-  const s = { config: { infrastructure: { agentDispatch: { url: "https://example.test/chat", tokenFile, model: "goclaw:test", clientId: "agent" } } }, state: { data: { jobs: [] }, save() {} } };
+  const s = { config: { binary: __filename, provider: "test", model: "test", blockSeverity: "low", timeoutSeconds: 30, fetchTimeoutSeconds: 30, infrastructure: { agentDispatch: { url: "https://example.test/chat", tokenFile, model: "goclaw:test", clientId: "agent" } } }, state: { data: { jobs: [] }, save() {} } };
+  s.repo = () => ({}); job.settings = require("./review-policy.js").bindPolicy(s,{},require("./options.js").resolveOptions(s.config, {}));
   require("./agent-session.js").bindingFor(s, e.repository, e.number).sessionKey = "fixed-pr-session";
   const original = global.fetch; t.after(() => { global.fetch = original; });
   global.fetch = async () => new Response('data: {"choices":[{"delta":{"content":"{\\"job_id\\":123}"}}]}\n\ndata: [DONE]\n\n');

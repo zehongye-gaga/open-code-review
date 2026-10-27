@@ -32,7 +32,7 @@ const presets = {
   standard: { effort: "medium", budget: 200000, concurrency: 2, timeout: 15 },
   deep: { effort: "high", budget: 500000, concurrency: 2, timeout: 15 },
 };
-function fail(message, status = 400) { throw Object.assign(new Error(message), { status }); }
+function fail(message, status = 400, code) { throw Object.assign(new Error(message), { status, code }); }
 function validate(value, schema, label = "arguments") {
   if (schema.type === "object") {
     if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${label} must be an object`);
@@ -58,6 +58,7 @@ function resolveOptions(config, repository, profile = "standard", overrides = {}
   const options = { provider: config.provider, model: config.model, timeoutSeconds: config.timeoutSeconds,
     fetchTimeoutSeconds: config.fetchTimeoutSeconds, blockSeverity: config.blockSeverity,
     ...profiles[profile], ...repository.reviewDefaults, ...overrides };
+  if (infra.orgCI?.enabled && !["low", "medium"].includes(options.blockSeverity)) options.blockSeverity = "medium";
   validate(options, schema, "resolved options");
   const providers = infra.providers || { [config.provider]: { models: [config.model] } };
   if (!own(providers, options.provider) || !providers[options.provider].models?.includes(options.model)) fail("Provider/model pair is not allowed", 403);
@@ -88,6 +89,7 @@ function validateInfrastructure(config) {
   for (const key of ["enabled", "externalDispatch", "dispatchEnabled"]) if (infra[key] !== undefined && typeof infra[key] !== "boolean") fail(`infrastructure.${key} must be boolean`);
   if (infra.port !== undefined && (!Number.isSafeInteger(infra.port) || infra.port < 1 || infra.port > 65535)) fail("Invalid infrastructure port");
   if (infra.budgetRetry !== undefined) validate(infra.budgetRetry, { type: "object", properties: {
+    mode: { type: "string", enum: ["multiply", "unlimited"] },
     enabled: { type: "boolean" }, maxRetries: { type: "integer", minimum: 0, maximum: 5 },
     multiplier: { type: "integer", minimum: 2, maximum: 4 },
     unlimitedAfter: { type: "integer", minimum: 1 },

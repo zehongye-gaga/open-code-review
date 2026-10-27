@@ -11,7 +11,7 @@ function matchesDelivery(job, event) {
 function deliveryJob(service, event) {
   if (event.ciRequestId) return service.state.data.jobs.find((j) => j.ciRequestId === event.ciRequestId);
   const agentId = service.config.infrastructure?.agentDispatch?.clientId;
-  return service.state.data.jobs.findLast((job) => matchesDelivery(job, event) &&
+  return service.state.data.jobs.findLast((job) => matchesDelivery(job, event) && require("./review-policy.js").currentPolicy(service, job) &&
     (job.id === event.jobId || job.requestId === `github:${event.id}` &&
       [agentId, fallbackActor, event.actor?.id].filter(Boolean).includes(job.requestedBy) ||
       ["queued", "running", "complete", "failed"].includes(job.state)));

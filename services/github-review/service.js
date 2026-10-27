@@ -19,7 +19,7 @@ const REPOSITORY = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\/[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 function configuration(input) {
   const config = { listen: "127.0.0.1", port: 8787, pollSeconds: 30, bootstrapExisting: true,
     binary: "/usr/local/bin/ocr", provider: "openai-codex", model: "gpt-6-astra",
-    budget: 0, timeoutSeconds: 1500, fetchTimeoutSeconds: 600, maxAttempts: 3, retrySeconds: 60,
+    budget: 0, timeoutSeconds: 1500, fetchTimeoutSeconds: 600, maxAttempts: 3, publicationMaxAttempts: 3, retrySeconds: 60,
     retentionDays: 7, prConcurrency: 1, dispatchConcurrency: 8, statusContext: "ocr-review", blockSeverity: "high", ...input };
   if (!path.isAbsolute(config.stateDirectory || "")) throw new Error("stateDirectory must be absolute");
   if (!path.isAbsolute(config.binary)) throw new Error("binary must be absolute");
@@ -34,7 +34,7 @@ function configuration(input) {
     repo.name = repo.name.toLowerCase();
     seen.add(repo.name.toLowerCase());
   }
-  for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "retrySeconds", "retentionDays", "prConcurrency", "dispatchConcurrency"]) {
+  for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "publicationMaxAttempts", "retrySeconds", "retentionDays", "prConcurrency", "dispatchConcurrency"]) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 1) throw new Error(`${key} must be a positive integer`);
   }
   if (!Number.isSafeInteger(config.budget) || config.budget < 0) throw new Error("budget must be non-negative");
@@ -276,10 +276,18 @@ class ReviewService {
     } else {
       try {
         job.phase = "review"; this.state.save();
+        let requireResume = (job.budgetRetries || []).length > 0;
+        const onResumeFallback = reason => require("./resume-recovery.js").recordResumeFallback(this, job, reason);
+        if (requireResume && !resume) { onResumeFallback("session_missing_or_incompatible"); requireResume = false; }
+        const onFreshStart = pid => {
+          const entry = job.resumeFallbacks?.at(-1);
+          if (entry?.state === "authorized") { entry.state = "started"; entry.pid = pid; entry.startedAt = new Date().toISOString(); this.state.save(); }
+        };
         await this.run({ core, directory: job.directory, cwd, binary: this.config.binary,
           provider: effective.provider, model: effective.model, budget: effective.budget,
-          timeoutMs: effective.timeoutSeconds * 1000, signal, resume, options });
+          timeoutMs: effective.timeoutSeconds * 1000, signal, resume, requireResume, onResumeFallback, onFreshStart, options });
       } finally {
+        require("./resume-recovery.js").captureRecovery(job, job.directory);
         this.captureProgress(job);
       }
     }
@@ -306,7 +314,7 @@ class ReviewService {
       if (progress?.budgetExceeded) throw Object.assign(new Error("Token budget guard stopped review before full coverage"), { retryable: false, budgetExceeded: true });
       throw new Error("Native review incomplete; inspect job artifacts");
     }
-    job.phase = "publication"; this.state.save();
+    job.phase = "publication"; job.publicationAttempts = (job.publicationAttempts || 0) + 1; this.state.save();
     const result = await this.publish({ github: this.github, context, core, directory: job.directory, blockSeverity: effective.blockSeverity });
     if (signal.aborted) return { stale: true };
     if (result?.stale) {
@@ -354,16 +362,18 @@ class ReviewService {
   increaseRetryBudget(job) {
     const infra = this.config.infrastructure || {}, policy = infra.budgetRetry;
     if (!policy?.enabled || (infra.dispatchEnabled === false && !job.ciRequestId) || !job.settings || job.settings.preview || job.replacement ||
-        job.attempt >= this.config.maxAttempts || (job.budgetRetries || []).length >= policy.maxRetries) return false;
+        (policy.mode !== "unlimited" && job.attempt >= this.config.maxAttempts) || (job.budgetRetries || []).length >= policy.maxRetries) return false;
     const current = job.retryBudget ?? job.settings.options.budget;
     const repository = this.repo(job.repository);
     if (!repository || !Number.isSafeInteger(current) || current < 1) return false;
     const limit = repository.limits?.budget ?? infra.limits?.budget ?? 1000000;
-    const next = policy.unlimitedAfter && current >= policy.unlimitedAfter ? 0 : Math.min(limit, current * policy.multiplier);
+    const next = policy.mode === "unlimited" || policy.unlimitedAfter && current >= policy.unlimitedAfter ? 0 : Math.min(limit, current * policy.multiplier);
     if (next !== 0 && next <= current) return false;
     resolveOptions(this.config, repository, job.settings.profile, { ...job.settings.options, budget: next });
     (job.budgetRetries ||= []).push({ attempt: job.attempt, from: current, to: next,
-      directory: job.directory, reason: "native_budget_guard", at: new Date().toISOString() });
+      directory: job.directory, reason: "native_budget_guard", at: new Date().toISOString(),
+      policy: policy.mode || "multiply", requestedBudget: job.settings.options.budget,
+      requestedBy: job.requestedBy || "default", sessionId: job.progress?.sessionId || null });
     job.retryBudget = next;
     this.log("budget_retry_scheduled", { id: job.id, from: current, to: next, retry: job.budgetRetries.length });
     return true;
@@ -372,16 +382,17 @@ class ReviewService {
   async runJob(job, controller, slot) {
     this.log("started", { id: job.id, repository: job.repository, number: job.number, head: job.head, slot });
     try {
+      job.phase = "preparation";
       const result = await this.execute(job, controller.signal, slot);
       if (!["superseded", "cancelled"].includes(job.state)) {
         if (this.stopping) { job.state = "queued"; job.nextAt = 0; job.attempt--; }
         else job.state = result.stale ? (result.checkpoint ? "checkpointed" : "superseded") : "complete";
       }
       if (job.state !== "cancelled") job.result = result;
-      delete job.error; delete job.failurePhase;
+      delete job.error; delete job.errorCode; delete job.failurePhase;
     } catch (error) {
       if (error.persistence) throw error;
-      job.error = error.message; job.failurePhase = job.phase || "execution";
+      job.error = error.message; job.errorCode = error.code || null; job.failurePhase = job.phase || "execution";
       if (!["superseded", "cancelled"].includes(job.state)) {
         if (this.stopping) { job.state = "queued"; job.nextAt = 0; job.attempt--; }
         else {
@@ -390,9 +401,11 @@ class ReviewService {
             try { budgetRetry = this.increaseRetryBudget(job); }
             catch (policyError) { job.error = `Budget retry rejected: ${policyError.message}`; }
           }
-          job.state = (budgetRetry || error.retryable !== false) && job.attempt < this.config.maxAttempts ? "queued" : "failed";
+          const attemptsRemain = budgetRetry || (job.failurePhase === "publication"
+            ? (job.publicationAttempts || 1) < this.config.publicationMaxAttempts : job.attempt < this.config.maxAttempts);
+          job.state = (budgetRetry || error.retryable !== false) && attemptsRemain ? "queued" : "failed";
           if (budgetRetry) job.pendingSent = false;
-          job.nextAt = Date.now() + this.config.retrySeconds * 1000 * 2 ** (job.attempt - 1);
+          job.nextAt = Date.now() + this.config.retrySeconds * 1000 * 2 ** Math.min(5, (job.failurePhase === "publication" ? job.publicationAttempts || 1 : job.attempt) - 1);
           try { await this.status(job, job.state === "queued" ? "pending" : "error",
             budgetRetry ? `OCR budget guard; retry scheduled with ${job.retryBudget === 0 ? "unlimited tokens" : `${job.retryBudget} tokens`}` :
               job.state === "queued" ? "OCR incomplete; retry scheduled" : job.error); }

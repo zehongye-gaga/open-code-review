@@ -290,12 +290,13 @@ test("push is durable before lookup and shares one review with PR events and dup
   assert.equal(h.s.state.data.deliveries.at(-1).jobId, job.id);
   assert.equal((await h.events.accept(args, h.actor)).deduplicated, true);
 });
-test("PR-first delivery deduplicates push even if the default profile changed", async (t) => {
+test("PR-first delivery cannot reuse an obsolete result after the default policy changes", async (t) => {
   const h = fixture(t); pushLookup(h);
   await h.events.accept(h.envelope(), h.actor); await h.events.tick();
   h.s.config.repositories[0].defaultProfile = "deep";
   await h.events.accept(pushEnvelope(h), h.actor); await h.events.tick(); await h.events.tick();
-  assert.equal(h.s.state.data.jobs.length, 1);
+  assert.equal(h.s.state.data.jobs.length, 2);
+  assert.notEqual(h.s.state.data.jobs[0].settings.policySignature, h.s.state.data.jobs[1].settings.policySignature);
 });
 test("push filters deletion, tags, obsolete heads, draft and unrelated PRs", async (t) => {
   const h = fixture(t); pushLookup(h);

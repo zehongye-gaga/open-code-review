@@ -26,7 +26,7 @@ function createServer(service, { apiToken, webhookSecret } = {}) {
       if (await infrastructure(req, res)) return;
       if (req.url === "/healthz" && req.method === "GET") {
         const degraded = service.pollError || service.statusError || !service.lastPoll;
-        return send(degraded ? 503 : 200, { status: degraded ? "degraded" : "ok",
+        return send(degraded ? 503 : 200, { status: degraded ? "degraded" : "ok", controlPlaneVersion: 2,
           lastPoll: service.lastPoll, active: service.active?.job.id || null,
           activeJobs: [...service.workers.entries()].map(([slot, { job }]) => ({
             id: job.id, repository: job.repository, number: job.number, head: job.head, slot, startedAt: job.startedAt,
