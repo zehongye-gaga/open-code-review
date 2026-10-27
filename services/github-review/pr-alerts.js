@@ -5,19 +5,20 @@ const fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypt
 const copy=require("./pr-alerts.zh-CN.json");
 const values=v=>Array.isArray(v)?v:Object.values(v||{});
 const clean=v=>String(v||"unknown").replace(/(?:github_pat_|gh[pousr]_|goclaw_)[A-Za-z0-9_.-]+/g,"[REDACTED]").replace(/Bearer\s+[^\s]+/gi,"Bearer [REDACTED]").replace(/https:\/\/open\.feishu\.cn\/open-apis\/bot\/v2\/hook\/[^\s]+/g,"[WEBHOOK REDACTED]").slice(0,1200);
+const { jobOutcome, receiptOutcome } = require("./outcome.js");
 function events(state, notifyBlocking=false) {
  const rows=[],covered=new Set(),jobs=new Map(values(state.jobs).map(j=>[String(j.id),j]));
  for(const j of jobs.values()) {
-  const blocked=j.state==="complete" && j.result?.blocking>0;
-  if(j.state!=="failed" && !(blocked && notifyBlocking))continue;
+  const result=jobOutcome(j),blocked=result?.kind==="blocked";
+  if(!(j.state==="failed" && result?.alert) && !(blocked && notifyBlocking))continue;
   covered.add(String(j.id));rows.push({key:`job:${j.id}:${j.attempt}:${j.startedAt||j.createdAt}:${j.state}`,repository:j.repository,number:j.number,head:j.head,
-   type:blocked?"blocked":"failed",reason:blocked?`${j.result.blocking} blocking finding(s)`:j.error,
+   type:blocked?"blocked":"failed",reason:blocked?`${j.result.blocking} blocking finding(s)`:result.reason,
    time:j.updatedAt,jobId:j.id,attempt:j.attempt,budget:j.retryBudget??j.settings?.options?.budget,
    retries:j.budgetRetries?.length||0,route:j.requestedBy||"default",link:j.result?.summaryURL});
  }
  for(const [kind,items] of [["ci",values(state.ciReceipts)],["webhook",values(state.deliveries)]])for(const e of items){
   if(e.state!=="failed" || (e.jobId && covered.has(String(e.jobId))))continue;
-  const j=jobs.get(String(e.jobId));if(j && ["queued","running"].includes(j.state))continue;
+  const j=jobs.get(String(e.jobId));if(!receiptOutcome(e,j).alert)continue;
   if(e.jobId)covered.add(String(e.jobId));
   rows.push({key:e.jobId?`job:${e.jobId}:${j?.attempt}:${j?.startedAt||j?.createdAt}:failed`:`${kind}:${e.request_id||e.id}:${e.createdAt}`,
    repository:e.repository,number:e.pull_number||e.number||j?.number,head:e.head_sha||e.head||j?.head,type:"failed",
@@ -47,7 +48,10 @@ class Alerts {
   if(!r.ok)throw Error(`Feishu HTTP ${r.status}`);const b=await r.json();if((b.code??b.StatusCode)!==0)throw Error("Feishu rejected notification");
  }
  async collect(source,now=Date.now()){
-  const current=events(source,this.config.notifyBlocking===true),map=new Map(current.map(e=>[e.key,e]));
+  const policy=this.config.repositoryPolicyFile?JSON.parse(fs.readFileSync(this.config.repositoryPolicyFile,"utf8")):null;
+  const eligible=e=>!policy || (policy.repositories||[]).some(r=>r.name?.toLowerCase()===e.repository.toLowerCase()) ||
+    (policy.infrastructure?.organizations||[]).some(o=>o.name?.toLowerCase()===e.repository.split("/")[0].toLowerCase());
+  const current=events(source,this.config.notifyBlocking===true).filter(eligible),map=new Map(current.map(e=>[e.key,e]));
   if(!this.state){this.state={initializedAt:now,seen:Object.fromEntries(current.map(e=>[e.key,{baseline:true,at:now}])),pending:{}};this.save();return {baseline:current.length,sent:0};}
   for(const e of current)if(!this.state.seen[e.key]&&!this.state.pending[e.key])this.state.pending[e.key]={attempts:0,nextAt:0};
   for(const key of Object.keys(this.state.pending))if(!map.has(key)){delete this.state.pending[key];this.state.seen[key]={suppressed:true,at:now};}

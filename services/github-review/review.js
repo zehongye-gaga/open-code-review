@@ -114,6 +114,11 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
   if (metadata.incrementalExclude?.length) {
     options = { ...options, exclude: [options.exclude, ...metadata.incrementalExclude].filter(Boolean).join(",") };
   }
+  if (metadata.documentationFallback && !options.rule) {
+    const rule = path.join(directory, "documentation-rule.json");
+    fs.writeFileSync(rule, JSON.stringify({ rules: [], include: ["*.md", "**/*.md", "*.markdown", "**/*.markdown"] }), { mode: 0o600 });
+    options = { ...options, rule };
+  }
   const stdout = fs.openSync(path.join(directory, "result.json"), "w", 0o600);
   const stderr = fs.openSync(path.join(directory, "stderr.log"), "w", 0o600);
   const env = childEnvironment();
@@ -155,6 +160,23 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
   }
   fs.writeFileSync(path.join(directory, "exit-code.json"), JSON.stringify(code));
   core.info(`OCR exited with code ${code}; report and diagnostics are saved in the job directory`);
+  if (code === 0 && !signal?.aborted && !options.preview && !options.rule && !metadata.documentationFallback) {
+    const report = JSON.parse(fs.readFileSync(path.join(directory, "result.json"), "utf8"));
+    if (report.status === "skipped" && report.manifest?.terminal_state === "skipped") {
+      const { stdout: changed } = await exec("git", ["-c", "core.hooksPath=/dev/null", "diff", "--name-only", "--diff-filter=AMRT", "-z", from, metadata.head, "--"],
+        { cwd, signal, timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+      const paths = changed.split("\0").filter(Boolean);
+      if (paths.length && paths.every((name) => /\.(md|markdown)$/i.test(name))) {
+        for (const name of ["result.json", "stderr.log", "exit-code.json"]) {
+          fs.renameSync(path.join(directory, name), path.join(directory, `documentation-skipped-${name}`));
+        }
+        metadata.documentationFallback = true;
+        fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify(metadata, null, 2), { mode: 0o600 });
+        core.notice("Retrying the unchanged documentation-only range with Markdown enabled; explicit exclusions still apply");
+        return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, options });
+      }
+    }
+  }
   if (resume && code !== 0 && !signal?.aborted && fs.statSync(path.join(directory, "result.json")).size === 0 &&
       /^Error: (load resume session:|resume rejected:|resume session ")/m.test(fs.readFileSync(path.join(directory, "stderr.log"), "utf8"))) {
     for (const name of ["result.json", "stderr.log", "exit-code.json"]) {

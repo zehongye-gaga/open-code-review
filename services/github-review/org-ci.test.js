@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+// SPDX-License-Identifier: Apache-2.0
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict"), crypto = require("node:crypto");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { OrgCI, identity } = require("./org-ci.js");
 const { State } = require("./state.js");
+const { ReviewService } = require("./service.js");
 function input(extra = {}) {
   const p = { base_ref: "release/company", base_sha: "b".repeat(40), head_sha: "a".repeat(40), pull_number: 12, repository: "lexmount/example", ...extra };
   const str = JSON.stringify(p).replace(/[\u007f-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
@@ -13,7 +17,8 @@ function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "org-ci-")); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const statuses = [], p = input();
   const pr = { number: 12, state: "open", draft: true, head: { sha: p.head_sha }, base: { sha: p.base_sha, ref: p.base_ref, repo: { full_name: p.repository } } };
-  const s = { state: new State(dir), workers: new Map(), log() {},
+  const s = { state: new State(dir), workers: new Map(), commitStatusWrites: new Map(),
+    writeCommitStatus: ReviewService.prototype.writeCommitStatus, log() {},
     config: { binary: __filename, provider: "test", model: "test", timeoutSeconds: 30, fetchTimeoutSeconds: 30, blockSeverity: "high", statusContext: "ocr-review",
       infrastructure: { orgCI: { enabled: true, totalSeconds: 7200, heartbeatSeconds: 300 }, agentDispatch: { clientId: "agent" } } },
     coordinates: () => ({ owner: "lexmount", repo: "example" }), repo: () => ({ name: p.repository, defaultProfile: "standard" }),
@@ -70,7 +75,7 @@ test("changed PR invalidates receipt and cancels job", async (t) => {
   pr.head.sha = "c".repeat(40); await ci.status(p);
   assert.equal(s.state.data.jobs[0].state, "cancelled"); assert.equal(statuses.at(-1).state, "failure");
 });
-test("complete publication passes, partial or skipped never does", async (t) => {
+test("complete publication passes; partial and unverified skipped results fail", async (t) => {
   for (const kind of ["complete", "partial", "skipped", "blocking"]) {
     const { ci, s, p, statuses } = fixture(t); await ci.submit(p, "direct"); await ci.dispatch(ci.receipts[p.request_id]);
     const job = s.state.data.jobs[0]; job.state = "complete"; job.progress = { complete: kind !== "partial" };
@@ -215,4 +220,43 @@ test("snapshot changes are not resurrected when a branch returns to the old comm
  const {ci,p,pr}=fixture(t);await ci.submit(p,"direct");const r=ci.receipts[p.request_id];
  pr.head.sha="c".repeat(40);await ci.refresh(r);assert.equal(r.reason,"pr_snapshot_changed");
  pr.head.sha=p.head_sha;assert.equal((await ci.submit(p,"direct")).state,"superseded");
+});
+
+test("verified zero-item skip is terminal and never redispatched", async (t) => {
+  const { ci, s, p, statuses } = fixture(t); await ci.submit(p, "direct"); await ci.dispatch(ci.receipts[p.request_id]);
+  const job = s.state.data.jobs[0]; job.state = "complete";
+  job.progress = { complete: false, skipped: true, selected: 0 };
+  job.result = { findings: 0, blocking: 0, skipped: true, summaryURL: "https://example.test/review" };
+  const view = await ci.status(p);
+  assert.equal(view.state, "skipped"); assert.equal(view.terminal, true);
+  assert.equal(view.reason, "no_reviewable_items"); assert.equal(view.commit_status, "success");
+  assert.equal(statuses.at(-1).description, "OCR skipped: no reviewable items");
+  await ci.tick(p); await ci.submit(p, "direct");
+  assert.equal(s.state.data.jobs.length, 1); assert.equal(job.state, "complete");
+});
+
+test("completed backend result wins over expired receipt heartbeat and deadline", async (t) => {
+  for (const skipped of [false, true]) {
+    const {ci,s,p,statuses}=fixture(t); await ci.submit(p,"direct"); await ci.dispatch(ci.receipts[p.request_id]);
+    const j=s.state.data.jobs[0];j.state="complete";j.progress={complete:!skipped,skipped,selected:skipped?0:1};
+    j.result={skipped,findings:0,blocking:0,summaryURL:"https://example.test/review"};
+    ci.receipts[p.request_id].heartbeatAt-=400000;ci.receipts[p.request_id].createdAt-=8000000;
+    await ci.watchdog();assert.equal(statuses.at(-1).state,"success");assert.equal(j.attempt,0);
+    assert.equal(ci.receipts[p.request_id].state,skipped?"skipped":"complete");
+  }
+});
+test("lost tracker does not cancel an accepted backend job, but execution deadline still applies", async(t)=>{
+  const {ci,s,p}=fixture(t);await ci.submit(p,"direct");await ci.dispatch(ci.receipts[p.request_id]);
+  const r=ci.receipts[p.request_id],j=s.state.data.jobs[0];j.state="running";r.heartbeatAt-=400000;
+  await ci.watchdog();assert.equal(j.state,"running");assert.equal(r.state,"running");
+  r.createdAt-=8000000;await ci.watchdog();assert.equal(j.state,"cancelled");assert.equal(r.state,"failed");
+  assert.equal(r.reason,"review_deadline_exceeded");
+});
+
+test("an unavailable PR API cannot prevent an active execution deadline",async(t)=>{
+ const {ci,s,p}=fixture(t);await ci.submit(p,"direct");await ci.dispatch(ci.receipts[p.request_id]);
+ ci.receipts[p.request_id].createdAt-=8000000;
+ s.github.rest.pulls.get=async()=>{throw Error("GitHub unreachable");};
+ await ci.watchdog();assert.equal(ci.receipts[p.request_id].reason,"review_deadline_exceeded");
+ assert.equal(ci.receipts[p.request_id].published.state,"failure");
 });

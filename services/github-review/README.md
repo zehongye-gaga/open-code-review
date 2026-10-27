@@ -345,3 +345,61 @@ never calls submit/retry tools. Automated submissions also deduplicate by reposi
 PR, head and base independently of profile and request ID. Explicit administrator
 reruns remain available. Sent outbox entries follow artifact retention; pending and
 failed entries are retained.
+
+### Event dispatch concurrency
+
+`dispatchConcurrency` controls the independent GitHub event dispatch pool (default `8`).
+Different PRs can resolve their Agent routing concurrently; one slow Agent does not
+hold the entire delivery queue. Events for the same repository and PR are processed
+one at a time. Existing head/base task deduplication, Agent fallback and durable
+delivery retries remain in effect. Push lookup is serialized per repository/ref;
+its generated PR deliveries share the same PR locks as direct PR events.
+
+`GET /healthz` exposes `dispatching`, `dispatchConcurrency` and `pendingDeliveries`
+separately from OCR worker utilization. Pending deliveries include active dispatches.
+
+### Early App admission status
+
+Eligible PR events are persisted before publishing `ocr-review: pending` with
+`OCR accepted; waiting for review dispatch`. This does not wait for the Agent
+to submit a task. Draft, closed and disallowed-branch events do not create a
+new waiting status. Push events first resolve an eligible PR.
+
+Status publication retries independently of dispatch. Duplicate events cannot
+replace a task or Policy CI receipt's status. App, worker and Policy status writes
+are serialized per repository/commit/context, so a slow admission write cannot
+land after the final review result. A delivery that never creates a task settles
+its waiting status as an execution error or a normal skip when it terminates.
+
+### Resource/load history
+
+`resource-history.py` augments the host monitor with one JSONL sample per minute,
+kept for 90 UTC calendar days in `/var/lib/ocr-server-monitor/history`. Each sample
+records CPU interval start, memory/disk usage, kernel memory estimate, active
+review jobs, configured limits, App dispatch count, Policy dispatching receipts,
+queue size and oldest queued age. CPU is an interval average; concurrency is a
+point-in-time sample, not a sub-minute maximum.
+
+Rolling 24-hour summaries include first-attempt executor queue latency and latest
+attempt duration (p50/p95). These do not include pre-submission Agent latency.
+429/timeout counts cover persisted job errors only, not every internal model retry.
+Unavailable health/state reads are marked explicitly rather than reported as zero.
+
+Group the retained samples by observed review concurrency:
+
+```sh
+python3 /usr/local/lib/ocr-review/resource-history.py /var/lib/ocr-server-monitor/history --hours 24
+```
+
+The host monitor calls `record(...)` before notification delivery. Its systemd
+unit can write to `/var/lib/ocr-server-monitor`; no review-service restart is
+needed. The installation retains the previous monitor executable for rollback.
+
+The audit dashboard exposes `/api/resources?hours=24` (allowed periods: 1, 6, 24,
+168 hours), reading `resourceHistoryDirectory` or the host monitor's default
+history directory. The resource panel is host-wide even when a repository is
+selected. Concurrency groups use raw samples; charts use time-bucket maxima.
+Missing data is not converted to zero. The wait table measures oldest queued
+job age (including retry backoff), while queue P95 is the recorded rolling
+24-hour first-attempt executor statistic, not a concurrency-group percentile.
+Only the dashboard service needs restarting for this feature.

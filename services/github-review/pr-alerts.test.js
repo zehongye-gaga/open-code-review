@@ -8,8 +8,8 @@ function setup(t,request){const dir=fs.mkdtempSync(path.join(os.tmpdir(),"pr-ale
 test("terminal job and CI failure are one event; retries and normal cancellations are quiet",()=>{
  assert.equal(events({jobs:[job],ciReceipts:{r:{state:"failed",jobId:1,repository:"org/repo",pull_number:2}}}).length,1);
  assert.equal(events({jobs:[{...job,state:"queued"},{...job,state:"cancelled"}]}).length,0);
- assert.equal(events({jobs:[{...job,state:"complete",result:{blocking:2}}]},true)[0].type,"blocked");
- assert.equal(events({jobs:[{...job,state:"complete",result:{blocking:2}}]},false).length,0);
+ assert.equal(events({jobs:[{...job,state:"complete",progress:{complete:true},result:{blocking:2}}]},true)[0].type,"blocked");
+ assert.equal(events({jobs:[{...job,state:"complete",progress:{complete:true},result:{blocking:2}}]},false).length,0);
  const text=message({...events({jobs:[job]})[0],reason:"Bearer secret github_pat_sensitive ghs_private"});
  assert.match(text,/2026\/10\/26 10:00:00/);assert.ok(!text.includes("secret"));assert.ok(!text.includes("ghs_private"));assert.match(text,/4000000/);
 });
@@ -27,4 +27,30 @@ test("initial historical failures are baselined; recovered pending alerts are su
  assert.equal((await a.collect({jobs:[job]},1)).baseline,1);assert.equal(calls,0);
  await a.collect({jobs:[{...job,id:2}]},2);assert.equal(calls,1);
  await a.collect({jobs:[{...job,id:2,state:"running"}]},70000);assert.equal(calls,1);assert.equal(Object.keys(a.state.pending).length,0);
+});
+
+test("completed backend results take precedence over stale ingress failures",()=>{
+ const skipped={...job,state:"complete",progress:{skipped:true,selected:0},result:{skipped:true,findings:0,blocking:0,summaryURL:"https://example.test/review"}};
+ const receipt={state:"failed",jobId:1,repository:"org/repo",pull_number:2,reason:"review_incomplete_or_failed"};
+ assert.equal(events({jobs:[skipped],ciReceipts:{r:receipt}}).length,0);
+ assert.equal(events({jobs:[skipped],ciReceipts:{r:{...receipt,state:"skipped"}}}).length,0);
+ assert.equal(events({jobs:[skipped],ciReceipts:{r:{...receipt,reason:"n8n_tracking_stalled"}}}).length,0);
+ assert.equal(events({jobs:[{...skipped,result:{...skipped.result,summaryURL:""}}],ciReceipts:{r:receipt}}).length,1);
+ assert.equal(events({jobs:[{...skipped,state:"failed"}],ciReceipts:{r:receipt}}).length,1);
+});
+
+test("legacy completed records without evidence do not create a new historical alert flood",()=>{
+ assert.equal(events({jobs:[{...job,state:"complete",progress:undefined,result:undefined}]}).length,0);
+});
+
+test("repository removal suppresses dispatch failures and already queued notifications",async(t)=>{
+ let calls=0;const c=setup(t),policy=path.join(c.directory,"policy.json");c.repositoryPolicyFile=policy;
+ fs.writeFileSync(policy,JSON.stringify({repositories:[{name:"org/repo"}]}));
+ const a=new Alerts(c,async()=>{calls++;throw Error("offline");});await a.collect({jobs:[]},1);
+ await a.collect({jobs:[job]},2);assert.equal(calls,1);
+ fs.writeFileSync(policy,JSON.stringify({repositories:[{name:"org/retained"}]}));
+ await a.collect({jobs:[job],deliveries:[{id:"new",repository:"org/repo",number:3,state:"failed"}]},70000);
+ assert.equal(calls,1);assert.equal(Object.keys(a.state.pending).length,0);
+ fs.writeFileSync(policy,JSON.stringify({repositories:[],infrastructure:{organizations:[{name:"org"}]}}));
+ await a.collect({jobs:[{...job,id:2}]},80000);assert.equal(calls,2);
 });

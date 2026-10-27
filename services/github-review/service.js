@@ -6,6 +6,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { State } = require("./state.js");
+const { jobOutcome } = require("./outcome.js");
 const { queueFeedback } = require("./agent-session.js");
 const { prepareReview, runReview, publishReview } = require("./review.js");
 const { planReview, readProgress, checkpointFor } = require("./progress.js");
@@ -19,7 +20,7 @@ function configuration(input) {
   const config = { listen: "127.0.0.1", port: 8787, pollSeconds: 30, bootstrapExisting: true,
     binary: "/usr/local/bin/ocr", provider: "openai-codex", model: "gpt-6-astra",
     budget: 0, timeoutSeconds: 1500, fetchTimeoutSeconds: 600, maxAttempts: 3, retrySeconds: 60,
-    retentionDays: 7, prConcurrency: 1, statusContext: "ocr-review", blockSeverity: "high", ...input };
+    retentionDays: 7, prConcurrency: 1, dispatchConcurrency: 8, statusContext: "ocr-review", blockSeverity: "high", ...input };
   if (!path.isAbsolute(config.stateDirectory || "")) throw new Error("stateDirectory must be absolute");
   if (!path.isAbsolute(config.binary)) throw new Error("binary must be absolute");
   if (!Array.isArray(config.repositories) || !config.repositories.length) throw new Error("Configure at least one repository");
@@ -33,7 +34,7 @@ function configuration(input) {
     repo.name = repo.name.toLowerCase();
     seen.add(repo.name.toLowerCase());
   }
-  for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "retrySeconds", "retentionDays", "prConcurrency"]) {
+  for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "retrySeconds", "retentionDays", "prConcurrency", "dispatchConcurrency"]) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 1) throw new Error(`${key} must be a positive integer`);
   }
   if (!Number.isSafeInteger(config.budget) || config.budget < 0) throw new Error("budget must be non-negative");
@@ -51,6 +52,7 @@ class ReviewService {
     this.state = state || new State(this.config.stateDirectory);
     this.log = (event, details = {}) => log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
     this.prepare = prepare; this.run = run; this.publish = publish;
+    this.commitStatusWrites = new Map();
     this.workers = new Map(); this.stopping = false; this.lastPoll = null; this.pollError = null;
     fs.mkdirSync(path.join(this.config.stateDirectory, "runs"), { recursive: true, mode: 0o700 });
   }
@@ -172,9 +174,22 @@ class ReviewService {
   async status(job, state, description, target) {
     if (job.settings?.preview) return;
     if (job.ciRequestId) return this.orgCI.publishJobStatus(job, state, description, target);
-    await this.github.rest.repos.createCommitStatus({ ...this.coordinates(job.repository), sha: job.head,
-      context: this.config.statusContext, state, description: description.slice(0, 140),
-      ...(target ? { target_url: target } : {}) });
+    return this.writeCommitStatus(job.repository, job.head, state, description, target);
+  }
+
+  async writeCommitStatus(repository, head, state, description, target, guard = () => true) {
+    const key = `${repository}:${head}:${this.config.statusContext}`;
+    const previous = this.commitStatusWrites.get(key) || Promise.resolve();
+    const write = previous.catch(() => {}).then(async () => {
+      if (!guard()) return false;
+      await this.github.rest.repos.createCommitStatus({ ...this.coordinates(repository), sha: head,
+        context: this.config.statusContext, state, description: description.slice(0, 140),
+        ...(target ? { target_url: target } : {}) });
+      return true;
+    });
+    this.commitStatusWrites.set(key, write);
+    try { return await write; }
+    finally { if (this.commitStatusWrites.get(key) === write) this.commitStatusWrites.delete(key); }
   }
 
   captureProgress(job) {
@@ -228,6 +243,7 @@ class ReviewService {
     job.workspace = cwd;
     fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
     await this.status(job, "pending", `OCR reviewing ${job.head.slice(0, 8)} (attempt ${job.attempt})`);
+    job.phase = "preparation"; this.state.save();
     await this.prepare({ github: this.github, context, core, prNumber: job.number, cwd,
       temp: path.join(this.config.stateDirectory, "runs"), token: this.config.githubAuth?.mode === "app" ? await this.github.getToken() : this.config.gitTokenFile ? fs.readFileSync(this.config.gitTokenFile, "utf8").trim() : await this.github.getToken(),
       checkoutBase: true, signal, expectedHead: job.head, expectedBase: job.base, snapshot: job.snapshot,
@@ -259,6 +275,7 @@ class ReviewService {
       this.log("reuse_completed_review", { id: job.id, sessionId: saved.sessionId });
     } else {
       try {
+        job.phase = "review"; this.state.save();
         await this.run({ core, directory: job.directory, cwd, binary: this.config.binary,
           provider: effective.provider, model: effective.model, budget: effective.budget,
           timeoutMs: effective.timeoutSeconds * 1000, signal, resume, options });
@@ -289,6 +306,7 @@ class ReviewService {
       if (progress?.budgetExceeded) throw Object.assign(new Error("Token budget guard stopped review before full coverage"), { retryable: false, budgetExceeded: true });
       throw new Error("Native review incomplete; inspect job artifacts");
     }
+    job.phase = "publication"; this.state.save();
     const result = await this.publish({ github: this.github, context, core, directory: job.directory, blockSeverity: effective.blockSeverity });
     if (signal.aborted) return { stale: true };
     if (result?.stale) {
@@ -308,9 +326,10 @@ class ReviewService {
       return { stale: true };
     }
     if (signal.aborted) return { stale: true };
-    await this.status(job, blocking.length ? "failure" : "success",
-      blocking.length ? `OCR found ${blocking.length} blocking finding(s)` : `OCR complete: ${result.comments.length} finding(s)`, result.summaryURL);
-    return { summaryURL: result.summaryURL, findings: result.comments.length, blocking: blocking.length, skipped: result.skipped };
+    const finalResult = { summaryURL: result.summaryURL, findings: result.comments.length, blocking: blocking.length, skipped: result.skipped };
+    const outcome = jobOutcome({ ...job, state: "complete", result: finalResult });
+    await this.status(job, outcome.commitStatus, outcome.description, result.summaryURL);
+    return finalResult;
   }
 
   async tick() {
@@ -359,10 +378,10 @@ class ReviewService {
         else job.state = result.stale ? (result.checkpoint ? "checkpointed" : "superseded") : "complete";
       }
       if (job.state !== "cancelled") job.result = result;
-      delete job.error;
+      delete job.error; delete job.failurePhase;
     } catch (error) {
       if (error.persistence) throw error;
-      job.error = error.message;
+      job.error = error.message; job.failurePhase = job.phase || "execution";
       if (!["superseded", "cancelled"].includes(job.state)) {
         if (this.stopping) { job.state = "queued"; job.nextAt = 0; job.attempt--; }
         else {

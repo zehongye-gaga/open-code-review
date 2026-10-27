@@ -44,10 +44,22 @@ test("summary updates the first inline batch without creating another review", a
   assert.doesNotMatch(h.reviews[1].body, /ocr-round:v1/);
 });
 
-test("empty-body fallback review is identified by its own inline comment marker", async () => {
+test("empty-body fallback reviews retain inline comments and get one separate summary", async () => {
   const h = fixture(); h.runId = 123; h.result.comments = [{ severity: "medium" }];
   h.reviews.push({ id: 10, user: { login: "ocr[bot]" }, commit_id: h.metadata.head, body: "", html_url: "https://example.test/inline" });
   h.github.rest.pulls.listReviewComments = async () => ({ data: [{ user: { login: "ocr[bot]" }, body: "<!-- ocr-123-1-abcd -->", pull_request_review_id: 10 }] });
-  h.github.rest.pulls.updateReview = async ({ review_id, body }) => { assert.equal(review_id, 10); h.reviews[0].body = body; return { data: h.reviews[0] }; };
-  assert.equal((await publishRoundSummary(h)).id, 10); assert.equal(h.reviews.length, 1);
+  h.github.rest.pulls.updateReview = async () => { throw new Error("Could not edit a review with a missing body."); };
+  const first = await publishRoundSummary(h);
+  const again = await publishRoundSummary(h);
+  assert.equal(first.id, again.id); assert.equal(h.reviews.length, 2);
+  assert.equal(h.reviews[0].body, "");
+  assert.match(h.reviews[1].body, /ocr-round:v1/);
+});
+
+test("a recovered review supersedes a skipped summary and remains deduplicated", async () => {
+  const h = fixture(); await publishRoundSummary({ ...h, skipped: true });
+  await publishRoundSummary(h); await publishRoundSummary(h);
+  assert.equal(h.reviews.length, 2);
+  assert.match(h.reviews[0].body, /Review skipped/);
+  assert.match(h.reviews[1].body, /Re-review complete/);
 });

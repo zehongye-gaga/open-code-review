@@ -334,3 +334,139 @@ test("push paginates and fans out only to eligible PRs", async (t) => {
   assert.deepEqual(h.s.state.data.deliveries.slice(1).map(e => e.number), [1, 2]);
   assert.equal(h.s.state.data.deliveries[0].childDeliveries.length, 2);
 });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+async function concurrentFixture(t, numbers) {
+  const h = fixture(t);
+  h.s.config.dispatchConcurrency = 2;
+  h.s.github.rest.pulls.get = async ({ pull_number }) => ({ data: { ...h.pull, number: pull_number } });
+  for (let i = 0; i < numbers.length; i++) {
+    h.pull.number = numbers[i];
+    await h.events.accept(h.envelope("synchronize", `parallel-${i}`), h.actor);
+  }
+  return h;
+}
+test("slow Agent dispatch does not block another PR; overlapping ticks preserve PR ordering and deduplication", async (t) => {
+  const h = await concurrentFixture(t, [1, 1, 2, 3]);
+  const gate = deferred(), entered = deferred();
+  let calls = 0;
+  h.events.agentDispatch = async (service, event) => {
+    calls++; entered.resolve(); await gate.promise;
+    return h.events.defaultReview(event, h.actor);
+  };
+  h.s.state.data.deliveries[0].route = "agent";
+  const first = h.events.tick();
+  await entered.promise;
+  // PR 1 is held in the Agent; PR 2 completes without releasing it.
+  for (let i = 0; i < 100 && h.s.state.data.deliveries[2].state !== "dispatched"; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(h.s.state.data.deliveries[2].state, "dispatched");
+  await h.events.tick();
+  assert.equal(h.s.state.data.deliveries[3].state, "dispatched");
+  assert.equal(h.s.state.data.deliveries[1].attempts, 0);
+  assert.equal(calls, 1);
+  gate.resolve(); await first; await h.events.tick();
+  assert.equal(h.s.state.data.jobs.length, 3);
+  assert.equal(h.s.state.data.deliveries[0].jobId, h.s.state.data.deliveries[1].jobId);
+  assert.equal(h.events.activeDispatches.size, 0);
+});
+test("dispatch pool is bounded and stopping admits no additional events", async (t) => {
+  const h = await concurrentFixture(t, [1, 2, 3]);
+  const gate = deferred(), entered = deferred();
+  let calls = 0;
+  h.events.agentDispatch = async (service, event) => {
+    if (++calls === 2) entered.resolve();
+    await gate.promise;
+    return h.events.defaultReview(event, h.actor);
+  };
+  for (const event of h.s.state.data.deliveries) event.route = "agent";
+  const first = h.events.tick(); await entered.promise;
+  await h.events.tick();
+  assert.equal(calls, 2); assert.equal(h.events.activeDispatches.size, 2);
+  gate.resolve(); await first;
+  h.s.stopping = true; await h.events.tick();
+  assert.equal(h.s.state.data.deliveries[2].attempts, 0);
+  h.s.stopping = false; await h.events.tick();
+  assert.equal(calls, 3); assert.equal(h.s.state.data.jobs.length, 3);
+});
+test("a failed PR releases its dispatch slot without failing other PRs", async (t) => {
+  const h = await concurrentFixture(t, [1, 2]);
+  h.s.github.rest.pulls.get = async ({ pull_number }) => {
+    if (pull_number === 1) throw new Error("temporary failure");
+    return { data: { ...h.pull, number: pull_number } };
+  };
+  await h.events.tick();
+  assert.equal(h.s.state.data.deliveries[0].state, "pending");
+  assert.equal(h.s.state.data.deliveries[1].state, "dispatched");
+  assert.equal(h.events.activeDispatches.size, 0);
+});
+
+test("admission publishes pending after durable acceptance and before Agent dispatch", async (t) => {
+  const h = fixture(t), statuses = [];
+  h.s.github.rest.repos.createCommitStatus = async (status) => {
+    assert.equal(JSON.parse(fs.readFileSync(path.join(h.dir, "state.json"))).deliveries.length, 1);
+    assert.equal(h.s.state.data.jobs.length, 0);
+    statuses.push(status);
+  };
+  await h.events.accept(h.envelope(), h.actor);
+  assert.equal(statuses.length, 1); assert.equal(statuses[0].state, "pending");
+  assert.equal(statuses[0].description, "OCR accepted; waiting for review dispatch");
+  await h.events.accept(h.envelope(), h.actor);
+  assert.equal(statuses.length, 1); assert.equal(h.s.state.data.jobs.length, 0);
+});
+test("draft, closed and out-of-scope branches do not publish admission pending", async (t) => {
+  for (const mutation of [p => p.draft = true, p => p.state = "closed", p => p.base.ref = "other"]) {
+    const h = fixture(t), statuses = [];
+    h.s.github.rest.repos.createCommitStatus = async (status) => statuses.push(status);
+    mutation(h.pull); await h.events.accept(h.envelope(), h.actor);
+    assert.equal(statuses.length, 0);
+  }
+});
+test("admission status API failure is retried without losing the durable event", async (t) => {
+  const h = fixture(t); let fail = true, count = 0;
+  h.s.github.rest.repos.createCommitStatus = async () => { if (fail) throw new Error("GitHub unavailable"); count++; };
+  await h.events.accept(h.envelope(), h.actor);
+  const e = h.s.state.data.deliveries[0];
+  assert.equal(e.state, "pending"); assert.equal(h.s.state.data.jobs.length, 0);
+  assert.match(e.statusError, /unavailable/);
+  fail = false; e.statusRetryAt = 0; await h.events.publishAdmission(e);
+  assert.equal(count, 1); assert.equal(e.admissionPublished, "pending");
+});
+test("completed tasks and Policy receipts own the status instead of duplicate App events", async (t) => {
+  const h = fixture(t), statuses = [];
+  await h.events.accept(h.envelope(), h.actor); await h.events.tick();
+  h.s.state.data.jobs[0].state = "complete";
+  h.s.github.rest.repos.createCommitStatus = async (status) => statuses.push(status);
+  await h.events.accept(h.envelope("edited", "duplicate-head"), h.actor);
+  assert.equal(statuses.length, 0);
+  const other = fixture(t); other.s.state.data.ciReceipts = { test: { repository: "org/repo", head_sha: other.pull.head.sha } };
+  other.s.github.rest.repos.createCommitStatus = async (status) => statuses.push(status);
+  await other.events.accept(other.envelope(), other.actor);
+  assert.equal(statuses.length, 0);
+});
+test("in-flight admission pending cannot overwrite a later final job status", async (t) => {
+  const h = fixture(t), gate = deferred(), entered = deferred(), statuses = [];
+  h.s.github.rest.repos.createCommitStatus = async (status) => {
+    if (status.state === "pending") { entered.resolve(); await gate.promise; }
+    statuses.push(status.state);
+  };
+  const acceptance = h.events.accept(h.envelope(), h.actor); await entered.promise;
+  const final = h.s.status({repository:"org/repo",head:h.pull.head.sha}, "success", "Review complete");
+  gate.resolve(); await Promise.all([acceptance, final]);
+  assert.deepEqual(statuses, ["pending", "success"]);
+});
+test("dispatch failures and skipped snapshots settle their early pending status", async (t) => {
+  for (const expected of ["error", "success"]) {
+    const h = fixture(t), statuses = [];
+    h.s.github.rest.repos.createCommitStatus = async (status) => statuses.push(status.state);
+    await h.events.accept(h.envelope(), h.actor);
+    if (expected === "error") h.s.github.rest.pulls.get = async () => { throw Object.assign(new Error("Denied"), {status:403}); };
+    else h.pull.draft = true;
+    await h.events.tick();
+    assert.deepEqual(statuses, ["pending", expected]);
+    assert.equal(h.s.state.data.jobs.length, 0);
+  }
+});

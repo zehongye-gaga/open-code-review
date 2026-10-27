@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+// SPDX-License-Identifier: Apache-2.0
 "use strict";
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
@@ -91,4 +94,11 @@ test("session key is saved before consuming the bootstrap response", async (t) =
   await assert.rejects(ensureSession(s, binding), /Interrupted body/);
   global.fetch = async () => { throw new Error("Must reuse allocated session"); };
   await ensureSession(s, binding);
+});
+
+test("Agent feedback uses the same skip outcome and preserves unlimited retry budget",(t)=>{
+ const s=fixture(t),job={id:3,repository:"org/repo",number:1,state:"complete",attempt:1,retryBudget:0,
+  settings:{options:{budget:2000000}},progress:{skipped:true,selected:0},result:{skipped:true,findings:0,blocking:0,summaryURL:"https://example.test/review"}};
+ queueFeedback(s,job);const payload=s.state.data.agentFeedback[0].payload;
+ assert.equal(payload.status,"skipped");assert.equal(payload.outcome,"skipped");assert.equal(payload.budget,0);assert.equal(payload.automatic_retry_scheduled,false);
 });

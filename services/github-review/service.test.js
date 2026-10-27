@@ -158,13 +158,17 @@ test("health lists all active PRs and concurrency configuration is validated", a
   const health = await response.json();
   assert.equal(health.running, 4);
   assert.equal(health.prConcurrency, 4);
+  assert.equal(health.dispatchConcurrency, 8);
+  assert.equal(health.dispatching, 0);
   assert.deepEqual(health.activeJobs.map((job) => job.number), [1, 2, 3, 4]);
   assert.equal(health.active, health.activeJobs[0].id);
   for (const entry of h.running.values()) entry.resolve();
   await pending;
   assert.equal(configuration(h.config).prConcurrency, 1);
+  assert.equal(configuration(h.config).dispatchConcurrency, 8);
   for (const value of [0, -1, 1.5, "4", null, Infinity]) {
     assert.throws(() => configuration({ ...h.config, prConcurrency: value }), /prConcurrency/);
+    assert.throws(() => configuration({ ...h.config, dispatchConcurrency: value }), /dispatchConcurrency/);
   }
 });
 
@@ -652,4 +656,18 @@ test("unlimited retry completes with zero passed to the runner without mutating 
   assert.equal(job.settings.options.budget, 500000);
   assert.equal(job.budgetRetries.length, 1);
   assert.equal(h.statuses.at(-1).state, "success");
+});
+
+test("publication retries of a zero-item skip never run the native reviewer again", async(t)=>{
+ const h=setup(t);let runs=0,publications=0;
+ h.service.run=async({directory})=>{
+  runs++;writeReport(directory,{state:"skipped"});
+  const file=path.join(directory,"result.json"),r=JSON.parse(fs.readFileSync(file));
+  r.manifest.coverage={selected:[],completed:[],reused:[],failed:[],waived:[]};fs.writeFileSync(file,JSON.stringify(r));
+ };
+ h.service.publish=async()=>{if(++publications===1)throw Error("GitHub unavailable");return {skipped:true,comments:[],summaryURL:"https://example.test/review"};};
+ const job=h.service.accept(repository,pr());await h.service.tick();
+ assert.equal(job.failurePhase,"publication");assert.equal(job.state,"queued");
+ job.nextAt=0;await h.service.tick();assert.equal(job.state,"complete");
+ assert.equal(runs,1);assert.equal(publications,2);assert.equal(h.statuses.at(-1).description,"OCR skipped: no reviewable items");
 });
