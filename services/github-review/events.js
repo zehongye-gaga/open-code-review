@@ -25,7 +25,8 @@ function view(event) {
     error: event.error || null };
 }
 class GitHubEvents {
-  constructor(service) { this.service = service; this.api = new Infrastructure(service); }
+  constructor(service) { this.service = service; this.api = new Infrastructure(service); this.activeDispatches = new Map(); }
+  get running() { return this.activeDispatches.size > 0; }
   fallback(event, reason) {
     if (this.service.repo(event.repository)?.agentFallback !== true) fail("Agent fallback is not allowed", 403);
     if (deliveryJob(this.service, event) || event.fallbackAt) return;
@@ -149,10 +150,22 @@ class GitHubEvents {
     event.reason = event.childDeliveries.length ? "associated_pull_requests" : "no_eligible_pull_request";
   }
   async tick() {
-    if (this.running || this.service.stopping || !this.service.config.infrastructure?.externalDispatch) return;
-    const event = (this.service.state.data.deliveries || []).find((e) => e.state === "pending" && e.nextAt <= Date.now());
-    if (!event) return;
-    this.running = true;
+    if (this.service.stopping || !this.service.config.infrastructure?.externalDispatch) return;
+    const pending = [];
+    for (const event of this.service.state.data.deliveries || []) {
+      if (this.activeDispatches.size >= this.service.config.dispatchConcurrency) break;
+      if (event.state !== "pending" || event.nextAt > Date.now()) continue;
+      const key = JSON.stringify([event.repository.toLowerCase(), event.kind === "push" ? event.ref : event.number]);
+      if (this.activeDispatches.has(key)) continue;
+      // Claim before the first await so overlapping timer ticks cannot dispatch twice.
+      this.activeDispatches.set(key, event.id);
+      pending.push(this.process(event, key));
+    }
+    const results = await Promise.allSettled(pending);
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+  }
+  async process(event, key) {
     try {
       event.attempts++; event.updatedAt = new Date().toISOString(); this.service.state.save();
       const actor = event.actor.id === "operator" ? event.actor : this.service.config.infrastructure.clients?.find((c) => c.id === event.actor.id);
@@ -190,7 +203,7 @@ class GitHubEvents {
       else event.nextAt = Date.now() + Math.min(300, 2 ** (event.fallbackAt ? event.fallbackAttempts : event.attempts)) * 1000;
     } finally {
       event.updatedAt = new Date().toISOString();
-      try { this.service.state.save(); } finally { this.running = false; }
+      try { this.service.state.save(); } finally { this.activeDispatches.delete(key); }
     }
   }
 }

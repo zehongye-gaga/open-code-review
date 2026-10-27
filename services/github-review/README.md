@@ -345,3 +345,15 @@ never calls submit/retry tools. Automated submissions also deduplicate by reposi
 PR, head and base independently of profile and request ID. Explicit administrator
 reruns remain available. Sent outbox entries follow artifact retention; pending and
 failed entries are retained.
+
+### Event dispatch concurrency
+
+`dispatchConcurrency` controls the independent GitHub event dispatch pool (default `8`).
+Different PRs can resolve their Agent routing concurrently; one slow Agent does not
+hold the entire delivery queue. Events for the same repository and PR are processed
+one at a time. Existing head/base task deduplication, Agent fallback and durable
+delivery retries remain in effect. Push lookup is serialized per repository/ref;
+its generated PR deliveries share the same PR locks as direct PR events.
+
+`GET /healthz` exposes `dispatching`, `dispatchConcurrency` and `pendingDeliveries`
+separately from OCR worker utilization. Pending deliveries include active dispatches.

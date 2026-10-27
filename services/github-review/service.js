@@ -20,7 +20,7 @@ function configuration(input) {
   const config = { listen: "127.0.0.1", port: 8787, pollSeconds: 30, bootstrapExisting: true,
     binary: "/usr/local/bin/ocr", provider: "openai-codex", model: "gpt-6-astra",
     budget: 0, timeoutSeconds: 1500, fetchTimeoutSeconds: 600, maxAttempts: 3, retrySeconds: 60,
-    retentionDays: 7, prConcurrency: 1, statusContext: "ocr-review", blockSeverity: "high", ...input };
+    retentionDays: 7, prConcurrency: 1, dispatchConcurrency: 8, statusContext: "ocr-review", blockSeverity: "high", ...input };
   if (!path.isAbsolute(config.stateDirectory || "")) throw new Error("stateDirectory must be absolute");
   if (!path.isAbsolute(config.binary)) throw new Error("binary must be absolute");
   if (!Array.isArray(config.repositories) || !config.repositories.length) throw new Error("Configure at least one repository");
@@ -34,7 +34,7 @@ function configuration(input) {
     repo.name = repo.name.toLowerCase();
     seen.add(repo.name.toLowerCase());
   }
-  for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "retrySeconds", "retentionDays", "prConcurrency"]) {
+  for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "retrySeconds", "retentionDays", "prConcurrency", "dispatchConcurrency"]) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 1) throw new Error(`${key} must be a positive integer`);
   }
   if (!Number.isSafeInteger(config.budget) || config.budget < 0) throw new Error("budget must be non-negative");

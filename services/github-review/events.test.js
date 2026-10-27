@@ -334,3 +334,72 @@ test("push paginates and fans out only to eligible PRs", async (t) => {
   assert.deepEqual(h.s.state.data.deliveries.slice(1).map(e => e.number), [1, 2]);
   assert.equal(h.s.state.data.deliveries[0].childDeliveries.length, 2);
 });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+async function concurrentFixture(t, numbers) {
+  const h = fixture(t);
+  h.s.config.dispatchConcurrency = 2;
+  h.s.github.rest.pulls.get = async ({ pull_number }) => ({ data: { ...h.pull, number: pull_number } });
+  for (let i = 0; i < numbers.length; i++) {
+    h.pull.number = numbers[i];
+    await h.events.accept(h.envelope("synchronize", `parallel-${i}`), h.actor);
+  }
+  return h;
+}
+test("slow Agent dispatch does not block another PR; overlapping ticks preserve PR ordering and deduplication", async (t) => {
+  const h = await concurrentFixture(t, [1, 1, 2, 3]);
+  const gate = deferred(), entered = deferred();
+  let calls = 0;
+  h.events.agentDispatch = async (service, event) => {
+    calls++; entered.resolve(); await gate.promise;
+    return h.events.defaultReview(event, h.actor);
+  };
+  h.s.state.data.deliveries[0].route = "agent";
+  const first = h.events.tick();
+  await entered.promise;
+  // PR 1 is held in the Agent; PR 2 completes without releasing it.
+  for (let i = 0; i < 100 && h.s.state.data.deliveries[2].state !== "dispatched"; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(h.s.state.data.deliveries[2].state, "dispatched");
+  await h.events.tick();
+  assert.equal(h.s.state.data.deliveries[3].state, "dispatched");
+  assert.equal(h.s.state.data.deliveries[1].attempts, 0);
+  assert.equal(calls, 1);
+  gate.resolve(); await first; await h.events.tick();
+  assert.equal(h.s.state.data.jobs.length, 3);
+  assert.equal(h.s.state.data.deliveries[0].jobId, h.s.state.data.deliveries[1].jobId);
+  assert.equal(h.events.activeDispatches.size, 0);
+});
+test("dispatch pool is bounded and stopping admits no additional events", async (t) => {
+  const h = await concurrentFixture(t, [1, 2, 3]);
+  const gate = deferred(), entered = deferred();
+  let calls = 0;
+  h.events.agentDispatch = async (service, event) => {
+    if (++calls === 2) entered.resolve();
+    await gate.promise;
+    return h.events.defaultReview(event, h.actor);
+  };
+  for (const event of h.s.state.data.deliveries) event.route = "agent";
+  const first = h.events.tick(); await entered.promise;
+  await h.events.tick();
+  assert.equal(calls, 2); assert.equal(h.events.activeDispatches.size, 2);
+  gate.resolve(); await first;
+  h.s.stopping = true; await h.events.tick();
+  assert.equal(h.s.state.data.deliveries[2].attempts, 0);
+  h.s.stopping = false; await h.events.tick();
+  assert.equal(calls, 3); assert.equal(h.s.state.data.jobs.length, 3);
+});
+test("a failed PR releases its dispatch slot without failing other PRs", async (t) => {
+  const h = await concurrentFixture(t, [1, 2]);
+  h.s.github.rest.pulls.get = async ({ pull_number }) => {
+    if (pull_number === 1) throw new Error("temporary failure");
+    return { data: { ...h.pull, number: pull_number } };
+  };
+  await h.events.tick();
+  assert.equal(h.s.state.data.deliveries[0].state, "pending");
+  assert.equal(h.s.state.data.deliveries[1].state, "dispatched");
+  assert.equal(h.events.activeDispatches.size, 0);
+});

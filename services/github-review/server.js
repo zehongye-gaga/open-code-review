@@ -32,6 +32,8 @@ function createServer(service, { apiToken, webhookSecret } = {}) {
             id: job.id, repository: job.repository, number: job.number, head: job.head, slot, startedAt: job.startedAt,
           })),
           running: service.workers.size, prConcurrency: service.config.prConcurrency,
+          dispatching: service.githubEvents?.activeDispatches.size || 0, dispatchConcurrency: service.config.dispatchConcurrency,
+          pendingDeliveries: (service.state.data.deliveries || []).filter((event) => event.state === "pending").length,
           queued: service.state.data.jobs.filter((job) => job.state === "queued").length });
       }
       const webhook = req.url === "/webhooks/github" && req.method === "POST";

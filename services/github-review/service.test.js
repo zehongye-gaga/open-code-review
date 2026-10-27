@@ -158,13 +158,17 @@ test("health lists all active PRs and concurrency configuration is validated", a
   const health = await response.json();
   assert.equal(health.running, 4);
   assert.equal(health.prConcurrency, 4);
+  assert.equal(health.dispatchConcurrency, 8);
+  assert.equal(health.dispatching, 0);
   assert.deepEqual(health.activeJobs.map((job) => job.number), [1, 2, 3, 4]);
   assert.equal(health.active, health.activeJobs[0].id);
   for (const entry of h.running.values()) entry.resolve();
   await pending;
   assert.equal(configuration(h.config).prConcurrency, 1);
+  assert.equal(configuration(h.config).dispatchConcurrency, 8);
   for (const value of [0, -1, 1.5, "4", null, Infinity]) {
     assert.throws(() => configuration({ ...h.config, prConcurrency: value }), /prConcurrency/);
+    assert.throws(() => configuration({ ...h.config, dispatchConcurrency: value }), /dispatchConcurrency/);
   }
 });
 
