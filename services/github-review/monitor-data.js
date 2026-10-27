@@ -83,7 +83,7 @@ async function getHealth(url) {
 
 function ocrRow(job) {
   return { engine: "ocr", id: String(job.id), repository: canonicalRepo(job.repository), number: job.number,
-    head: job.head, state: job.state, attempt: numeric(job.attempt), slot: job.slot ?? null,
+    head: job.head, state: job.state, outcome: require("./outcome.js").jobOutcome(job), attempt: numeric(job.attempt), slot: job.slot ?? null,
     createdAt: iso(job.createdAt), startedAt: iso(job.startedAt), updatedAt: iso(job.updatedAt || job.createdAt),
     nextAt: Number.isFinite(job.nextAt) && job.nextAt > 0 ? new Date(job.nextAt).toISOString() : null,
     findings: Number.isFinite(job.result?.findings) ? job.result.findings : null,

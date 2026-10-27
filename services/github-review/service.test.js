@@ -653,3 +653,17 @@ test("unlimited retry completes with zero passed to the runner without mutating 
   assert.equal(job.budgetRetries.length, 1);
   assert.equal(h.statuses.at(-1).state, "success");
 });
+
+test("publication retries of a zero-item skip never run the native reviewer again", async(t)=>{
+ const h=setup(t);let runs=0,publications=0;
+ h.service.run=async({directory})=>{
+  runs++;writeReport(directory,{state:"skipped"});
+  const file=path.join(directory,"result.json"),r=JSON.parse(fs.readFileSync(file));
+  r.manifest.coverage={selected:[],completed:[],reused:[],failed:[],waived:[]};fs.writeFileSync(file,JSON.stringify(r));
+ };
+ h.service.publish=async()=>{if(++publications===1)throw Error("GitHub unavailable");return {skipped:true,comments:[],summaryURL:"https://example.test/review"};};
+ const job=h.service.accept(repository,pr());await h.service.tick();
+ assert.equal(job.failurePhase,"publication");assert.equal(job.state,"queued");
+ job.nextAt=0;await h.service.tick();assert.equal(job.state,"complete");
+ assert.equal(runs,1);assert.equal(publications,2);assert.equal(h.statuses.at(-1).description,"OCR skipped: no reviewable items");
+});

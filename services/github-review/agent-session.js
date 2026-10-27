@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+// SPDX-License-Identifier: Apache-2.0
 "use strict";
 const fs = require("node:fs");
 const crypto = require("node:crypto");
@@ -55,9 +58,10 @@ async function ensureSession(service, binding) {
     `ocr-session-${binding.id}`);
 }
 function queueFeedback(service, job) {
+  const outcome = require("./outcome.js").jobOutcome(job);
   if (!service.config.infrastructure?.agentDispatch?.url || job.settings?.preview || service.stopping) return;
   if (!service.repo(job.repository)?.requiresAgent && job.requestedBy !== service.config.infrastructure.agentDispatch.clientId) return;
-  if (!["complete", "failed", "superseded", "cancelled", "checkpointed"].includes(job.state) &&
+  if (!outcome?.terminal &&
       !(job.state === "queued" && job.progress?.budgetExceeded)) return;
   const binding = bindingFor(service, job.repository, job.number);
   const id = hash([job.id, job.startedAt, job.attempt, job.state, job.retryBudget]);
@@ -66,7 +70,7 @@ function queueFeedback(service, job) {
   outbox.push({ id, bindingId: binding.id, repository: job.repository, number: job.number,
     jobId: job.id, state: "pending", attempts: 0, nextAt: 0, createdAt: new Date().toISOString(),
     payload: { repository: job.repository, pull_number: job.number, job_id: job.id, head_sha: job.head,
-      base_sha: job.base, status: job.state, attempt: job.attempt, budget: job.retryBudget || job.settings?.options?.budget,
+      base_sha: job.base, status: outcome.receiptState, outcome: outcome.kind, failure_phase: job.failurePhase, attempt: job.attempt, budget: job.retryBudget ?? job.settings?.options?.budget,
       budget_retries: job.budgetRetries || [], coverage_complete: job.progress?.complete || false,
       findings: job.progress?.findings, summary_url: job.result?.summaryURL, error: job.error,
       automatic_retry_scheduled: job.state === "queued" } });

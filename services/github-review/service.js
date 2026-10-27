@@ -6,6 +6,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { State } = require("./state.js");
+const { jobOutcome } = require("./outcome.js");
 const { queueFeedback } = require("./agent-session.js");
 const { prepareReview, runReview, publishReview } = require("./review.js");
 const { planReview, readProgress, checkpointFor } = require("./progress.js");
@@ -228,6 +229,7 @@ class ReviewService {
     job.workspace = cwd;
     fs.mkdirSync(cwd, { recursive: true, mode: 0o700 });
     await this.status(job, "pending", `OCR reviewing ${job.head.slice(0, 8)} (attempt ${job.attempt})`);
+    job.phase = "preparation"; this.state.save();
     await this.prepare({ github: this.github, context, core, prNumber: job.number, cwd,
       temp: path.join(this.config.stateDirectory, "runs"), token: this.config.githubAuth?.mode === "app" ? await this.github.getToken() : this.config.gitTokenFile ? fs.readFileSync(this.config.gitTokenFile, "utf8").trim() : await this.github.getToken(),
       checkoutBase: true, signal, expectedHead: job.head, expectedBase: job.base, snapshot: job.snapshot,
@@ -252,13 +254,14 @@ class ReviewService {
     job.range = metadata.range;
     this.log("review_range", { id: job.id, ...metadata.range, resume: resume || null });
     this.state.save();
-    const saved = job.progress?.fingerprint === metadata.fingerprint && job.progress.complete &&
+    const saved = job.progress?.fingerprint === metadata.fingerprint && (job.progress.complete || job.progress.skipped) &&
       readProgress(job.progress.directory, metadata);
-    if (saved?.complete) {
+    if (saved?.complete || saved?.skipped) {
       job.directory = job.progress.directory;
       this.log("reuse_completed_review", { id: job.id, sessionId: saved.sessionId });
     } else {
       try {
+        job.phase = "review"; this.state.save();
         await this.run({ core, directory: job.directory, cwd, binary: this.config.binary,
           provider: effective.provider, model: effective.model, budget: effective.budget,
           timeoutMs: effective.timeoutSeconds * 1000, signal, resume, options });
@@ -289,6 +292,7 @@ class ReviewService {
       if (progress?.budgetExceeded) throw Object.assign(new Error("Token budget guard stopped review before full coverage"), { retryable: false, budgetExceeded: true });
       throw new Error("Native review incomplete; inspect job artifacts");
     }
+    job.phase = "publication"; this.state.save();
     const result = await this.publish({ github: this.github, context, core, directory: job.directory, blockSeverity: effective.blockSeverity });
     if (signal.aborted) return { stale: true };
     if (result?.stale) {
@@ -308,9 +312,10 @@ class ReviewService {
       return { stale: true };
     }
     if (signal.aborted) return { stale: true };
-    await this.status(job, blocking.length ? "failure" : "success",
-      blocking.length ? `OCR found ${blocking.length} blocking finding(s)` : `OCR complete: ${result.comments.length} finding(s)`, result.summaryURL);
-    return { summaryURL: result.summaryURL, findings: result.comments.length, blocking: blocking.length, skipped: result.skipped };
+    const finalResult = { summaryURL: result.summaryURL, findings: result.comments.length, blocking: blocking.length, skipped: result.skipped };
+    const outcome = jobOutcome({ ...job, state: "complete", result: finalResult });
+    await this.status(job, outcome.commitStatus, outcome.description, result.summaryURL);
+    return finalResult;
   }
 
   async tick() {
@@ -359,10 +364,10 @@ class ReviewService {
         else job.state = result.stale ? (result.checkpoint ? "checkpointed" : "superseded") : "complete";
       }
       if (job.state !== "cancelled") job.result = result;
-      delete job.error;
+      delete job.error; delete job.failurePhase;
     } catch (error) {
       if (error.persistence) throw error;
-      job.error = error.message;
+      job.error = error.message; job.failurePhase = job.phase || "execution";
       if (!["superseded", "cancelled"].includes(job.state)) {
         if (this.stopping) { job.state = "queued"; job.nextAt = 0; job.attempt--; }
         else {

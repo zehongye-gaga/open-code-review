@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 alibaba/open-code-review Contributors
+
+// SPDX-License-Identifier: Apache-2.0
 "use strict";
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const { fail, resolveOptions } = require("./options.js");
 const { dispatchAgent } = require("./agent-dispatch.js");
+const { jobOutcome, receiptOutcome, receiptTerminal: terminal } = require("./outcome.js");
 const keys = ["base_ref", "base_sha", "head_sha", "pull_number", "repository"];
-const terminal = new Set(["complete", "failed", "cancelled", "superseded"]);
 function identity(input) {
   if (!input || input.schema !== "ocr-ci/v1" || typeof input.repository !== "string" ||
       !/^lexmount\/[a-z0-9_.-]+$/.test(input.repository) ||
@@ -43,7 +46,7 @@ class OrgCI {
     return record;
   }
   view(r) {
-    return { ...identity(r), state: r.state, durable: true, task_id: r.request_id,
+    return { ...identity(r), outcome: receiptOutcome(r, this.s.state.data.jobs.find((j) => j.id === r.jobId)).kind, state: r.state, durable: true, task_id: r.request_id,
       status_published: !!r.published, commit_status: r.published?.state || null,
       job_id: r.jobId || null, reason: r.reason || null, terminal: terminal.has(r.state) && !!r.published && r.published.state !== "pending" };
   }
@@ -210,7 +213,6 @@ class OrgCI {
     if (terminal.has(r.state)) return;
     if (state !== "pending") {
       await this.current(r);
-      if (state === "success" && (!job.progress?.complete || job.result?.skipped)) state = "failure";
     }
     if (state !== "pending") {
       r.lastWorkerStatus = { state, description, target }; this.s.state.save(); return;
@@ -219,8 +221,6 @@ class OrgCI {
   }
   async refresh(r) {
     const now = Date.now(), j = this.s.state.data.jobs.find((job) => job.id === r.jobId);
-    if (!terminal.has(r.state) && now - r.createdAt > (this.config.totalSeconds || 7200) * 1000) this.stop(r, "failed", "review_deadline_exceeded");
-    if (!terminal.has(r.state) && now - r.heartbeatAt > (this.config.heartbeatSeconds || 300) * 1000) this.stop(r, "failed", "n8n_tracking_stalled");
     if (!terminal.has(r.state)) {
       try { await this.current(r); }
       catch (error) {
@@ -228,17 +228,21 @@ class OrgCI {
         else if ([401, 403, 404].includes(error.status)) this.stop(r, "failed", "repository_access_failed");
         else throw error;
       }
-      if (!terminal.has(r.state) && j && ["complete", "failed", "cancelled", "superseded", "checkpointed"].includes(j.state)) {
-        if (j.state === "complete" && j.progress?.complete && j.result && !j.result.skipped && Number.isSafeInteger(j.result.blocking)) {
-          r.state = "complete"; r.finalStatus = j.result.blocking ? "failure" : "success"; r.finishedAt = now; this.s.state.save();
-        } else this.stop(r, j.state === "superseded" ? "superseded" : "failed", "review_incomplete_or_failed");
+      const result = jobOutcome(j);
+      if (!terminal.has(r.state) && result?.terminal) {
+        r.state = result.receiptState; r.reason = result.reason; r.finalStatus = result.commitStatus;
+        r.finishedAt = now; this.s.state.save();
       }
       if (!terminal.has(r.state) && now - r.createdAt > (this.config.totalSeconds || 7200) * 1000) this.stop(r, "failed", "review_deadline_exceeded");
-      if (!terminal.has(r.state) && now - r.heartbeatAt > (this.config.heartbeatSeconds || 300) * 1000) this.stop(r, "failed", "n8n_tracking_stalled");
+      // Once accepted by the backend, execution does not depend on n8n polling.
+      if (!j && !terminal.has(r.state) && now - r.heartbeatAt > (this.config.heartbeatSeconds || 300) * 1000) this.stop(r, "failed", "n8n_tracking_stalled");
     }
-    if (terminal.has(r.state)) await this.publish(r, r.finalStatus || "failure", r.state === "complete" ? (j.result.blocking ? `OCR found ${j.result.blocking} blocking finding(s)` : `OCR complete: ${j.result.findings} finding(s)`) : `OCR failed: ${r.reason || r.state}`, j?.result?.summaryURL);
-    else {
-      if (j) r.state = j.state === "queued" && j.attempt ? "retrying" : j.state;
+    if (terminal.has(r.state)) {
+      const result = receiptOutcome(r, j);
+      await this.publish(r, r.finalStatus || result.commitStatus, r.state === result.receiptState ? result.description :
+        `OCR ${r.state}: ${r.reason || r.state}`, j?.result?.summaryURL);
+    } else {
+      if (j) r.state = jobOutcome(j)?.receiptState || j.state;
       if (!r.published) await this.publish(r, "pending", "OCR accepted; waiting for background dispatch");
     }
     this.s.state.save();

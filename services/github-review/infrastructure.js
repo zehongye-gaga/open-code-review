@@ -37,7 +37,7 @@ function canonical(value) {
 }
 const hash = (x) => crypto.createHash("sha256").update(JSON.stringify(canonical(x))).digest("hex");
 function safeJob(j) {
-  return { job_id: j.id, repository: j.repository, pull_number: j.number, head_sha: j.head, base_sha: j.base,
+  return { outcome: require("./outcome.js").jobOutcome(j), job_id: j.id, repository: j.repository, pull_number: j.number, head_sha: j.head, base_sha: j.base,
     state: j.state, preview: j.settings?.preview || false, profile: j.settings?.profile,
     options: j.settings?.options, effective_budget: j.retryBudget ?? j.settings?.options.budget,
     budget_retries: j.budgetRetries || [], policy_version: j.settings?.policyVersion,
@@ -131,7 +131,8 @@ class Infrastructure {
           head: pull.head.sha, base: pull.base.sha, baseRef: pull.base.ref, state: "skipped", attempt: 0,
           result: { reviewed: false, reason: args.reason }, requestedBy: actor.id, createdAt: new Date().toISOString() };
         s.state.data.jobs.push(j); s.state.save();
-        await s.status(j, "error", "OCR skipped by policy; no review was performed");
+        const outcome = require("./outcome.js").jobOutcome(j);
+        await s.status(j, outcome.commitStatus, outcome.description);
         return safeJob(j);
       }
       const delivery = name === "submit_review" ? submissionDelivery(s, args, actor) : null;

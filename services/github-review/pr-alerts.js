@@ -5,19 +5,20 @@ const fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypt
 const copy=require("./pr-alerts.zh-CN.json");
 const values=v=>Array.isArray(v)?v:Object.values(v||{});
 const clean=v=>String(v||"unknown").replace(/(?:github_pat_|gh[pousr]_|goclaw_)[A-Za-z0-9_.-]+/g,"[REDACTED]").replace(/Bearer\s+[^\s]+/gi,"Bearer [REDACTED]").replace(/https:\/\/open\.feishu\.cn\/open-apis\/bot\/v2\/hook\/[^\s]+/g,"[WEBHOOK REDACTED]").slice(0,1200);
+const { jobOutcome, receiptOutcome } = require("./outcome.js");
 function events(state, notifyBlocking=false) {
  const rows=[],covered=new Set(),jobs=new Map(values(state.jobs).map(j=>[String(j.id),j]));
  for(const j of jobs.values()) {
-  const blocked=j.state==="complete" && j.result?.blocking>0;
-  if(j.state!=="failed" && !(blocked && notifyBlocking))continue;
+  const result=jobOutcome(j),blocked=result?.kind==="blocked";
+  if(!(j.state==="failed" && result?.alert) && !(blocked && notifyBlocking))continue;
   covered.add(String(j.id));rows.push({key:`job:${j.id}:${j.attempt}:${j.startedAt||j.createdAt}:${j.state}`,repository:j.repository,number:j.number,head:j.head,
-   type:blocked?"blocked":"failed",reason:blocked?`${j.result.blocking} blocking finding(s)`:j.error,
+   type:blocked?"blocked":"failed",reason:blocked?`${j.result.blocking} blocking finding(s)`:result.reason,
    time:j.updatedAt,jobId:j.id,attempt:j.attempt,budget:j.retryBudget??j.settings?.options?.budget,
    retries:j.budgetRetries?.length||0,route:j.requestedBy||"default",link:j.result?.summaryURL});
  }
  for(const [kind,items] of [["ci",values(state.ciReceipts)],["webhook",values(state.deliveries)]])for(const e of items){
   if(e.state!=="failed" || (e.jobId && covered.has(String(e.jobId))))continue;
-  const j=jobs.get(String(e.jobId));if(j && ["queued","running"].includes(j.state))continue;
+  const j=jobs.get(String(e.jobId));if(!receiptOutcome(e,j).alert)continue;
   if(e.jobId)covered.add(String(e.jobId));
   rows.push({key:e.jobId?`job:${e.jobId}:${j?.attempt}:${j?.startedAt||j?.createdAt}:failed`:`${kind}:${e.request_id||e.id}:${e.createdAt}`,
    repository:e.repository,number:e.pull_number||e.number||j?.number,head:e.head_sha||e.head||j?.head,type:"failed",

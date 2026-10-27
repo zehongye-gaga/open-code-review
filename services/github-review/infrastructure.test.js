@@ -105,12 +105,12 @@ test("named resources are pinned and command arguments remain separate values", 
   assert.ok(cliArguments(executionOptions(settings)).includes("$(touch /tmp/never)"));
   fs.writeFileSync(file, "changed"); assert.throws(() => executionOptions(settings), /changed/);
 });
-test("skip requires explicit policy and never posts success; patches are bounded", async (t) => {
+test("authorized policy skip is explicit and non-failing; patches are bounded", async (t) => {
   const h = setup(t);
   await assert.rejects(h.api.call("record_review_skip", { ...h.args, reason: "docs only" }, actor), /does not allow/);
   h.s.config.repositories[0].allowSkip = true;
   const skip = await h.api.call("record_review_skip", { ...h.args, reason: "docs only" }, actor);
-  assert.equal(skip.state, "skipped"); assert.equal(h.statuses.at(-1).state, "error");
+  assert.equal(skip.state, "skipped"); assert.equal(h.statuses.at(-1).state, "success");
   const ctx = await h.api.call("get_pr_context", { repository: "org/repo", pull_number: 1, include_patches: true }, actor);
   assert.equal(ctx.files[0].patch.length, 10000); assert.equal(ctx.files[0].patch_truncated_or_unavailable, true);
 });
