@@ -42,3 +42,15 @@ test("completed backend results take precedence over stale ingress failures",()=
 test("legacy completed records without evidence do not create a new historical alert flood",()=>{
  assert.equal(events({jobs:[{...job,state:"complete",progress:undefined,result:undefined}]}).length,0);
 });
+
+test("repository removal suppresses dispatch failures and already queued notifications",async(t)=>{
+ let calls=0;const c=setup(t),policy=path.join(c.directory,"policy.json");c.repositoryPolicyFile=policy;
+ fs.writeFileSync(policy,JSON.stringify({repositories:[{name:"org/repo"}]}));
+ const a=new Alerts(c,async()=>{calls++;throw Error("offline");});await a.collect({jobs:[]},1);
+ await a.collect({jobs:[job]},2);assert.equal(calls,1);
+ fs.writeFileSync(policy,JSON.stringify({repositories:[{name:"org/retained"}]}));
+ await a.collect({jobs:[job],deliveries:[{id:"new",repository:"org/repo",number:3,state:"failed"}]},70000);
+ assert.equal(calls,1);assert.equal(Object.keys(a.state.pending).length,0);
+ fs.writeFileSync(policy,JSON.stringify({repositories:[],infrastructure:{organizations:[{name:"org"}]}}));
+ await a.collect({jobs:[{...job,id:2}]},80000);assert.equal(calls,2);
+});

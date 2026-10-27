@@ -48,7 +48,10 @@ class Alerts {
   if(!r.ok)throw Error(`Feishu HTTP ${r.status}`);const b=await r.json();if((b.code??b.StatusCode)!==0)throw Error("Feishu rejected notification");
  }
  async collect(source,now=Date.now()){
-  const current=events(source,this.config.notifyBlocking===true),map=new Map(current.map(e=>[e.key,e]));
+  const policy=this.config.repositoryPolicyFile?JSON.parse(fs.readFileSync(this.config.repositoryPolicyFile,"utf8")):null;
+  const eligible=e=>!policy || (policy.repositories||[]).some(r=>r.name?.toLowerCase()===e.repository.toLowerCase()) ||
+    (policy.infrastructure?.organizations||[]).some(o=>o.name?.toLowerCase()===e.repository.split("/")[0].toLowerCase());
+  const current=events(source,this.config.notifyBlocking===true).filter(eligible),map=new Map(current.map(e=>[e.key,e]));
   if(!this.state){this.state={initializedAt:now,seen:Object.fromEntries(current.map(e=>[e.key,{baseline:true,at:now}])),pending:{}};this.save();return {baseline:current.length,sent:0};}
   for(const e of current)if(!this.state.seen[e.key]&&!this.state.pending[e.key])this.state.pending[e.key]={attempts:0,nextAt:0};
   for(const key of Object.keys(this.state.pending))if(!map.has(key)){delete this.state.pending[key];this.state.seen[key]={suppressed:true,at:now};}
