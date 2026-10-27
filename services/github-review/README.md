@@ -394,3 +394,12 @@ python3 /usr/local/lib/ocr-review/resource-history.py /var/lib/ocr-server-monito
 The host monitor calls `record(...)` before notification delivery. Its systemd
 unit can write to `/var/lib/ocr-server-monitor`; no review-service restart is
 needed. The installation retains the previous monitor executable for rollback.
+
+The audit dashboard exposes `/api/resources?hours=24` (allowed periods: 1, 6, 24,
+168 hours), reading `resourceHistoryDirectory` or the host monitor's default
+history directory. The resource panel is host-wide even when a repository is
+selected. Concurrency groups use raw samples; charts use time-bucket maxima.
+Missing data is not converted to zero. The wait table measures oldest queued
+job age (including retry backoff), while queue P95 is the recorded rolling
+24-hour first-attempt executor statistic, not a concurrency-group percentile.
+Only the dashboard service needs restarting for this feature.

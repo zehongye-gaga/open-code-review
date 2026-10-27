@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 alibaba/open-code-review Contributors
+
+# SPDX-License-Identifier: Apache-2.0
 import importlib.util,tempfile,pathlib,json,time,unittest,unittest.mock
 spec=importlib.util.spec_from_file_location('resources',str(pathlib.Path(__file__).with_name('resource-history.py')));m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class Tests(unittest.TestCase):

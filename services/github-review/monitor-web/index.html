@@ -10,6 +10,7 @@
   <script src="/monitor-view.js" defer></script>
   <script src="/monitor-analytics.js" defer></script>
   <script src="/monitor-ui.js" defer></script>
+  <script src="/monitor-resources.js" defer></script>
 </head>
 <body>
   <div class="shell">
@@ -32,6 +33,14 @@
         <section class="panel"><div class="panel-heading"><h2>{{servicesTitle}}</h2><span class="eyebrow">LIVE</span></div><div id="services"></div></section>
         <section class="panel resource-panel"><div class="panel-heading"><h2>{{resourcesTitle}}</h2><span class="muted">{{liveSnapshot}}</span></div><div id="resources"></div></section>
       </aside>
+    <section class="panel resource-history-panel">
+      <div class="panel-heading"><div><h2>{{resourceHistoryTitle}}</h2><p class="section-note">{{resourceHistoryNote}}</p></div><select id="resource-period" aria-label="{{resourcePeriod}}"><option value="1">{{resource1h}}</option><option value="6">{{resource6h}}</option><option value="24" selected>{{resource24h}}</option><option value="168">{{resource7d}}</option></select></div>
+      <p id="resource-history-status" class="section-note" role="status"></p>
+      <div class="resource-trends-grid"><div><h3>{{resourceUtil}}</h3><div id="resource-util-chart"></div></div><div><h3>{{resourceLoad}}</h3><div id="resource-load-chart"></div></div></div>
+      <div><h3>{{resourceWait}}</h3><div id="resource-wait-chart"></div></div>
+      <h3>{{resourceGroups}}</h3><div class="table-scroll"><table><thead><tr><th>{{resourceRunning}}</th><th>{{resourceSamples}}</th><th>{{resourceCPUMean}}</th><th>{{resourceCPUMax}}</th><th>{{resourceMemoryMax}}</th><th>{{resourceQueueMean}}</th><th>{{resourceQueueMax}}</th><th>{{resourceWaitMax}}</th></tr></thead><tbody id="resource-groups"></tbody></table></div>
+      <p class="analytics-definition">{{resourceDefinition}}</p>
+    </section>
     <section class="panel work-panel"><div class="panel-heading"><h2><span class="dot blue-dot"></span>{{workTitle}}</h2><span class="muted" id="work-count"></span></div><div id="work" class="work-grid"></div></section>
     <section class="panel analytics-panel" id="analytics-panel" hidden>
       <div class="panel-heading"><div><h2>{{analyticsTitle}}</h2><p class="section-note" id="analytics-scope"></p></div><div class="filters" aria-label="{{analyticsPeriod}}"><button class="filter selected" data-period="today">{{today}}</button><button class="filter" data-period="week">{{thisWeek}}</button><button class="filter" data-period="month">{{last30Days}}</button><button class="filter" data-period="retained">{{retainedHistory}}</button></div></div>

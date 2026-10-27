@@ -930,3 +930,11 @@ body{background:var(--bg);font-size:14px}.shell{max-width:1500px;padding:0 40px;
 @media(max-width:520px){#resources{grid-template-columns:1fr}.intro h1{font-size:26px}.shell{padding:0 12px}td{padding:12px}.panel-heading{padding:16px}.audit-stages{min-width:160px}}
 .kpi-label,.update-info strong,.resource-label,.service-desc{color:#526278}.repository-toolbar select,.analytics-panel select,.analytics-pulls-panel select{background:#fff;color:#263b55;border-color:#d9e1ed}.analytics-stat{background:#fff}.analytics-stat>p,.chart-value{color:#5b6f89}.analytics-stats,.phase-panel,.analytics-definition{border-color:#e3e8ef}.analytics-dialog .panel-heading{background:#fff}.analytics-definition{color:#65758a}.work-card{background:#f8fafc;border-color:#e3e8ef}.badge{border-color:transparent}.service-stats strong{color:#253d60}.table-foot{background:#fafbfd}.resource-panel .panel-heading{border-bottom:1px solid #e3e8ef}
 .shared-task{color:#237d53;font-size:12px;background:#eef8f2;padding:4px 8px;border-radius:5px;display:inline-block}
+
+.resource-history-panel { padding-bottom: 20px; }
+.resource-history-panel > h3, .resource-history-panel > div > h3 { padding: 0 24px; }
+.resource-history-panel > .section-note { padding: 0 24px; }
+.resource-trends-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 12px 24px; }
+.resource-history-panel svg { width: 100%; display: block; max-height: 270px; }
+.resource-legend { display: flex; flex-wrap: wrap; gap: 18px; padding: 8px 24px; font-size: 12px; font-weight: 600; }
+@media(max-width:900px) { .resource-trends-grid { grid-template-columns: 1fr; } }

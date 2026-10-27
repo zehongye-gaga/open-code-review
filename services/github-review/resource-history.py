@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 alibaba/open-code-review Contributors
+
 # SPDX-License-Identifier: Apache-2.0
 """Persist resource and review-load samples without changing review execution."""
 import collections

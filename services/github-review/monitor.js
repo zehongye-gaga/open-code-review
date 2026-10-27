@@ -8,15 +8,18 @@ const http = require("node:http");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { Monitor } = require("./monitor-data.js");
+const { ResourceTrends } = require("./resource-trends.js");
 
 function createMonitorServer(monitor, { bearerToken } = {}) {
+  const resourceTrends = new ResourceTrends(monitor.options?.resourceHistoryDirectory || "/var/lib/ocr-server-monitor/history");
   const copy = JSON.parse(fs.readFileSync(path.join(__dirname, "monitor-web", "i18n", "zh-CN.json"), "utf8"));
   const escape = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   const assets = new Map([["/", ["index.html", "text/html; charset=utf-8"]],
     ["/monitor.css", ["monitor.css", "text/css; charset=utf-8"]],
     ["/monitor-view.js", ["monitor-view.js", "text/javascript; charset=utf-8"]],
     ["/monitor-analytics.js", ["monitor-analytics.js", "text/javascript; charset=utf-8"]],
-    ["/monitor-ui.js", ["monitor-ui.js", "text/javascript; charset=utf-8"]]]
+    ["/monitor-ui.js", ["monitor-ui.js", "text/javascript; charset=utf-8"]],
+    ["/monitor-resources.js", ["monitor-resources.js", "text/javascript; charset=utf-8"]]]
     .map(([route, [file, type]]) => [route, { body: fs.readFileSync(path.join(__dirname, "monitor-web", file)), type }]));
   assets.get("/").body = assets.get("/").body.toString("utf8").replace(/\{\{(\w+)\}\}/g, (_, key) => {
     if (key === "copy") return JSON.stringify(copy).replace(/</g, "\\u003c");
@@ -37,6 +40,10 @@ function createMonitorServer(monitor, { bearerToken } = {}) {
     let url;
     try { url = new URL(req.url, "http://localhost"); }
     catch { return send(400, { error: "Invalid URL" }); }
+    if (url.pathname === "/api/resources") {
+      try { return send(200, resourceTrends.snapshot(Number(url.searchParams.get("hours") || 24))); }
+      catch (error) { return send(error.status || 503, { error: "Resource history unavailable" }); }
+    }
     if (url.pathname === "/api/status") {
       const repository = url.searchParams.get("repository") || "";
       if (repository && !/^[\w.-]+\/[\w.-]+$/.test(repository)) return send(400, { error: "Invalid repository" });
