@@ -52,6 +52,7 @@ class ReviewService {
     this.state = state || new State(this.config.stateDirectory);
     this.log = (event, details = {}) => log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
     this.prepare = prepare; this.run = run; this.publish = publish;
+    this.commitStatusWrites = new Map();
     this.workers = new Map(); this.stopping = false; this.lastPoll = null; this.pollError = null;
     fs.mkdirSync(path.join(this.config.stateDirectory, "runs"), { recursive: true, mode: 0o700 });
   }
@@ -173,9 +174,22 @@ class ReviewService {
   async status(job, state, description, target) {
     if (job.settings?.preview) return;
     if (job.ciRequestId) return this.orgCI.publishJobStatus(job, state, description, target);
-    await this.github.rest.repos.createCommitStatus({ ...this.coordinates(job.repository), sha: job.head,
-      context: this.config.statusContext, state, description: description.slice(0, 140),
-      ...(target ? { target_url: target } : {}) });
+    return this.writeCommitStatus(job.repository, job.head, state, description, target);
+  }
+
+  async writeCommitStatus(repository, head, state, description, target, guard = () => true) {
+    const key = `${repository}:${head}:${this.config.statusContext}`;
+    const previous = this.commitStatusWrites.get(key) || Promise.resolve();
+    const write = previous.catch(() => {}).then(async () => {
+      if (!guard()) return false;
+      await this.github.rest.repos.createCommitStatus({ ...this.coordinates(repository), sha: head,
+        context: this.config.statusContext, state, description: description.slice(0, 140),
+        ...(target ? { target_url: target } : {}) });
+      return true;
+    });
+    this.commitStatusWrites.set(key, write);
+    try { return await write; }
+    finally { if (this.commitStatusWrites.get(key) === write) this.commitStatusWrites.delete(key); }
   }
 
   captureProgress(job) {

@@ -25,8 +25,34 @@ function view(event) {
     error: event.error || null };
 }
 class GitHubEvents {
-  constructor(service) { this.service = service; this.api = new Infrastructure(service); this.activeDispatches = new Map(); }
+  constructor(service) { this.service = service; this.api = new Infrastructure(service); this.activeDispatches = new Map(); this.admissionWrites = new Map(); }
   get running() { return this.activeDispatches.size > 0; }
+  async publishAdmission(event) {
+    if (!event.admitted || this.admissionWrites.has(event.id) || (event.statusRetryAt || 0) > Date.now()) return;
+    const state = event.state === "pending" ? "pending" : event.state === "failed" ? "error" : "success";
+    if (event.admissionPublished === state) return;
+    const description = state === "pending" ? "OCR accepted; waiting for review dispatch" :
+      state === "error" ? "OCR dispatch failed; review did not start" : "OCR dispatch skipped; PR snapshot is no longer eligible";
+    const hasOwner = () => this.service.state.data.jobs.some((job) => job.repository === event.repository &&
+      job.head === event.head && !job.settings?.preview) ||
+      Object.values(this.service.state.data.ciReceipts || {}).some((receipt) => receipt.repository === event.repository && receipt.head_sha === event.head);
+    const write = this.service.writeCommitStatus(event.repository, event.head, state, description, undefined, () => {
+      if (hasOwner() || event.state === "dispatched") return false;
+      const newer = (this.service.state.data.deliveries || []).findLast((entry) => entry.admitted && entry.repository === event.repository && entry.head === event.head);
+      return newer === event && (event.state === "pending" ? "pending" : event.state === "failed" ? "error" : "success") === state;
+    });
+    this.admissionWrites.set(event.id, write);
+    try {
+      await write;
+      event.admissionPublished = state;
+      delete event.statusError; delete event.statusRetryAt;
+      this.service.state.save();
+    } catch (error) {
+      if (error.persistence) throw error;
+      event.statusError = error.message; event.statusRetryAt = Date.now() + 10000;
+      this.service.state.save(); this.service.log("delivery_status_failed", { delivery: event.id, error: error.message });
+    } finally { this.admissionWrites.delete(event.id); }
+  }
   fallback(event, reason) {
     if (this.service.repo(event.repository)?.agentFallback !== true) fail("Agent fallback is not allowed", 403);
     if (deliveryJob(this.service, event) || event.fallbackAt) return;
@@ -110,10 +136,12 @@ class GitHubEvents {
     const record = { id: args.delivery_id, digest, repository: repository.name, number: push ? null : pull.number,
       head: push ? payload.after : pull.head.sha, base: push ? null : pull.base.sha, action: push ? "push" : payload.action,
       ...(push ? { ref: payload.ref, kind: "push" } : {}), actor: { id: actor.id, role: actor.role, repositories: actor.repositories },
-      route, state: "pending", attempts: 0, nextAt: 0, createdAt: new Date().toISOString() };
+      route, state: "pending", attempts: 0, nextAt: 0, createdAt: new Date().toISOString(),
+      admitted: !push && !["closed", "converted_to_draft"].includes(payload.action) && !!this.service.eligible(repository.name, pull) };
     events.push(record);
     if (args.fallback) this.fallback(record, "ingress_ack_missing");
     this.service.state.save();
+    await this.publishAdmission(record);
     return { ...view(record), accepted: true };
   }
   status(args, actor) {
@@ -141,7 +169,7 @@ class GitHubEvents {
       if (!events.some((entry) => entry.id === id) && !children.some((entry) => entry.id === id)) children.push({
         id, parentDelivery: event.id, digest: event.digest, repository: event.repository,
         number: pull.number, head: pull.head.sha, base: pull.base.sha, action: "synchronize",
-        actor: event.actor, route: event.route, state: "pending", attempts: 0, nextAt: 0, createdAt: new Date().toISOString() });
+        actor: event.actor, route: event.route, state: "pending", admitted: true, attempts: 0, nextAt: 0, createdAt: new Date().toISOString() });
     }
     if (events.length + children.length > 25000) throw new Error("Delivery storage is full");
     events.push(...children);
@@ -151,7 +179,8 @@ class GitHubEvents {
   }
   async tick() {
     if (this.service.stopping || !this.service.config.infrastructure?.externalDispatch) return;
-    const pending = [];
+    const pending = (this.service.state.data.deliveries || []).filter((event) => event.admitted && !this.admissionWrites.has(event.id) &&
+      event.admissionPublished !== (event.state === "pending" ? "pending" : event.state === "failed" ? "error" : "success")).map((event) => this.publishAdmission(event));
     for (const event of this.service.state.data.deliveries || []) {
       if (this.activeDispatches.size >= this.service.config.dispatchConcurrency) break;
       if (event.state !== "pending" || event.nextAt > Date.now()) continue;
@@ -186,10 +215,12 @@ class GitHubEvents {
       } else if (["closed", "converted_to_draft"].includes(event.action) || pull.head.sha !== event.head || pull.base.sha !== event.base) {
         event.state = "superseded";
       } else if (event.route === "agent") {
+        if (!event.admitted) { event.admitted = true; this.service.state.save(); await this.publishAdmission(event); }
         const job = await this.agentReview(event, actor);
         event.jobId = job.id; event.state = "dispatched";
         event.dispatchMethod ||= event.fallbackAt ? "direct_fallback" : "agent";
       } else {
+        if (!event.admitted) { event.admitted = true; this.service.state.save(); await this.publishAdmission(event); }
         const job = await this.defaultReview(event, actor);
         event.jobId = job.id; event.state = "dispatched"; event.dispatchMethod = "direct";
       }
@@ -203,7 +234,7 @@ class GitHubEvents {
       else event.nextAt = Date.now() + Math.min(300, 2 ** (event.fallbackAt ? event.fallbackAttempts : event.attempts)) * 1000;
     } finally {
       event.updatedAt = new Date().toISOString();
-      try { this.service.state.save(); } finally { this.activeDispatches.delete(key); }
+      try { this.service.state.save(); await this.publishAdmission(event); } finally { this.activeDispatches.delete(key); }
     }
   }
 }

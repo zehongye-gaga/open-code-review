@@ -357,3 +357,16 @@ its generated PR deliveries share the same PR locks as direct PR events.
 
 `GET /healthz` exposes `dispatching`, `dispatchConcurrency` and `pendingDeliveries`
 separately from OCR worker utilization. Pending deliveries include active dispatches.
+
+### Early App admission status
+
+Eligible PR events are persisted before publishing `ocr-review: pending` with
+`OCR accepted; waiting for review dispatch`. This does not wait for the Agent
+to submit a task. Draft, closed and disallowed-branch events do not create a
+new waiting status. Push events first resolve an eligible PR.
+
+Status publication retries independently of dispatch. Duplicate events cannot
+replace a task or Policy CI receipt's status. App, worker and Policy status writes
+are serialized per repository/commit/context, so a slow admission write cannot
+land after the final review result. A delivery that never creates a task settles
+its waiting status as an execution error or a normal skip when it terminates.

@@ -7,6 +7,7 @@ const test = require("node:test"), assert = require("node:assert/strict"), crypt
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { OrgCI, identity } = require("./org-ci.js");
 const { State } = require("./state.js");
+const { ReviewService } = require("./service.js");
 function input(extra = {}) {
   const p = { base_ref: "release/company", base_sha: "b".repeat(40), head_sha: "a".repeat(40), pull_number: 12, repository: "lexmount/example", ...extra };
   const str = JSON.stringify(p).replace(/[\u007f-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
@@ -16,7 +17,8 @@ function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "org-ci-")); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const statuses = [], p = input();
   const pr = { number: 12, state: "open", draft: true, head: { sha: p.head_sha }, base: { sha: p.base_sha, ref: p.base_ref, repo: { full_name: p.repository } } };
-  const s = { state: new State(dir), workers: new Map(), log() {},
+  const s = { state: new State(dir), workers: new Map(), commitStatusWrites: new Map(),
+    writeCommitStatus: ReviewService.prototype.writeCommitStatus, log() {},
     config: { binary: __filename, provider: "test", model: "test", timeoutSeconds: 30, fetchTimeoutSeconds: 30, blockSeverity: "high", statusContext: "ocr-review",
       infrastructure: { orgCI: { enabled: true, totalSeconds: 7200, heartbeatSeconds: 300 }, agentDispatch: { clientId: "agent" } } },
     coordinates: () => ({ owner: "lexmount", repo: "example" }), repo: () => ({ name: p.repository, defaultProfile: "standard" }),

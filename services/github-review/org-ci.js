@@ -71,8 +71,7 @@ class OrgCI {
       const newer = Object.values(this.receipts).some((other) => other.repository === r.repository && other.head_sha === r.head_sha && other.sequence > r.sequence);
       if (newer) { r.published = { state: "failure", suppressed: true }; this.s.state.save(); return; }
       if (r.published?.state === state && r.published?.description === description) return;
-      await this.s.github.rest.repos.createCommitStatus({ ...this.s.coordinates(r.repository), sha: r.head_sha,
-        context: this.s.config.statusContext, state, description: description.slice(0, 140), ...(target ? { target_url: target } : {}) });
+      await this.s.writeCommitStatus(r.repository, r.head_sha, state, description, target);
       r.published = { state, description, at: Date.now() }; this.s.state.save();
     });
   }
