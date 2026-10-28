@@ -47,10 +47,15 @@ function safeJob(j) {
 }
 class Infrastructure {
   constructor(service) { this.service = service; }
+  authorizeScope(name, actor) {
+    validate({ repository: name }, { type: "object", properties: { repository: repo }, required: ["repository"] });
+    name = name.toLowerCase();
+    if (actor.role !== "admin" && !(actor.repositories || []).some((p) => p.toLowerCase() === name || p.toLowerCase() === `${name.split("/")[0]}/*`)) fail("Repository is outside client scope", 403, "CLIENT_SCOPE_DENIED");
+  }
   authorize(name, actor, mutation = false) {
+    this.authorizeScope(name, actor);
     const repository = this.service.repo(name);
     if (!repository) fail("Repository is not allowed", 403, "REPOSITORY_NOT_ALLOWED");
-    if (actor.role !== "admin" && !(actor.repositories || []).some((p) => p.toLowerCase() === repository.name || p.toLowerCase() === `${repository.name.split("/")[0]}/*`)) fail("Repository is outside client scope", 403, "CLIENT_SCOPE_DENIED");
     if (mutation && repository.requiresAgent && !["agent", "admin"].includes(actor.role)) fail("Repository requires agent dispatch", 403);
     if (mutation && !["agent", "dispatcher", "admin"].includes(actor.role)) fail("Client cannot submit tasks", 403);
     return repository;

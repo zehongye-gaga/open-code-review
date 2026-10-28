@@ -471,3 +471,26 @@ test("dispatch failures and skipped snapshots settle their early pending status"
     assert.equal(h.s.state.data.jobs.length, 0);
   }
 });
+
+test("backend alone decides repository enrollment; gateway acknowledges ignores without admitting work", async (t) => {
+  const h = fixture(t), args = h.envelope();
+  h.s.config.repositories = [];
+  const logs = []; h.s.log = (event, data) => logs.push({ event, ...data });
+  const result = await h.events.accept(args, h.actor);
+  assert.equal(result.state, "ignored");
+  assert.equal(result.reason, "repository_not_enabled");
+  assert.equal(result.accepted, false);
+  assert.equal(result.repository, "org/repo");
+  assert.equal(result.pull_number, 1);
+  const { normalizeAcknowledgement } = require("./n8n-workflow.js");
+  assert.equal(normalizeAcknowledgement({ statusCode: 202, body: result }, { envelope: args }).acknowledged, true);
+  assert.equal(h.s.state.data.jobs.length, 0);
+  assert.equal((h.s.state.data.deliveries || []).length, 0);
+  assert.equal(h.calls(), 0);
+  assert.equal(logs[0].delivery_id, args.delivery_id);
+  await assert.rejects(h.events.accept({ ...args, signature: "sha256=" + "0".repeat(64) }, h.actor), /signature/);
+  await assert.rejects(h.events.accept(args, { ...h.actor, repositories: ["other/*"] }), /scope/);
+  assert.throws(() => h.events.api.authorize("org/repo", h.actor), /Repository is not allowed/);
+  h.s.config.repositories = [{ name: "org/repo", baseBranches: ["main"] }];
+  assert.equal((await h.events.accept(args, h.actor)).state, "pending");
+});

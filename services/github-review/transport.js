@@ -92,7 +92,11 @@ function createInfrastructureHandler(service, legacyToken) {
         }
       } else rpcError(-32601, "Method not found");
     } catch (error) {
-      service.log("infrastructure_failed", { actor: actor.id, error: error.message });
+      service.log("infrastructure_failed", { actor: actor.id, operation: url.pathname.slice(4),
+        repository: typeof message?.repository === "string" ? message.repository.slice(0, 200) : undefined,
+        pull_number: Number.isSafeInteger(message?.pull_number) ? message.pull_number : undefined,
+        delivery_id: typeof message?.delivery_id === "string" ? message.delivery_id.slice(0, 200) : undefined,
+        code: error.code || null, error: error.message });
       if (error.persistence) { send(503, { error: "State persistence failed" }); throw error; }
       send(error.status && error.status < 500 ? error.status : 502, { code: error.code || null, error: error.status && error.status < 500 ? error.message : "Upstream or internal failure; consult operator logs" });
     }
