@@ -101,7 +101,7 @@ class GitHubEvents {
       ((config.unsignedWebhookRepositories || []).includes(repositoryName) ||
         (config.unsignedWebhookOrganizations || []).includes(repositoryName.split("/")[0]));
     if (unsigned) {
-      this.api.authorize(repositoryName, actor);
+      this.api.authorizeScope(repositoryName, actor);
     } else {
       if (!args.signature) fail("Missing GitHub signature", 401);
       if (!config.githubWebhookSecretFile) fail("GitHub webhook signature verification is not configured", 503);
@@ -112,7 +112,15 @@ class GitHubEvents {
     }
     if (args.event === "ping") return { state: "ping", accepted: true };
     if (args.event !== "push" && (args.event !== "pull_request" || !actions.has(payload.action))) return { state: "ignored", reason: "unsupported_event" };
-    const repository = this.api.authorize(payload.repository?.full_name, actor);
+    this.api.authorizeScope(repositoryName, actor);
+    if (!this.service.repo(repositoryName)) {
+      const result = { delivery_id: args.delivery_id, repository: repositoryName,
+        pull_number: Number.isSafeInteger(payload.pull_request?.number) ? payload.pull_request.number : null,
+        state: "ignored", reason: "repository_not_enabled", accepted: false };
+      this.service.log("github_event_ignored", result);
+      return result;
+    }
+    const repository = this.api.authorize(repositoryName, actor);
     const route = repository.requiresAgent ? "agent" : args.route;
     if (route === "agent" && !config.agentDispatch && repository.agentFallback !== true) fail("Agent dispatch is not configured", 503);
     if (args.fallback && (route !== "agent" || repository.agentFallback !== true)) fail("Agent fallback is not allowed", 403);

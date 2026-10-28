@@ -33,3 +33,25 @@ Job failure notifications use stable job/outcome identity, independent of `start
 5. Verify the deployed file hashes, health, an actual webhook/CI admission and final status. Record all release identifiers and test PRs.
 
 Rollback must restore the matching old n8n polling workflow before the old backend; an old backend with the transport-only workflow cannot dispatch CI receipts. Restore code/config pointers, never overwrite current state with an old backup. Preserve all tasks accepted after cutover. Agent budget history and recovery fields are additive state fields.
+
+## Repository enrollment
+
+The backend resolves repository enrollment from `repositories` and
+`infrastructure.organizations` through `ReviewService.repo`. n8n transports all
+incoming events; do not add a second repository allowlist to the workflow.
+Client repository scopes and webhook signature verification remain independent
+security boundaries, not enrollment settings.
+
+An authenticated, in-scope GitHub event for an unenrolled repository returns a
+correlated `ignored` response with `reason: repository_not_enabled` and
+`accepted: false`. This acknowledges event handling only: it creates no review
+job, receipt, or successful commit status. The gateway recognizes this terminal
+response and does not retry it as a transport failure. The backend logs the
+repository, PR number when present, and delivery ID. Ignored events are not
+persisted as admissions, so replay after enrollment can create a task.
+
+Explicit CI submissions and review tools still reject unenrolled repositories;
+otherwise a required admission check could pass without a review being accepted.
+Invalid signatures and out-of-scope clients remain errors. Existing transport-only
+n8n workflows already accept correlated ignored responses; no workflow migration
+or Policy YAML change is required for this behavior.
