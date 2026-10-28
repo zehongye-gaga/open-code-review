@@ -417,3 +417,18 @@ test("legacy executor hashes remain reusable only under the same effective polic
   s.config.model = "changed-model";
   assert.equal(policy.currentPolicy(s, job), false);
 });
+
+test("CI-only reopening wakes a retired dispatch check for the same snapshot", async t => {
+  const { s, ci, p, pr } = fixture(t);
+  s.config.infrastructure.dispatchCheck = { enabled: true };
+  s.config.infrastructure.externalDispatch = true; s.config.infrastructure.dispatchEnabled = true;
+  s.eligible = (_, pull) => pull.state === "open"; pr.draft = false;
+  s.github.rest.pulls.list = async () => ({ data: pr.state === "open" ? [pr] : [] });
+  s.dispatchCheck = new (require("./dispatch-check.js").DispatchCheck)(s);
+  await ci.submit(p, "direct"); await s.dispatchCheck.tick();
+  pr.state = "closed"; await ci.status(p);
+  const entry = Object.values(s.state.data.dispatchChecks)[0]; entry.nextAt = 0;
+  await s.dispatchCheck.tick(); assert.equal(entry.retired, true);
+  pr.state = "open"; await ci.submit(p, "direct"); await s.dispatchCheck.tick();
+  assert.equal(entry.retired, false); assert.equal(entry.published.state, "success");
+});

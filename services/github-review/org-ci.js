@@ -81,7 +81,7 @@ class OrgCI {
     if (!["direct", "agent"].includes(route)) fail("Invalid n8n route");
     return this.lock(normalized.request_id, async () => {
       let r = this.receipts[normalized.request_id];
-      if (r) { await this.retrySubmission(r, input.retry_key); await this.reopen(r); await this.refresh(r); return this.view(r); }
+      if (r) { await this.retrySubmission(r, input.retry_key); await this.reopen(r); await this.refresh(r); this.s.dispatchCheck?.watch(r.repository, r.pull_number, r.head_sha); return this.view(r); }
       await this.current(normalized);
       if (Object.keys(this.receipts).length >= 25000) fail("CI receipt capacity reached", 503);
       for (const old of Object.values(this.receipts)) {
@@ -91,6 +91,7 @@ class OrgCI {
         createdAt: Date.now(), heartbeatAt: Date.now(), dispatchAttempts: 0, nextDispatchAt: 0 };
       if (input.retry_key !== undefined) await this.retrySubmission(r, input.retry_key);
       this.s.state.save();
+      this.s.dispatchCheck?.watch(r.repository, r.pull_number, r.head_sha);
       if (await this.reuseExisting(r)) await this.refresh(r);
       else await this.publish(r, "pending", "OCR accepted; waiting for background dispatch");
       return this.view(r);

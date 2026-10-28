@@ -88,6 +88,12 @@ function validateInfrastructure(config) {
   if (!infra) return;
   for (const key of ["enabled", "externalDispatch", "dispatchEnabled"]) if (infra[key] !== undefined && typeof infra[key] !== "boolean") fail(`infrastructure.${key} must be boolean`);
   if (infra.port !== undefined && (!Number.isSafeInteger(infra.port) || infra.port < 1 || infra.port > 65535)) fail("Invalid infrastructure port");
+  if (infra.dispatchCheck !== undefined) {
+    validate(infra.dispatchCheck, { type: "object", additionalProperties: false, required: ["enabled"], properties: {
+      enabled: { type: "boolean" }, context: { type: "string", pattern: "^ocr-dispatch(?:[-/][A-Za-z0-9_-]+)?$" },
+    } }, "dispatchCheck");
+    if ((infra.dispatchCheck.context || "ocr-dispatch") === config.statusContext) fail("Dispatch and review contexts must differ");
+  }
   if (infra.budgetRetry !== undefined) validate(infra.budgetRetry, { type: "object", properties: {
     mode: { type: "string", enum: ["multiply", "unlimited"] },
     enabled: { type: "boolean" }, maxRetries: { type: "integer", minimum: 0, maximum: 5 },

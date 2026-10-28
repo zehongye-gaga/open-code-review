@@ -53,6 +53,7 @@ class ReviewService {
     this.log = (event, details = {}) => log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
     this.prepare = prepare; this.run = run; this.publish = publish;
     this.commitStatusWrites = new Map();
+    this.dispatchCheck = new (require("./dispatch-check.js").DispatchCheck)(this);
     this.workers = new Map(); this.stopping = false; this.lastPoll = null; this.pollError = null;
     fs.mkdirSync(path.join(this.config.stateDirectory, "runs"), { recursive: true, mode: 0o700 });
   }

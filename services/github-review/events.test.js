@@ -471,3 +471,26 @@ test("dispatch failures and skipped snapshots settle their early pending status"
     assert.equal(h.s.state.data.jobs.length, 0);
   }
 });
+
+test("opt-in dispatch gate persists the base ref and checks admission independently of OCR execution", async t => {
+  const h = fixture(t);
+  h.s.config.infrastructure.dispatchCheck = { enabled: true };
+  h.pull.head.ref = "topic"; h.pull.head.repo = { full_name: "org/repo" };
+  h.s.github.rest.pulls.list = async () => ({ data: [h.pull] });
+  const statuses = [];
+  h.s.github.rest.repos.createCommitStatus = async args => { statuses.push(args); };
+  await h.events.accept(h.envelope(), h.actor);
+  await h.s.dispatchCheck.tick();
+  assert.equal(h.s.state.data.deliveries[0].baseRef, "main");
+  assert.equal(statuses.filter(s => s.context === "ocr-dispatch").at(-1).state, "success");
+  assert.equal(h.s.state.data.jobs.length, 0);
+  h.pull.base.ref = "release"; h.s.config.repositories[0].baseBranches.push("release");
+  await h.events.accept(h.envelope("edited", "retarget"), h.actor);
+  await h.s.dispatchCheck.tick();
+  const snapshots = Object.values(h.s.state.data.dispatchChecks)[0].snapshots;
+  assert.equal(snapshots[0].baseRef, "release"); assert.equal(snapshots[0].accepted, true);
+  await h.events.tick();
+  assert.equal(h.s.state.data.deliveries[0].state, "superseded");
+  await h.events.tick();
+  assert.equal(h.s.state.data.jobs[0].baseRef, "release");
+});

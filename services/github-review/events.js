@@ -134,13 +134,14 @@ class GitHubEvents {
     }
     if (events.length >= 25000) fail("Delivery storage is full; contact the operator", 503);
     const record = { id: args.delivery_id, digest, repository: repository.name, number: push ? null : pull.number,
-      head: push ? payload.after : pull.head.sha, base: push ? null : pull.base.sha, action: push ? "push" : payload.action,
+      head: push ? payload.after : pull.head.sha, base: push ? null : pull.base.sha, baseRef: push ? null : pull.base.ref, action: push ? "push" : payload.action,
       ...(push ? { ref: payload.ref, kind: "push" } : {}), actor: { id: actor.id, role: actor.role, repositories: actor.repositories },
       route, state: "pending", attempts: 0, nextAt: 0, createdAt: new Date().toISOString(),
       admitted: !push && !["closed", "converted_to_draft"].includes(payload.action) && !!this.service.eligible(repository.name, pull) };
     events.push(record);
     if (args.fallback) this.fallback(record, "ingress_ack_missing");
     this.service.state.save();
+    if (!push) this.service.dispatchCheck?.watch(record.repository, record.number, record.head);
     await this.publishAdmission(record);
     return { ...view(record), accepted: true };
   }
@@ -168,11 +169,13 @@ class GitHubEvents {
       const id = `push-${crypto.createHash("sha256").update(event.id).digest("hex")}-${pull.number}`;
       if (!events.some((entry) => entry.id === id) && !children.some((entry) => entry.id === id)) children.push({
         id, parentDelivery: event.id, digest: event.digest, repository: event.repository,
-        number: pull.number, head: pull.head.sha, base: pull.base.sha, action: "synchronize",
+        number: pull.number, head: pull.head.sha, base: pull.base.sha, baseRef: pull.base.ref, action: "synchronize",
         actor: event.actor, route: event.route, state: "pending", admitted: true, attempts: 0, nextAt: 0, createdAt: new Date().toISOString() });
     }
     if (events.length + children.length > 25000) throw new Error("Delivery storage is full");
     events.push(...children);
+    this.service.state.save();
+    for (const child of children) this.service.dispatchCheck?.watch(child.repository, child.number, child.head);
     event.childDeliveries = events.filter((entry) => entry.parentDelivery === event.id).map((entry) => entry.id);
     event.state = event.childDeliveries.length ? "expanded" : "ignored";
     event.reason = event.childDeliveries.length ? "associated_pull_requests" : "no_eligible_pull_request";
@@ -196,7 +199,7 @@ class GitHubEvents {
           await this.api.call("cancel_review", { job_id: job.id, reason: "PR is closed, draft or outside allowed branches" }, { role: "admin", id: "event-lifecycle" });
         }
         event.state = "ignored";
-      } else if (["closed", "converted_to_draft"].includes(event.action) || pull.head.sha !== event.head || pull.base.sha !== event.base) {
+      } else if (["closed", "converted_to_draft"].includes(event.action) || pull.head.sha !== event.head || pull.base.sha !== event.base || event.baseRef && pull.base.ref !== event.baseRef) {
         event.state = "superseded";
       } else if (event.route === "agent") {
         if (!event.admitted) { event.admitted = true; this.service.state.save(); await this.publishAdmission(event); }
