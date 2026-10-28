@@ -10,6 +10,7 @@ async function dispatchTick(service, events = service.githubEvents) {
     !events.admissionWrites.has(event.id) && event.admissionPublished !==
       (event.state === "pending" ? "pending" : event.state === "failed" ? "error" : "success"))
     .map((event) => events.publishAdmission(event));
+  if (service.dispatchCheck) pending.push(service.dispatchCheck.tick());
   const candidates = [];
   if (service.config.infrastructure?.externalDispatch) {
     for (const event of service.state.data.deliveries || []) {
