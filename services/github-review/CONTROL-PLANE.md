@@ -55,3 +55,15 @@ otherwise a required admission check could pass without a review being accepted.
 Invalid signatures and out-of-scope clients remain errors. Existing transport-only
 n8n workflows already accept correlated ignored responses; no workflow migration
 or Policy YAML change is required for this behavior.
+
+## Inline finding identity
+
+Historical inline suppression requires overlapping placement, equal rendered
+finding content, and a positively verified unresolved, non-outdated root thread
+owned by the publisher. Only the OCR transport marker and CRLF line endings are normalized. Severity badges, suggestions, code whitespace and
+explanations remain significant. Different findings on one line are published.
+Resolved, outdated, missing or unreadable thread state cannot suppress a finding.
+Summaries link to the existing unresolved discussions when suppression occurs.
+Within a publication batch, only equal-content overlapping findings are combined.
+The existing per-comment marker retry checks remain independent of historical
+suppression and prevent duplicate writes after ambiguous network failures.
