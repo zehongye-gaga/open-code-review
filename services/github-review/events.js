@@ -188,6 +188,10 @@ class GitHubEvents {
   async tick() { return require("./dispatch-control.js").dispatchTick(this.service, this); }
   async process(event, key) {
     try {
+      if ((event.dispatchRetryAttempts || 0) >= 8) {
+        event.state = "failed"; event.error = event.reason = "dispatch_retries_exhausted"; return;
+      }
+      event.dispatchRetryAttempts = (event.dispatchRetryAttempts || 0) + 1;
       event.attempts++; event.updatedAt = new Date().toISOString(); this.service.state.save();
       const actor = event.actor.id === "operator" ? event.actor : this.service.config.infrastructure.clients?.find((c) => c.id === event.actor.id);
       if (!actor) fail("Dispatcher credential was removed", 403);
@@ -224,8 +228,9 @@ class GitHubEvents {
       const failure = require("./dispatch-control.js").dispatchFailure(error);
       event.lastDispatchError = { status: error.status || null, code: error.code || null, at: Date.now() };
       event.error = failure.reason; event.reason = failure.reason;
-      if (!failure.retryable || (event.fallbackAt ? event.fallbackAttempts : event.attempts) >= 3) event.state = failure.state;
-      else event.nextAt = Math.max(failure.retryAt || 0, Date.now() + Math.min(300, 2 ** (event.fallbackAt ? event.fallbackAttempts : event.attempts)) * 1000);
+      const nextAt = require("./dispatch-control.js").dispatchRetry(failure, event.dispatchRetryAttempts);
+      if (nextAt === null) event.state = failure.state;
+      else event.nextAt = nextAt;
     } finally {
       event.updatedAt = new Date().toISOString();
       try { this.service.state.save(); await this.publishAdmission(event); } finally { this.activeDispatches.delete(key); }

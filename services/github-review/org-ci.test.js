@@ -417,3 +417,16 @@ test("legacy executor hashes remain reusable only under the same effective polic
   s.config.model = "changed-model";
   assert.equal(policy.currentPolicy(s, job), false);
 });
+
+test("CI transient dispatch failures back off through eight attempts", async t => {
+  const {ci,p}=fixture(t); await ci.submit(p,"direct");
+  const r=ci.receipts[p.request_id];
+  ci.submitReview=async()=>{throw Object.assign(new Error("unavailable"),{status:503});};
+  for(let n=1;n<=8;n++) {
+    r.nextDispatchAt=0; const before=Date.now(); await ci.dispatch(r);
+    assert.equal(r.dispatchAttempts,n);
+    assert.equal(r.state,n===8?"failed":"retrying");
+    if(n<8) assert.ok(r.nextDispatchAt>=before+(n>=5?240000:30000*2**(n-1)));
+  }
+  assert.equal(r.reason,"dispatch_retries_exhausted");
+});

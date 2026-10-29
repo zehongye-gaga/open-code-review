@@ -188,6 +188,7 @@ class OrgCI {
   }
   async dispatch(r) {
     if (this.dispatching.has(r.request_id) || r.jobId || terminal.has(r.state) || Date.now() < r.nextDispatchAt) return;
+    if (r.dispatchAttempts >= 8) { this.stop(r, "failed", "dispatch_retries_exhausted"); return; }
     this.dispatching.add(r.request_id); r.state = "dispatching"; r.dispatchAttempts++; this.s.state.save();
     try {
       await this.refresh(r);
@@ -216,8 +217,9 @@ class OrgCI {
       r.lastDispatchError = { status: error.status || null, code: error.code || null, at: Date.now() };
       this.s.log("ci_dispatch_rejected", { id: r.request_id, status: error.status, code: error.code, error: error.message });
       const failure = require("./dispatch-control.js").dispatchFailure(error);
-      if (!failure.retryable || r.dispatchAttempts >= 3) this.stop(r, failure.state, failure.reason);
-      else { r.state = "retrying"; r.nextDispatchAt = Math.max(failure.retryAt || 0, Date.now() + 30000 * r.dispatchAttempts); }
+      const nextAt = require("./dispatch-control.js").dispatchRetry(failure, r.dispatchAttempts);
+      if (nextAt === null) this.stop(r, failure.state, failure.reason);
+      else { r.state = "retrying"; r.nextDispatchAt = nextAt; }
       this.s.state.save();
     } finally { this.dispatching.delete(r.request_id); }
     await this.refresh(r);

@@ -536,3 +536,42 @@ for (const change of ['draft', 'branch', 'head', 'base', 'baseRef']) {
     assert.equal(job.state, change === 'branch' ? 'queued' : 'cancelled');
   });
 }
+
+test("dispatch backoff is bounded, jittered, respects server delay and exhausts", () => {
+  const { dispatchRetry } = require("./dispatch-control.js");
+  assert.deepEqual([1,2,3,4,5,6,7].map(n => dispatchRetry({retryable:true}, n, 0, 0)),
+    [30000,60000,120000,240000,240000,240000,240000]);
+  assert.equal(dispatchRetry({retryable:true}, 1, 0, 1), 36000);
+  assert.equal(dispatchRetry({retryable:true,retryAt:900000}, 1, 0, 0), 900000);
+  assert.equal(dispatchRetry({retryable:true}, 8, 0, 0), null);
+  assert.equal(dispatchRetry({retryable:false}, 1, 0, 0), null);
+});
+test("three GitHub 503 failures wait durably then recover without duplicate review", async t => {
+  const h = fixture(t); await h.events.accept(h.envelope(), h.actor);
+  const get = h.s.github.rest.pulls.get;
+  h.s.github.rest.pulls.get = async () => { throw Object.assign(new Error("unavailable"), {status:503}); };
+  const event = h.s.state.data.deliveries[0];
+  for (let n=1;n<=3;n++) {
+    event.nextAt=0; const before=Date.now(); await h.events.tick();
+    assert.equal(event.state,"pending"); assert.equal(event.dispatchRetryAttempts,n);
+    assert.ok(event.nextAt >= before + 30000 * 2 ** (n-1));
+    assert.equal(new State(h.dir).data.deliveries[0].nextAt,event.nextAt);
+    await h.events.tick(); assert.equal(event.dispatchRetryAttempts,n);
+  }
+  h.s.github.rest.pulls.get=get; event.nextAt=0; await h.events.tick();
+  assert.equal(event.state,"dispatched"); await h.events.tick(); assert.equal(h.s.state.data.jobs.length,1);
+});
+test("GitHub failures before fallback submission still exhaust a bounded retry budget", async t => {
+  const h=fixture(t); await h.events.accept(h.envelope(),h.actor);
+  const e=h.s.state.data.deliveries[0]; e.fallbackAt=new Date().toISOString(); e.fallbackAttempts=0;
+  h.s.github.rest.pulls.get=async()=>{throw Object.assign(new Error("unavailable"),{status:503});};
+  for(let n=1;n<=8;n++) {e.nextAt=0;await h.events.tick();assert.equal(e.state,n===8?"failed":"pending");}
+  assert.equal(e.fallbackAttempts,0);assert.equal(e.dispatchRetryAttempts,8);assert.equal(h.s.state.data.jobs.length,0);
+});
+
+test("persisted exhausted dispatch attempts do not run again after restart", async t => {
+  const h=fixture(t); await h.events.accept(h.envelope(),h.actor);
+  const e=h.s.state.data.deliveries[0];e.dispatchRetryAttempts=8;h.s.state.save();
+  h.s.state=new State(h.dir);await h.events.tick();
+  assert.equal(h.calls(),0);assert.equal(h.s.state.data.deliveries[0].state,"failed");
+});
