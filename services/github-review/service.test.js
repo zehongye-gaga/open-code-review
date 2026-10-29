@@ -698,3 +698,22 @@ test("Agent budget exhaustion switches directly to unlimited with attribution an
  job.nextAt=0;await h.service.tick();assert.equal(job.state,'complete');assert.deepEqual(budgets,[500000,0]);
  assert.equal(resumes[1],sessionId);assert.equal(job.settings.options.budget,500000);
 });
+
+for (const failure of ['missing', 'rejected', 'none']) {
+  test(`resume-only retry never starts afresh: ${failure}`, async (t) => {
+    const h = setup(t), job = h.service.accept(repository, pr());
+    h.service.run = async ({ directory }) => writeReport(directory, { state: 'partial' });
+    await h.service.tick();
+    job.resumeOnly = true; job.state = 'queued'; job.nextAt = 0; job.attempt = 0;
+    if (failure === 'missing') { delete job.progress; fs.unlinkSync(path.join(h.directory, 'result.json')); }
+    let calls = 0;
+    h.service.run = async ({ resume, requireResume, onResumeFallback, directory }) => {
+      calls++; assert.equal(resume, sessionId); assert.equal(requireResume, true);
+      if (failure === 'rejected') await onResumeFallback('native_resume_rejected');
+      writeReport(directory);
+    };
+    await h.service.tick();
+    assert.equal(job.state, failure === 'none' ? 'complete' : 'failed');
+    assert.equal(calls, failure === 'missing' ? 0 : 1); assert.equal(job.resumeFallbacks, undefined);
+  });
+}

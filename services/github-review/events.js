@@ -199,9 +199,10 @@ class GitHubEvents {
         return;
       }
       const { data: pull } = await this.service.github.rest.pulls.get({ ...this.service.coordinates(event.repository), pull_number: event.number });
-      if (pull.state !== "open" || pull.draft || !this.service.eligible(event.repository, pull)) {
+      if (!this.service.eligible(event.repository, pull)) {
         for (const job of this.service.state.data.jobs.filter((j) => j.repository === event.repository && j.number === event.number && ["queued", "running", "cancelled"].includes(j.state))) {
-          await this.api.call("cancel_review", { job_id: job.id, reason: "PR is closed, draft or outside allowed branches" }, { role: "admin", id: "event-lifecycle" });
+          if (this.service.eligible(event.repository, pull, job) && job.head === pull.head.sha && job.base === pull.base.sha && job.baseRef === pull.base.ref) continue;
+          await this.api.call("cancel_review", { job_id: job.id, reason: "PR no longer matches the task admission policy or snapshot" }, { role: "admin", id: "event-lifecycle" });
         }
         event.state = "ignored";
       } else if (["closed", "converted_to_draft"].includes(event.action) || pull.head.sha !== event.head || pull.base.sha !== event.base) {

@@ -276,8 +276,11 @@ class ReviewService {
     } else {
       try {
         job.phase = "review"; this.state.save();
-        let requireResume = (job.budgetRetries || []).length > 0;
-        const onResumeFallback = reason => require("./resume-recovery.js").recordResumeFallback(this, job, reason);
+        let requireResume = job.resumeOnly || (job.budgetRetries || []).length > 0;
+        const onResumeFallback = reason => {
+          if (job.resumeOnly) throw Object.assign(new Error(`Resume-only recovery stopped: ${reason}`), { retryable: false, code: "RESUME_REQUIRED" });
+          return require("./resume-recovery.js").recordResumeFallback(this, job, reason);
+        };
         if (requireResume && !resume) { onResumeFallback("session_missing_or_incompatible"); requireResume = false; }
         const onFreshStart = pid => {
           const entry = job.resumeFallbacks?.at(-1);
