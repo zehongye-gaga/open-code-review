@@ -11,21 +11,21 @@ const crypto = require("node:crypto");
 const { ReviewService } = require("./service.js");
 const { GitHubEvents } = require("./events.js");
 const { State } = require("./state.js");
-function fixture(t) {
+function fixture(t, repository = "org/repo") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ocr-events-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const binary = path.join(dir, "ocr"), secret = path.join(dir, "secret");
   fs.writeFileSync(binary, "fixture"); fs.writeFileSync(secret, "test-secret");
-  const actor = { id: "n8n", role: "dispatcher", repositories: ["org/*"], tokenFile: secret };
+  const actor = { id: "n8n", role: "dispatcher", repositories: [repository], tokenFile: secret };
   const pull = { number: 1, title: "Fixture", state: "open", draft: false,
-    head: { sha: "b".repeat(40) }, base: { sha: "a".repeat(40), ref: "main", repo: { full_name: "org/repo" } } };
+    head: { sha: "b".repeat(40) }, base: { sha: "a".repeat(40), ref: "main", repo: { full_name: repository } } };
   let getCalls = 0, failNext = false;
   const github = { getToken: () => "fixture", rest: { pulls: { get: async () => { getCalls++; if (failNext) { failNext = false; throw new Error("temporary network failure"); } return { data: pull }; } }, repos: { createCommitStatus: async () => ({}) } } };
-  const s = new ReviewService({ config: { stateDirectory: dir, binary, repositories: [{ name: "org/repo", baseBranches: ["main"] }],
+  const s = new ReviewService({ config: { stateDirectory: dir, binary, repositories: [{ name: repository, baseBranches: ["main"] }],
     infrastructure: { enabled: true, dispatchEnabled: true, externalDispatch: true, githubWebhookSecretFile: secret, clients: [actor] } }, github, log: () => {} });
   const events = new GitHubEvents(s);
   const envelope = (action = "opened", id = "delivery-1") => {
-    const raw = JSON.stringify({ action, repository: { full_name: "org/repo" }, pull_request: pull });
+    const raw = JSON.stringify({ action, repository: { full_name: repository }, pull_request: pull });
     return { raw_body: Buffer.from(raw).toString("base64"), signature: "sha256=" + crypto.createHmac("sha256", "test-secret").update(raw).digest("hex"), event: "pull_request", delivery_id: id, route: "direct" };
   };
   return { s, events, actor, pull, envelope, dir, calls: () => getCalls, fail: () => { failNext = true; } };
@@ -494,3 +494,45 @@ test("backend alone decides repository enrollment; gateway acknowledges ignores 
   h.s.config.repositories = [{ name: "org/repo", baseBranches: ["main"] }];
   assert.equal((await h.events.accept(args, h.actor)).state, "pending");
 });
+
+test("CI draft tasks survive edits but ordinary draft events cannot dispatch", async (t) => {
+  const h = fixture(t, "lexmount/example"); h.pull.draft = true;
+  h.s.config.infrastructure.orgCI = { enabled: true };
+  h.s.orgCI = new (require('./org-ci.js').OrgCI)(h.s);
+  const snapshot = { base_ref: h.pull.base.ref, base_sha: h.pull.base.sha, head_sha: h.pull.head.sha, pull_number: 1, repository: 'lexmount/example' };
+  const request = { schema: 'ocr-ci/v1', ...snapshot, request_id: 'ocr-ci-' + crypto.createHash('sha256').update(JSON.stringify(snapshot)).digest('hex') };
+  await h.events.accept(h.envelope(), h.actor); await h.events.tick();
+  assert.equal(h.s.state.data.jobs.length, 0);
+  await h.s.orgCI.submit(request, 'direct'); await h.s.orgCI.dispatch(h.s.orgCI.receipts[request.request_id]);
+  const job = h.s.state.data.jobs[0]; assert.equal(job.ciRequestId, request.request_id);
+  for (const state of ['queued', 'running']) {
+    job.state = state;
+    await h.events.accept(h.envelope('edited', 'edited-' + state), h.actor); await h.events.tick();
+    assert.equal(job.state, state); assert.equal(h.s.state.data.jobs.length, 1);
+  }
+  h.pull.state = 'closed';
+  await h.events.accept(h.envelope('closed', 'close-ci'), h.actor); await h.events.tick();
+  assert.equal(job.state, 'cancelled');
+  h.pull.state = 'open';
+  await h.s.orgCI.status(request);
+  assert.equal(h.s.orgCI.receipts[request.request_id].state, 'cancelled');
+  await h.events.api.call('retry_review', { job_id: job.id, resume_only: true }, { role: 'admin', id: 'operator' });
+  assert.equal((await h.s.orgCI.status(request)).commit_status, 'pending');
+  await h.events.accept(h.envelope('edited', 'after-retry'), h.actor); await h.events.tick();
+  assert.equal(job.state, 'queued');
+  job.state = 'complete'; job.progress = { complete: true }; job.result = { blocking: 0, findings: 0 };
+  assert.equal((await h.s.orgCI.status(request)).commit_status, 'success');
+});
+for (const change of ['draft', 'branch', 'head', 'base', 'baseRef']) {
+  test(`events preserve only authorized unchanged CI tasks: ${change}`, async (t) => {
+    const h = fixture(t); await h.events.accept(h.envelope(), h.actor); await h.events.tick();
+    const job = h.s.state.data.jobs[0]; if (change !== 'draft') job.ciRequestId = 'accepted-ci';
+    h.pull.draft = true;
+    if (change === 'branch' || change === 'baseRef') h.pull.base.ref = 'release';
+    if (change === 'branch') job.baseRef = 'release';
+    if (change === 'head') h.pull.head.sha = 'c'.repeat(40);
+    if (change === 'base') h.pull.base.sha = 'c'.repeat(40);
+    await h.events.accept(h.envelope('edited', 'changed'), h.actor); await h.events.tick();
+    assert.equal(job.state, change === 'branch' ? 'queued' : 'cancelled');
+  });
+}

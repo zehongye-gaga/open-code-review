@@ -27,7 +27,7 @@ const tools = {
   preview_review: definition("Queue native file filtering without review LLM calls or GitHub publication. Uses the same options as review.", submissions, ["repository", "pull_number", "head_sha", "base_sha"], false),
   get_review_result: definition("Read job state and paginated native findings, coverage and usage. Complete execution does not imply no findings; partial/budget exhausted never means passed.", { ...job, ...pagination }, ["job_id"]),
   cancel_review: definition("Cancel an active task. Cancellation is persisted and reported as an error check, never success.", { ...job, reason: { type: "string", minLength: 1, maxLength: 1000 } }, ["job_id", "reason"], false),
-  retry_review: definition("Retry a failed or cancelled task only if the PR still has exactly the same head/base. Uses original immutable options.", job, ["job_id"], false),
+  retry_review: definition("Retry a failed or cancelled task only if the PR still has exactly the same head/base. Uses original immutable options. Set resume_only to forbid a fresh review.", { ...job, resume_only: { type: "boolean" } }, ["job_id"], false),
   record_review_skip: definition("Record a policy-authorized decision without running OCR. A skipped decision is never a successful code review.", { ...pr, head_sha: sha, base_sha: sha, reason: { type: "string", minLength: 1, maxLength: 2000 } }, ["repository", "pull_number", "head_sha", "base_sha", "reason"], false),
 };
 function canonical(value) {
@@ -199,12 +199,21 @@ class Infrastructure {
     }
     if (name === "retry_review") {
       if (!["failed", "cancelled"].includes(j.state) || [...s.workers.values()].some((w) => w.job.id === j.id)) fail("Only stopped failed/cancelled jobs can be retried", 409);
-      await this.current({ repository: j.repository, pull_number: j.number, head_sha: j.head, base_sha: j.base }, actor, true);
+      const { pr: pull } = await this.current({ repository: j.repository, pull_number: j.number, head_sha: j.head, base_sha: j.base }, actor, true);
+      if (!s.eligible(j.repository, pull, j) || pull.base.ref !== j.baseRef) fail("PR no longer matches the task admission policy or snapshot", 409);
       if (!j.settings) fail("Legacy jobs must be resubmitted with explicit options", 409);
       const resolved = resolveOptions(s.config, s.repo(j.repository), j.settings.profile, j.settings.options);
       if (!require("./review-policy.js").currentPolicy(s, j)) fail("Policy changed; submit a new task", 409);
       if (!["failed", "cancelled"].includes(j.state)) return safeJob(j);
+      if (j.ciRequestId) {
+        const receipt = s.orgCI?.receipts[j.ciRequestId];
+        if (!receipt || receipt.jobId !== j.id) fail("CI receipt no longer owns this task", 409);
+        (receipt.retryHistory ||= []).push({ at: Date.now(), state: receipt.state, reason: receipt.reason, finishedAt: receipt.finishedAt });
+        receipt.state = "queued"; receipt.createdAt = Date.now();
+        for (const key of ["reason", "finishedAt", "finalStatus", "published"]) delete receipt[key];
+      }
       (j.retryHistory ||= []).push({ at: new Date().toISOString(), attempt: j.attempt, publicationAttempts: j.publicationAttempts || 0 });
+      if (args.resume_only !== undefined) j.resumeOnly = args.resume_only;
       j.publicationAttempts = 0; j.state = "queued"; j.attempt = 0; j.nextAt = 0; j.pendingSent = false;
       delete j.error; delete j.cancelReason; s.state.save(); await s.flushStatuses(); return safeJob(j);
     }

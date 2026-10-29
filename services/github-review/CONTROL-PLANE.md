@@ -67,3 +67,9 @@ Summaries link to the existing unresolved discussions when suppression occurs.
 Within a publication batch, only equal-content overlapping findings are combined.
 The existing per-comment marker retry checks remain independent of historical
 suppression and prevent duplicate writes after ambiguous network failures.
+
+### CI task lifecycle and explicit recovery
+
+An accepted organization-CI task retains its admission policy when later webhook events arrive. An open draft or a target outside the ordinary webhook branch allowlist does not cancel that task while its head, base SHA, and target branch remain unchanged. Ordinary webhook events still cannot create draft tasks; closed or changed snapshots do not inherit that exception.
+
+`retry_review` checks the original task admission and snapshot, resets the linked CI receipt with an audit entry, and preserves immutable review options. Set `resume_only: true` to require the compatible saved session. Missing or rejected sessions fail explicitly without authorizing a fresh review; the restriction persists across restarts and retries unless an operator explicitly sends `resume_only: false`.

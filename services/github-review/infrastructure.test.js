@@ -182,3 +182,24 @@ test("automated submissions use incremental policy while admins can request full
   await h.api.call("submit_review", { ...h.args, options: { fullReview: true } }, { id: "operator", role: "admin" });
   assert.equal(h.s.state.data.jobs[1].fullReview, true);
 });
+
+test("retry honors original CI admission and persists resume-only across restart", async (t) => {
+  const h = setup(t); await h.api.call('submit_review', h.args, actor);
+  const j = h.s.state.data.jobs[0]; j.state = 'cancelled'; h.pull.draft = true;
+  await assert.rejects(h.api.call('retry_review', { job_id: j.id }, actor), /admission policy/);
+  j.ciRequestId = 'accepted-ci';
+  h.s.orgCI = new (require('./org-ci.js').OrgCI)(h.s);
+  h.s.orgCI.receipts[j.ciRequestId] = { jobId: j.id, state: 'cancelled', finalStatus: 'failure', published: { state: 'failure' } };
+  await h.api.call('retry_review', { job_id: j.id, resume_only: true }, actor);
+  assert.equal(j.state, 'queued'); assert.equal(new State(h.dir).data.jobs[0].resumeOnly, true);
+  assert.equal(h.s.orgCI.receipts[j.ciRequestId].state, 'queued');
+  assert.equal(h.s.orgCI.receipts[j.ciRequestId].published, undefined);
+  j.state = 'cancelled';
+  await h.api.call('retry_review', { job_id: j.id }, actor);
+  assert.equal(j.resumeOnly, true);
+  j.state = 'cancelled';
+  await h.api.call('retry_review', { job_id: j.id, resume_only: false }, actor);
+  assert.equal(j.resumeOnly, false);
+  j.state = 'cancelled'; h.pull.state = 'closed';
+  await assert.rejects(h.api.call('retry_review', { job_id: j.id }, actor), /admission policy/);
+});
