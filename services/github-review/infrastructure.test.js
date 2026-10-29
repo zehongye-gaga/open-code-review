@@ -203,3 +203,12 @@ test("retry honors original CI admission and persists resume-only across restart
   j.state = 'cancelled'; h.pull.state = 'closed';
   await assert.rejects(h.api.call('retry_review', { job_id: j.id }, actor), /admission policy/);
 });
+
+test("PR usage is read-only, repository scoped and validates pagination", async t => {
+  const h = setup(t), reader = { id: 'reader', role: 'reader', repositories: ['org/repo'] };
+  const args = { repository: 'org/repo', pull_number: 1 };
+  const result = await h.api.call('get_pr_usage', args, reader);
+  assert.equal(result.schema, 'ocr.pr-usage/v1'); assert.equal(h.s.state.data.jobs.length, 0);
+  await assert.rejects(h.api.call('get_pr_usage', args, { ...reader, repositories: ['other/repo'] }), /scope/);
+  await assert.rejects(h.api.call('get_pr_usage', { ...args, limit: 101 }, reader));
+});
