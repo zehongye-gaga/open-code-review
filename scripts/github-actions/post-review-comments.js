@@ -401,22 +401,24 @@ async function runPostReviewComments({
     return authenticatedLoginPromise;
   };
 
-  // Incremental filtering (non-destructive): drop current inline comments
-  // whose (path, line range) overlaps an existing bot review comment, so we
-  // only append comments on lines not yet covered. History is never deleted.
+  // Location alone cannot identify a finding. Unknown thread state fails open.
   let toSend = reviewComments;
+  const reusedHistory = new Map();
   if (incremental && reviewComments.length > 0) {
     const existing = await listExistingReviewComments(github, owner, repo, prNumber, log);
     const botLogin = await authenticatedLogin();
-    const hist = existing.filter((c) => isBotComment(c, botLogin));
-    toSend = reviewComments.filter(
-      ({ reviewComment }) => !overlapsHistory(reviewComment, hist, incrementalOverlapThreshold)
-    );
+    const unresolved = await unresolvedCommentIds(github, owner, repo, prNumber, log);
+    const hist = existing.filter((c) => isBotComment(c, botLogin) && !c.in_reply_to_id && unresolved.has(c.id));
+    toSend = reviewComments.filter(({ reviewComment }) => {
+      const duplicate = hist.find((c) => sameFinding(reviewComment, c, incrementalOverlapThreshold));
+      if (duplicate) reusedHistory.set(duplicate.id, duplicate.html_url);
+      return !duplicate;
+    });
 
     const deduped = [];
     const acceptedComments = [];
     for (const item of toSend) {
-      if (overlapsComments(item.reviewComment, acceptedComments, incrementalOverlapThreshold)) {
+      if (acceptedComments.some((c) => sameFinding(item.reviewComment, c, incrementalOverlapThreshold))) {
         continue;
       }
       acceptedComments.push(item.reviewComment);
@@ -426,7 +428,7 @@ async function runPostReviewComments({
     toSend = deduped;
     stats.skipped = reviewComments.length - toSend.length;
     if (stats.skipped > 0) {
-      log(`[incremental] skipped ${stats.skipped} overlapping comment(s); ${toSend.length} to post.`);
+      log(`[incremental] skipped ${stats.skipped} identical finding(s); ${toSend.length} to post.`);
     }
   }
 
@@ -534,7 +536,11 @@ async function runPostReviewComments({
     summaryBody += formatCommentMarkdown(comment, error);
   }
   if (toSend.length === 0 && stats.skipped > 0) {
-    summaryBody += "\n\n---\n\nℹ️ All inline comments overlapped with existing reviews; nothing new was posted.";
+    summaryBody += "\n\n---\n\nℹ️ All inline findings were already present in unresolved threads or duplicated within this review; nothing new was posted.";
+  }
+  if (reusedHistory.size) {
+    summaryBody += "\n\nExisting unresolved findings:\n" + [...reusedHistory].map(([id, url]) =>
+      typeof url === "string" && url.startsWith("https://github.com/") ? `- [Existing discussion #${id}](${url})` : `- Existing discussion #${id}`).join("\n");
   }
   summaryBody += formatWarnings(warnings);
   summaryBody += rangeNote;
@@ -1279,6 +1285,49 @@ function overlapsComments(reviewComment, comments, threshold = DEFAULT_OVERLAP_T
     if (sameCommentSpan(cur, other, t)) return true;
   }
   return false;
+}
+
+function findingBody(body) {
+  if (typeof body !== "string") return "";
+  // Preserve Markdown/code whitespace and severity; remove only our transport ID.
+  return body.replace(/^<!--\s*ocr-\d+-\d+-[a-f0-9]+\s*-->\r?\n?/, "")
+    .replace(/\r\n/g, "\n");
+}
+
+function sameFinding(current, previous, threshold) {
+  const content = findingBody(current.body);
+  return !!content && content === findingBody(previous.body) && overlapsComments(current, [previous], threshold);
+}
+
+async function unresolvedCommentIds(github, owner, repo, number, log) {
+  const ids = new Set();
+  try {
+    let cursor = null;
+    for (let page = 0; page < 10; page++) {
+      const data = await github.graphql(`query($owner:String!,$repo:String!,$number:Int!,$cursor:String) {
+        repository(owner:$owner,name:$repo) { pullRequest(number:$number) {
+          reviewThreads(first:100,after:$cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes { isResolved isOutdated root:comments(first:1) { nodes { databaseId } } }
+          }
+        } }
+      }`, { owner, repo, number, cursor });
+      const threads = data?.repository?.pullRequest?.reviewThreads;
+      if (!threads) return new Set();
+      for (const thread of threads.nodes || []) {
+        const id = thread?.root?.nodes?.[0]?.databaseId;
+        if (thread?.isResolved === false && thread?.isOutdated === false && Number.isSafeInteger(id)) ids.add(id);
+      }
+      if (!threads.pageInfo?.hasNextPage) return ids;
+      cursor = threads.pageInfo.endCursor;
+      if (!cursor) return new Set();
+    }
+    log("[incremental] thread history truncated; unmatched findings will be published.");
+    return ids;
+  } catch (error) {
+    log(`[incremental] thread state unavailable (${error.message}); publishing findings without historical suppression.`);
+    return new Set();
+  }
 }
 
 function overlapsHistory(reviewComment, history, threshold = DEFAULT_OVERLAP_THRESHOLD) {
@@ -2312,7 +2361,7 @@ function buildSummaryBody({ total, inline, summary, skipped, routed = 0, failed,
       body += `\n- 📋 Routed to summary by policy: ${routed} comment(s)`;
     }
     if (skipped > 0) {
-      body += `\n- ⏭️ Skipped (overlap with history): ${skipped} comment(s)`;
+      body += `\n- ⏭️ Skipped (identical finding): ${skipped} comment(s)`;
     }
     if (failed > 0) {
       body += `\n- ❌ Failed to post inline: ${failed} comment(s)`;

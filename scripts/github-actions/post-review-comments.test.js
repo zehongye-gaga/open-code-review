@@ -638,7 +638,7 @@ async function testIncrementalSkipsOverlapping() {
 
   const { github, outputs } = await run({
     result,
-    githubOpts: { history },
+    githubOpts: { history: history.map(c => ({ ...c, id: 77, body: formatComment(result.comments[0]), html_url: "https://github.com/owner/repo/pull/1#discussion_r77" })), threads: [{ isResolved: false, isOutdated: false, root: { nodes: [{ databaseId: 77 }] } }] },
     opts: { stickySummary: true, incremental: true },
   });
 
@@ -654,7 +654,7 @@ async function testIncrementalSkipsSameRunIoUOverlapping() {
   const result = {
     comments: [
       { path: "src/a.js", content: "first finding", start_line: 10, end_line: 14 },
-      { path: "src/a.js", content: "overlapping finding", start_line: 11, end_line: 15 },
+      { path: "src/a.js", content: "first finding", start_line: 11, end_line: 15 },
       { path: "src/b.js", content: "independent finding", start_line: 20, end_line: 24 },
     ],
     warnings: [],
@@ -686,7 +686,7 @@ async function testIncrementalSkipsSameRunOverlapping() {
   const result = {
     comments: [
       { path: "src/a.js", content: "first finding", start_line: 10, end_line: 10 },
-      { path: "src/a.js", content: "duplicate finding", start_line: 10, end_line: 10 },
+      { path: "src/a.js", content: "first finding", start_line: 10, end_line: 10 },
       { path: "src/b.js", content: "independent finding", start_line: 5, end_line: 5 },
     ],
     warnings: [],
@@ -717,7 +717,7 @@ async function testIncrementalAllOverlapPostsNoReview() {
 
   const { github, outputs } = await run({
     result,
-    githubOpts: { history },
+    githubOpts: { history: history.map(c => ({ ...c, id: 77, body: formatComment(result.comments[0]), html_url: "https://github.com/owner/repo/pull/1#discussion_r77" })), threads: [{ isResolved: false, isOutdated: false, root: { nodes: [{ databaseId: 77 }] } }] },
     opts: { stickySummary: true, incremental: true },
   });
 
@@ -748,7 +748,7 @@ async function testIncrementalMultiLineIoUDefaultThreshold() {
 
   const { github, outputs } = await run({
     result,
-    githubOpts: { history },
+    githubOpts: { history: history.map(c => ({ ...c, id: 77, body: formatComment(result.comments[0]), html_url: "https://github.com/owner/repo/pull/1#discussion_r77" })), threads: [{ isResolved: false, isOutdated: false, root: { nodes: [{ databaseId: 77 }] } }] },
     opts: { stickySummary: true, incremental: true },
   });
 
@@ -775,13 +775,44 @@ async function testIncrementalOverlapThresholdPropagated() {
 
   const { github, outputs } = await run({
     result,
-    githubOpts: { history },
+    githubOpts: { history: history.map(c => ({ ...c, id: 77, body: formatComment(result.comments[0]), html_url: "https://github.com/owner/repo/pull/1#discussion_r77" })), threads: [{ isResolved: false, isOutdated: false, root: { nodes: [{ databaseId: 77 }] } }] },
     opts: { stickySummary: true, incremental: true, incrementalOverlapThreshold: 0.4 },
   });
 
   assert.strictEqual(github.createReviewCalls.length, 0, "no review posted (0.5 > 0.4 now overlaps)");
   assert.strictEqual(outputs.comments_skipped, "1");
   assert.strictEqual(outputs.comments_inline, "0");
+}
+
+async function testContentAwareHistoricalDedup() {
+  const finding = { path: "src/a.js", content: "Lease expires before native admission.", severity: "high", start_line: 10, end_line: 10 };
+  const old = { id: 77, path: finding.path, line: 10, side: "RIGHT", user: { login: "github-actions[bot]" },
+    body: formatComment(finding, "ocr-100-1-abcdef"), html_url: "https://github.com/owner/repo/pull/1#discussion_r77" };
+  const thread = { isResolved: false, isOutdated: false, root: { nodes: [{ databaseId: 77 }] } };
+  for (const scenario of [
+    { name: "identical unresolved", expected: 0 },
+    { name: "different issue on same line", finding: { ...finding, content: "Selected model changes before execution." }, expected: 1 },
+    { name: "severity changed", finding: { ...finding, severity: "medium" }, expected: 1 },
+    { name: "resolved", thread: { ...thread, isResolved: true }, expected: 1 },
+    { name: "outdated", thread: { ...thread, isOutdated: true }, expected: 1 },
+    { name: "unknown state", thread: { root: thread.root }, expected: 1 },
+    { name: "thread read error", threadsThrow: true, expected: 1 },
+    { name: "suggestion changed", finding: { ...finding, existing_code: "old", suggestion_code: "new" }, expected: 1 },
+  ]) {
+    const { github, outputs } = await run({ result: { comments: [scenario.finding || finding] },
+      githubOpts: { history: [old], threads: [scenario.thread || thread], threadsThrow: scenario.threadsThrow },
+      opts: { incremental: true } });
+    assert.equal(Number(outputs.comments_inline), scenario.expected, scenario.name);
+    if (!scenario.expected) assert.match(github.updatedComments[0].body, /discussion_r77/);
+  }
+  const { outputs } = await run({ result: { comments: [finding, { ...finding, content: "Different issue at the same location." }] },
+    opts: { incremental: true } });
+  assert.equal(outputs.comments_inline, "2", "distinct findings within one batch must both publish");
+  const codeWhitespace = await run({ result: { comments: [
+    { path: "src/a.js", content: "    doSomething()", start_line: 10, end_line: 10 },
+    { path: "src/a.js", content: "doSomething()", start_line: 10, end_line: 10 },
+  ] }, opts: { incremental: true } });
+  assert.equal(codeWhitespace.outputs.comments_inline, "2", "Markdown indentation changes content and must be preserved");
 }
 
 // ---- Idempotency tests (prevent duplicate review posts on retry) ----
@@ -2252,7 +2283,8 @@ async function testAccountingReconcilesToTotal() {
   const { outputs } = await run({
     result,
     githubOpts: {
-      history,
+      history: history.map(c => ({ ...c, id: 77, body: formatComment(result.comments[2]) })),
+      threads: [{ isResolved: false, isOutdated: false, root: { nodes: [{ databaseId: 77 }] } }],
       // A 502 on the BATCH call forces the per-comment retry path, where
       // perCommentError actually fires (it only runs on per-comment calls).
       bulkErrorSpec: { message: "Bad Gateway", status: 502 },
@@ -2338,6 +2370,7 @@ async function main() {
   await testNonStickyCreatesNewCommentOnFallback();
   await testNonStickyFallbackAllSuccessStillPostsSummary();
   await testNoCommentsStickyUpdate();
+  await testContentAwareHistoricalDedup();
   await testIncrementalSkipsOverlapping();
   await testIncrementalSkipsSameRunOverlapping();
   await testIncrementalSkipsSameRunIoUOverlapping();
@@ -6054,7 +6087,7 @@ async function testResolveOutdatedResolvesAfterASuccessfulRun() {
     },
   });
 
-  assert.strictEqual(outputs.comments_skipped, "1", "the line-5 finding was deduped away");
+  assert.strictEqual(outputs.comments_skipped, "0", "outdated history cannot suppress a current finding");
   const mutations = github.resolveMutationCalls();
   assert.strictEqual(mutations.length, 1, "only the uncovered thread is resolved");
   assert.strictEqual(mutations[0].vars.threadId, "STALE");
