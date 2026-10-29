@@ -51,4 +51,9 @@ function dispatchFailure(error) {
   const permanent = status >= 400 && status < 500 && ![408, 429].includes(status);
   return { state: "failed", reason: ["REPOSITORY_NOT_ALLOWED", "CLIENT_SCOPE_DENIED"].includes(error.code) ? error.code.toLowerCase() : permanent ? "dispatch_configuration_or_access_error" : "dispatch_retries_exhausted", retryable: !permanent };
 }
-module.exports = { dispatchTick, dispatchFailure };
+function dispatchRetry(failure, failures, now = Date.now(), random = Math.random()) {
+  if (!failure.retryable || failures >= 8) return null;
+  const delay = Math.min(300000, 30000 * 2 ** Math.max(0, failures - 1));
+  return Math.max(failure.retryAt || 0, now + Math.round(delay * (delay === 300000 ? 0.8 + 0.2 * random : 1 + 0.2 * random)));
+}
+module.exports = { dispatchTick, dispatchFailure, dispatchRetry };
