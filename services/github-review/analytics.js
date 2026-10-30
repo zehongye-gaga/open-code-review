@@ -73,10 +73,10 @@ function record(row, event, timeZone) {
   }
 }
 
-async function ingest(file, row, timeZone, end) {
+async function ingest(file, row, timeZone, end, { fd } = {}) {
   let pending = Buffer.alloc(0), discarded = 0, bytes = 0;
   const limit = 8 * 1024 * 1024;
-  for await (const chunk of fs.createReadStream(file, { start: row.offset, end: end - 1, highWaterMark: 65536 })) {
+  for await (const chunk of fs.createReadStream(file, { start: row.offset, end: end - 1, highWaterMark: 65536, ...(fd === undefined ? {} : { fd, autoClose: false }) })) {
     bytes += chunk.length;
     pending = Buffer.concat([pending, chunk]);
     let newline;
