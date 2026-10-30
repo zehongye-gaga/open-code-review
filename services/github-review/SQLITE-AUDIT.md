@@ -1,6 +1,6 @@
-# SQLite audit feasibility prototype
+# SQLite audit storage
 
-This is an isolated experiment, not a production storage migration. The existing monitor and review backend are unchanged. Do not point the current dashboard at these endpoints as a drop-in replacement: pagination and daily-series response shapes require frontend integration.
+The `audit-sqlite-*` entry points below are isolated feasibility tools. The production-compatible dashboard read model is described under **Dashboard read-model deployment**. Do not point the dashboard at the experimental endpoints as a drop-in replacement: their pagination and daily-series shapes differ.
 
 ## Implemented path
 
@@ -55,7 +55,7 @@ Initial import currently uses a bounded whole-file JSON seed (32 MiB maximum). T
 
 Use the SQLite backup API for consistent backups; do not copy a live main database file without its transactional state. Backup/restore automation is a production migration prerequisite, not implemented by this prototype.
 
-## Remaining production gates
+## Remaining gates for direct SQL ingestion
 
 - Direct incremental task/result ingestion, discovery and safe attribution of new sessions, and file-rotation reconciliation.
 - Agent parent/child usage, GitHub PR snapshots, service health and resource history import.
@@ -64,4 +64,16 @@ Use the SQLite backup API for consistent backups; do not copy a live main databa
 - Full dashboard summary compatibility, frontend pagination, bounded query-worker queue and cancellation.
 - Representative concurrent read/write, process-crash, disk-full, growing-history and long-running memory tests.
 
-Passing the feasibility benchmark does not mean that all these gates are met or that OOM is impossible. Keep production on its existing storage until the complete path is reconciled and validated.
+Passing the feasibility benchmark does not mean that all these gates are met or that OOM is impossible. The dashboard read model below retains the existing collectors instead of enabling this incomplete direct-ingestion path.
+
+## Dashboard read-model deployment
+
+The dashboard can now read a separate, atomically published SQLite read model. Set `sqlite.database` in the monitor configuration and run `monitor-sqlite-collector.js` as a separate service. The existing `monitor.js` then opens the database read-only and does not start its file collector or GitHub polling. All existing status, repository, PR detail and resource-history routes keep their response contracts; status includes `storage.engine: "sqlite"`.
+
+The production path deliberately reuses the established Analytics/Monitor collectors for new task/session discovery, attribution, retention, Agent counters, GitHub and resources. They still maintain their JSON ledgers as restart state and a rollback bridge. This is a durable SQLite query layer, not replacement of every source ledger with native SQL ingestion. Do not run the prototype registered-session collector against this database. One production collector owns publication.
+
+Each publication replaces snapshots, job records and session usage in one transaction. Removed ledger rows are removed from SQLite in that same transaction. Failed publication leaves the preceding generation readable. Health and source freshness are recomputed on each request, so a stopped collector cannot leave a permanently healthy screen. Resource series retain their actual collection window. The HTTP process never opens raw log, result, GitHub credential or source configuration files in SQLite mode.
+
+Run collector and HTTP services under separate CPU/memory limits. Bootstrap with a private copy of the current analytics directory; never start two collectors writing the same ledger directory. Start the collector first, verify publication and only then switch the web service. Keep the old release, monitor config and original analytics directory untouched until rollback is no longer needed. Rollback stops the new collector, restores the previous config/release and restarts only the monitor.
+
+Run `node services/github-review/monitor-sqlite-backup.js /path/to/monitor.json` daily. It uses the SQLite online backup API, verifies integrity, atomically installs the backup and retains seven daily files. Restore to a new directory while both services are stopped, verify integrity and endpoint freshness, then update the database path. A backup is a historical snapshot; the collector must publish current source state before the restored web service is healthy. Raw SQLite files, WAL files and backups are private operational data, not public artifacts.
