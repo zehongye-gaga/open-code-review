@@ -42,7 +42,7 @@ function createMonitorServer(monitor, { bearerToken } = {}) {
     try { url = new URL(req.url, "http://localhost"); }
     catch { return send(400, { error: "Invalid URL" }); }
     if (url.pathname === "/api/resources") {
-      try { return send(200, resourceTrends.snapshot(Number(url.searchParams.get("hours") || 24))); }
+      try { return send(200, (monitor.resourceSnapshot ? monitor.resourceSnapshot(Number(url.searchParams.get("hours") || 24)) : resourceTrends.snapshot(Number(url.searchParams.get("hours") || 24)))); }
       catch (error) { return send(error.status || 503, { error: "Resource history unavailable" }); }
     }
     if (url.pathname === "/api/status") {
@@ -56,12 +56,16 @@ function createMonitorServer(monitor, { bearerToken } = {}) {
       if (!/^[\w.-]+\/[\w.-]+$/.test(repository || "") || !Number.isSafeInteger(number) || number < 1) {
         return send(400, { error: "A repository and positive PR number are required" });
       }
-      const result = monitor.analyticsPull?.(repository.toLowerCase(), number);
-      return result ? send(200, result) : send(503, { error: "Analytics unavailable" });
+      try {
+        const result = monitor.analyticsPull?.(repository.toLowerCase(), number);
+        return result ? send(200, result) : send(503, { error: "Analytics unavailable" });
+      } catch { return send(503, { error: "Analytics unavailable" }); }
     }
     if (req.url === "/healthz") {
-      const snapshot = monitor.snapshot();
-      return send(snapshot.ready && !snapshot.stale ? 200 : 503, { ready: snapshot.ready, collectedAt: snapshot.collectedAt });
+      try {
+        const snapshot = monitor.snapshot();
+        return send(snapshot.ready && !snapshot.stale ? 200 : 503, { ready: snapshot.ready, collectedAt: snapshot.collectedAt });
+      } catch { return send(503, { ready: false }); }
     }
     const asset = assets.get(url.pathname);
     if (!asset) return send(404, { error: "Not found" });
@@ -76,12 +80,17 @@ async function main() {
   const config = JSON.parse(fs.readFileSync(file, "utf8"));
   const port = config.port ?? 8788;
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error("Invalid monitor port");
-  const monitor = new Monitor(config, { readOnlyView: true });
+  const monitor = config.sqlite ? new (require("./monitor-sqlite.js").MonitorSQLite)(config) : new Monitor(config, { readOnlyView: true });
   const bearerToken = config.bearerTokenFile ? fs.readFileSync(config.bearerTokenFile, "utf8").trim() : null;
   if (config.bearerTokenFile && !bearerToken) throw new Error("Empty monitor credential");
   const server = createMonitorServer(monitor, { bearerToken });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, config.listen || "127.0.0.1", resolve); });
   console.log(JSON.stringify({ event: "monitor_listening", address: server.address() }));
+  if (config.sqlite) {
+    const stop = () => { server.closeAllConnections(); server.close(() => monitor.close()); };
+    process.once("SIGTERM", stop); process.once("SIGINT", stop);
+    return;
+  }
   let githubTimer, stopped = false;
   const stopCollector = startCollector(monitor, config, () => {
     console.error("Monitor collector exited; restarting service");
