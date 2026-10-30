@@ -8,6 +8,7 @@ const http = require("node:http");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { Monitor } = require("./monitor-data.js");
+const { startCollector, repeat } = require("./monitor-collector.js");
 const { ResourceTrends } = require("./resource-trends.js");
 
 function createMonitorServer(monitor, { bearerToken } = {}) {
@@ -75,17 +76,25 @@ async function main() {
   const config = JSON.parse(fs.readFileSync(file, "utf8"));
   const port = config.port ?? 8788;
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error("Invalid monitor port");
-  const monitor = new Monitor(config);
+  const monitor = new Monitor(config, { readOnlyView: true });
   const bearerToken = config.bearerTokenFile ? fs.readFileSync(config.bearerTokenFile, "utf8").trim() : null;
   if (config.bearerTokenFile && !bearerToken) throw new Error("Empty monitor credential");
   const server = createMonitorServer(monitor, { bearerToken });
-  const safe = (fn) => () => fn().catch(() => console.error("Monitor collection failed; last snapshot retained"));
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, config.listen || "127.0.0.1", resolve); });
   console.log(JSON.stringify({ event: "monitor_listening", address: server.address() }));
-  const collect = safe(() => monitor.collect()), github = safe(() => monitor.refreshGitHub());
-  void collect(); void github();
-  const localTimer = setInterval(collect, 10000), githubTimer = setInterval(github, 60000);
-  const stop = () => { clearInterval(localTimer); clearInterval(githubTimer); server.close(); server.closeIdleConnections(); };
+  let githubTimer, stopped = false;
+  const stopCollector = startCollector(monitor, config, () => {
+    console.error("Monitor collector exited; restarting service");
+    stop(); process.exit(1);
+  });
+  // Network-only polling stays independent of the CPU-bound collection worker.
+  void repeat(() => monitor.refreshGitHub(), 60000, (task, delay) => {
+    if (!stopped) githubTimer = setTimeout(task, delay);
+  });
+  const stop = () => {
+    stopped = true; clearTimeout(githubTimer);
+    void stopCollector(); server.close(); server.closeAllConnections();
+  };
   process.once("SIGTERM", stop); process.once("SIGINT", stop);
 }
 

@@ -187,9 +187,9 @@ class Monitor {
     if (!Array.isArray(this.config.repositories) || !this.config.stateDirectory) throw new Error("Invalid OCR configuration");
     this.config.repositories = this.config.repositories.map((repository) => ({ ...repository, name: canonicalRepo(repository.name) }));
     this.reports = new ReportCache(this.config.stateDirectory);
-    this.analytics = options.analytics ? new Analytics(this.config, options.analytics) : null;
+    this.analytics = options.analytics && !dependencies.readOnlyView ? new Analytics(this.config, options.analytics) : null;
     this.agentUsage = options.analytics ? new AgentUsage(this.config.infrastructure?.agentDispatch, options.analytics.directory) : null;
-    this.dataset = options.analytics ? new ReviewDataset(options.analytics.directory) : null;
+    this.dataset = options.analytics && !dependencies.readOnlyView ? new ReviewDataset(options.analytics.directory) : null;
     this.local = null;
     this.remote = { pulls: [], updatedAt: null, error: false, remaining: null };
     this.localBusy = false; this.githubBusy = false;
@@ -288,9 +288,24 @@ class Monitor {
     finally { this.githubBusy = false; }
   }
 
-  analyticsPull(repository, number) {
+  analyticsViews() {
     if (!this.analytics || !this.local?.analytics?.collectedAt) return null;
-    const runs = runRows(this.analytics.ledger).filter((r) => r.repository === repository && r.number === number)
+    const ledger = this.analytics.ledger, byRepository = {};
+    const repositories = [...new Set([...this.config.repositories.map((row) => row.name),
+      ...Object.values(ledger.jobs).map((row) => canonicalRepo(row.repository)),
+      ...Object.values(ledger.sessions).map((row) => canonicalRepo(row.repository))])].filter(Boolean);
+    for (const repository of repositories) {
+      const matches = (row) => canonicalRepo(row.repository) === repository;
+      const scoped = { ...ledger, jobs: Object.fromEntries(Object.entries(ledger.jobs).filter(([, row]) => matches(row))),
+        sessions: Object.fromEntries(Object.entries(ledger.sessions).filter(([, row]) => matches(row))) };
+      byRepository[repository] = summarize(scoped, this.analytics.options, this.now(), { error: this.local.analytics.error });
+    }
+    return { repositories, byRepository, runs: runRows(ledger) };
+  }
+
+  analyticsPull(repository, number) {
+    if ((!this.analytics && !this.publishedAnalytics) || !this.local?.analytics?.collectedAt) return null;
+    const runs = (this.publishedAnalytics?.runs || runRows(this.analytics.ledger)).filter((r) => r.repository === repository && r.number === number)
       .sort((a, b) => timestamp(b.createdAt) - timestamp(a.createdAt) || Number(b.id) - Number(a.id));
     return { repository, number, collectedAt: this.local.analytics.collectedAt,
       error: this.local.analytics.error, runs };
@@ -302,7 +317,7 @@ class Monitor {
     const repositories = [...new Set([...this.config.repositories.map((r) => r.name),
       ...(local?.audit || []).map((r) => r.repository),
       ...(local?.ocrJobs || []).map((r) => r.repository), ...(local?.crJobs || []).map((r) => r.repository),
-      ...Object.values(this.analytics?.ledger.jobs || {}).map((r) => canonicalRepo(r.repository))])].filter(Boolean).sort();
+      ...(this.publishedAnalytics?.repositories || Object.values(this.analytics?.ledger.jobs || {}).map((r) => canonicalRepo(r.repository)))])].filter(Boolean).sort();
     if (repository && !repositories.includes(repository)) throw Object.assign(new Error("Unknown repository"), { status: 404 });
     const matches = (row) => !repository || canonicalRepo(row.repository) === repository;
     if (!local) return { version: 1, ready: false, collectedAt: null };
@@ -322,7 +337,9 @@ class Monitor {
         usage.reports++;
         for (const key of ["totalTokens", "inputTokens", "outputTokens", "cacheReadTokens"]) usage[key] += row.report[key];
       }
-      if (this.analytics && local.analytics.collectedAt) {
+      if (this.publishedAnalytics && local.analytics.collectedAt) {
+        analytics = this.publishedAnalytics.byRepository[repository] || { enabled: false };
+      } else if (this.analytics && local.analytics.collectedAt) {
         const ledger = this.analytics.ledger;
         const scoped = { ...ledger, jobs: Object.fromEntries(Object.entries(ledger.jobs).filter(([, row]) => matches(row))),
           sessions: Object.fromEntries(Object.entries(ledger.sessions).filter(([, row]) => matches(row))) };

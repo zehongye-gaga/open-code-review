@@ -268,3 +268,23 @@ test("PR analytics validates parameters and survives a malformed HTTP request ta
   assert.equal(malformed, 400);
   assert.equal((await fetch(url + "/api/status")).status, 200);
 });
+
+test("published analytics preserve scoped summaries and details without the ingestion ledger", async (t) => {
+  const f = fixture(t), source = new Monitor(f.options, f.dependencies);
+  await source.collect();
+  const usage = { totalTokens: 10, inputTokens: 8, outputTokens: 2 };
+  const ledger = { jobs: { j: { id: "j", repository: "org/repo", number: 1, state: "complete", attempt: 1,
+    createdAt: at, updatedAt: at, findings: 0 } }, sessions: {}, artifacts: { internal: "not-for-http".repeat(500000) }, collectedAt: at };
+  source.analytics = { ledger, options: { timeZone: "UTC", retentionDays: 7 } };
+  source.local.analytics = { collectedAt: at, error: false, usage };
+  const views = source.analyticsViews();
+  assert.equal(JSON.stringify(views).includes("not-for-http"), false);
+  assert.ok(JSON.stringify(views).length < 50000);
+  const target = new Monitor(f.options, { ...f.dependencies, readOnlyView: true });
+  require("./monitor-collector.js").applyCollection(target, { kind: "local", local: source.local, analytics: views });
+  assert.equal(target.analytics, null);
+  assert.deepEqual(target.snapshot("org/repo").analytics, source.snapshot("org/repo").analytics);
+  assert.deepEqual(target.analyticsPull("org/repo", 1), source.analyticsPull("org/repo", 1));
+  assert.ok(target.snapshot().repositories.includes("org/repo"));
+  f.advance(46000); assert.equal(target.snapshot().stale, true);
+});
