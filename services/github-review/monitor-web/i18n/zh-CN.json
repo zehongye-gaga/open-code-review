@@ -98,7 +98,7 @@
   "retryCount": "重试",
   "remaining": "GitHub API 余量",
   "usageFooter": "OCR 统计不含 CR Agent Token，不代表账单或订阅余量；原生记录优先使用模型返回用量，缺失时可能使用估算。失败且未返回用量的请求无法计入 Token。历史仅回填服务器仍保留的数据。",
-  "intro": "从调度到结果，让每一次审查都有据可查。",
+  "intro": "审查进度、用量趋势与异常追踪",
   "refreshCadence": "本地状态每 10 秒刷新 · GitHub 每 60 秒同步",
   "historySubtitle": "历史快照可能早于 PR 当前提交；红叉不代表服务宕机",
   "pageTitle": "Review Observatory · 审查监控",
@@ -119,7 +119,7 @@
   "refreshButton": "刷新数据 ↻",
   "usageWaiting": "等待用量数据",
   "waitingCoverage": "等待覆盖情况",
-  "dashboardTitle": "Code Review 控制台",
+  "dashboardTitle": "审查运行看板",
   "workTitle": "运行与队列",
   "filterLabel": "PR 筛选",
   "resourcesTitle": "服务器资源",
@@ -281,5 +281,13 @@
   "resourceWaitMax": "最老等待峰值",
   "resourceDefinition": "CPU 为采样区间平均值，并发为采样时刻值，不代表瞬时极值或因果关系。图表按时间桶取最大值，表格使用原始样本；缺失数据不按 0 计算。等待曲线中的 P95 是滚动 24 小时全局统计，不是该并发组的任务耗时，也不含 Agent 提交前的等待；表格等待值为当时队列中最老任务的等待时间。 队列最老等待按任务创建时间计算，可能包含重试退避。",
   "resourceDisk": "磁盘",
-  "resourcePolicyDispatch": "Policy 调度中回执"
+  "resourcePolicyDispatch": "Policy 调度中回执",
+  "dashboardNavigation": "看板导航",
+  "overviewNav": "总览",
+  "auditNav": "审计链路",
+  "usageNav": "PR 用量",
+  "hostNav": "运行资源",
+  "trendData": "查看趋势数据",
+  "trendDate": "日期",
+  "trendValue": "数值"
 }

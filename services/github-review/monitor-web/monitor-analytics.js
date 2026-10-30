@@ -24,10 +24,16 @@ window.OCRAnalytics = (() => {
     const value = (r) => metric === "totalTokens" ? r.usage.totalTokens : r[metric];
     const format = (n) => metric === "nativeSeconds" ? duration(n) : compact(n);
     const max = Math.max(1, ...rows.map(value)), chart = $("analytics-chart"); chart.replaceChildren();
+    const values = $("trend-values"); values.replaceChildren();
+    set("trend-unit", $("trend-metric").selectedOptions[0].textContent);
+    for (const row of rows) {
+      const tr = node("tr"); appendCell(tr, row.key); appendCell(tr, format(value(row)), "mono"); values.append(tr);
+    }
     if (!rows.length) { chart.append(node("p", "empty-cell", t("noData"))); return; }
     for (const row of rows) {
       const column = node("div", "chart-column"), bar = node("div", "chart-bar");
       column.title = `${row.key} · ${grain === "weekly" ? t("weekStarting") : t("dailyView")}\nToken: ${integer(row.usage.totalTokens)}\n${t("findingOccurrences")}: ${row.findings}\n${t("finishedReviews")}: ${row.completed}\n${t("nativeTime")}: ${duration(row.nativeSeconds)}`;
+      column.setAttribute("aria-label", column.title);
       bar.style.height = `${Math.max(value(row) ? 2 : 0, value(row) / max * 120)}px`;
       column.append(node("span", "chart-value", format(value(row))), bar, node("span", "chart-label", row.key.slice(5)));
       chart.append(column);

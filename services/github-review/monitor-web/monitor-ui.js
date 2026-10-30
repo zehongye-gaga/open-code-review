@@ -132,6 +132,7 @@ function render() {
   const data = snapshot;
   const connection = connectionState(data, disconnected);
   if (!data?.ready) {
+    $("notice").hidden = false;
     set("notice", t(disconnected ? "fetchError" : "loading"));
     $("notice").className = `notice${disconnected ? " danger" : ""}`;
     set("connection", t(connection)); $("connection").className = `live${disconnected ? " rose" : ""}`;
@@ -152,6 +153,7 @@ function render() {
   if (data.resources.volumes.some((v) => v.totalBytes && v.availableBytes / v.totalBytes < .1)) warnings.push(t("diskWarning"));
   $("notice").className = `notice${disconnected || localStale ? " danger" : warnings.length ? " warn" : ""}`;
   set("notice", warnings.join(" ") || t("normalNotice"));
+  $("notice").hidden = warnings.length === 0;
   document.body.classList.toggle("offline", disconnected || localStale || githubStale);
   set("connection", t(connection));
   $("connection").className = `live${disconnected || localStale ? " rose" : ""}`;
@@ -199,6 +201,7 @@ $("repository").addEventListener("change", () => {
   if (repository) url.searchParams.set("repository", repository); else url.searchParams.delete("repository");
   history.replaceState(null, "", url);
   if ($("analytics-dialog").open) $("analytics-dialog").close();
+  $("notice").hidden = false;
   set("notice", t("loading"));
   void refresh();
 });

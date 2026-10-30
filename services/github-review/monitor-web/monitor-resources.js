@@ -27,7 +27,7 @@ window.addEventListener("DOMContentLoaded", () => {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("viewBox", "0 0 720 210"); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", series.map(([, , label]) => t(label)).join(" / "));
     const add = (tag, attrs, content) => { const n = document.createElementNS(svg.namespaceURI, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, String(v)); if (content) n.textContent = content; svg.append(n); return n; };
     const x = (p) => 48 + (p.time - data.start) / (data.end - data.start) * 655, y = (v) => 170 - v / max * 150;
-    for (const v of [0, max / 2, max]) { add("line", { x1:48,x2:703,y1:y(v),y2:y(v),stroke:"#e4e9ef" }); add("text",{x:42,y:y(v)+4,"text-anchor":"end",fill:"#64748b","font-size":11},format(v,unit)); }
+    for (const v of [0, max / 2, max]) { add("line", { x1:48,x2:703,y1:y(v),y2:y(v),stroke:"#293847" }); add("text",{x:42,y:y(v)+4,"text-anchor":"end",fill:"#a1b1c2","font-size":11},format(v,unit)); }
     for (const [key, color, label] of series) {
       let d = "", prior = null;
       for (const p of points) {
@@ -38,8 +38,8 @@ window.addEventListener("DOMContentLoaded", () => {
       }
       add("path",{d,fill:"none",stroke:color,"stroke-width":2});
     }
-    add("text",{x:48,y:198,fill:"#64748b","font-size":11},stamp(data.start));
-    add("text",{x:703,y:198,fill:"#64748b","font-size":11,"text-anchor":"end"},stamp(data.end)); container.append(svg);
+    add("text",{x:48,y:198,fill:"#a1b1c2","font-size":11},stamp(data.start));
+    add("text",{x:703,y:198,fill:"#a1b1c2","font-size":11,"text-anchor":"end"},stamp(data.end)); container.append(svg);
   }
   async function refresh() {
     const id = ++sequence;
@@ -48,9 +48,9 @@ window.addEventListener("DOMContentLoaded", () => {
       if (!response.ok) throw new Error("Resource history unavailable");
       const data = await response.json(); if (id !== sequence) return;
       el("resource-history-status").textContent = `${data.samples} ${t("resourceSamples")} · ${data.latest ? stamp(data.points[0].time) + " ~ " + stamp(data.latest) : t("resourceNoData")}${data.stale ? " · " + t("resourceStale") : ""}${data.unreadableFiles || data.malformedRows ? " · " + t("resourcePartial") : ""}`;
-      chart("resource-util-chart", data, [["cpu","#2563eb","resourceCPU"],["memory","#0d9488","memory"],["disk","#9333ea","resourceDisk"]],"%");
-      chart("resource-load-chart", data, [["running","#2563eb","resourceRunning"],["queued","#ea580c","queued"],["dispatching","#9333ea","resourceDispatch"],["policyDispatching","#0d9488","resourcePolicyDispatch"]],"");
-      chart("resource-wait-chart", data, [["oldestWait","#ea580c","resourceOldest"],["queueP95","#2563eb","resourceRollingP95"]],"s");
+      chart("resource-util-chart", data, [["cpu","#80b7e8","resourceCPU"],["memory","#78d0c2","memory"],["disk","#c0cbd9","resourceDisk"]],"%");
+      chart("resource-load-chart", data, [["running","#80b7e8","resourceRunning"],["queued","#f5c374","queued"],["dispatching","#c0cbd9","resourceDispatch"],["policyDispatching","#78d0c2","resourcePolicyDispatch"]],"");
+      chart("resource-wait-chart", data, [["oldestWait","#f5c374","resourceOldest"],["queueP95","#80b7e8","resourceRollingP95"]],"s");
       const body=el("resource-groups");body.replaceChildren();
       for(const group of data.groups){const row=document.createElement("tr");for(const value of [group.running,group.samples,format(group.cpu.mean,"%"),format(group.cpu.max,"%"),format(group.memory.max,"%"),format(group.queue.mean),format(group.queue.max),format(group.wait.max,"s")])row.append(text("td",value));body.append(row);}
       if (!data.groups.length) {const row=text("tr","");const cell=text("td",t("resourceNoData"));cell.colSpan=8;row.append(cell);body.append(row);}
