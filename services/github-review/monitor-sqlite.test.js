@@ -132,3 +132,20 @@ test("ledger write failure retains coherent last successful summaries and SQL de
   assert.deepEqual(f.reader.snapshot().analytics, { ...before, error: true });
   assert.equal(f.reader.analyticsPull("org/repo", 11).runs.length, 0);
 });
+
+test("restart restores raw GitHub data and rejoins current local job state", async (t) => {
+  const f = await fixture(t);
+  f.monitor.remote.pulls = [{ repository: "org/repo", number: 7, headRefOid: "head", baseRefName: "main", isDraft: false,
+    title: "PR", url: "https://github.com/org/repo/pull/7", updatedAt: f.at }];
+  f.writer.publish(f.monitor);
+  assert.equal(f.reader.snapshot().pulls[0].ocr.jobState, null);
+  f.monitor.remote = { pulls: [], updatedAt: null, error: false };
+  f.writer.restoreGitHub(f.monitor);
+  f.monitor.remote.error = true;
+  f.monitor.local.ocrJobs = [{ repository: "org/repo", number: 7, head: "head", state: "complete", attempt: 2, findings: 3, updatedAt: f.at }];
+  f.writer.publish(f.monitor);
+  const actual = f.reader.snapshot();
+  assert.equal(actual.github.updatedAt, f.at); assert.equal(actual.github.error, true);
+  assert.equal(actual.pulls[0].ocr.jobState, "complete"); assert.equal(actual.pulls[0].ocr.attempt, 2);
+  assert.equal(actual.pulls[0].ocr.findings, 3);
+});

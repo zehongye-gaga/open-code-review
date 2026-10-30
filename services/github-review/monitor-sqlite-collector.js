@@ -5,16 +5,15 @@ const fs = require("node:fs");
 const { Monitor } = require("./monitor-data.js");
 const { MonitorSQLite } = require("./monitor-sqlite.js");
 const { ResourceTrends } = require("./resource-trends.js");
+const { startGitHubPolling } = require("./monitor-github-worker.js");
 
 async function main() {
   const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   const monitor = new Monitor(config), target = new MonitorSQLite(config, { readOnly: false });
+  target.restoreGitHub(monitor);
   const trends = new ResourceTrends(config.resourceHistoryDirectory || "/var/lib/ocr-server-monitor/history");
-  let stopped = false, timer, githubTimer;
-  const github = async () => {
-    await monitor.refreshGitHub();
-    if (!stopped) githubTimer = setTimeout(github, 60000);
-  };
+  let stopped = false, timer;
+  const stopGitHub = startGitHubPolling(monitor, () => { console.error("GitHub polling worker exited; restarting collector"); process.exit(1); });
   const collect = async () => {
     try {
       await monitor.collect();
@@ -28,9 +27,9 @@ async function main() {
     } catch { console.error("SQLite publication failed; previous generation retained"); }
     if (!stopped) timer = setTimeout(collect, 10000);
   };
-  const stop = () => { stopped = true; clearTimeout(timer); clearTimeout(githubTimer); process.exit(0); };
+  const stop = () => { stopped = true; clearTimeout(timer); void stopGitHub(); process.exit(0); };
   process.once("SIGTERM", stop); process.once("SIGINT", stop);
-  void github(); await collect();
+  await collect();
 }
 if (require.main === module) main().catch((error) => { console.error(error.message); process.exit(1); });
 module.exports = { main };
