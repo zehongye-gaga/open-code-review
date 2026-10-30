@@ -44,9 +44,14 @@ class MonitorSQLite {
       for (const { key } of this.store.statement("SELECT key FROM dashboard_snapshots WHERE key LIKE 'status:%'").all()) {
         if (!keys.has(key)) this.store.statement("DELETE FROM dashboard_snapshots WHERE key=?").run(key);
       }
+      if (monitor.remote.updatedAt) this.store.meta("githubRemote", monitor.remote);
       this.store.meta("dashboard", { publishedAt: new Date(this.now()).toISOString(), collectedAt: root.collectedAt });
     });
     return { repositories: root.repositories.length, runs: Object.keys(ledger?.jobs || {}).length };
+  }
+  restoreGitHub(monitor) {
+    const saved = this.store.meta("githubRemote");
+    if (saved?.updatedAt) monitor.remote = saved;
   }
   value(key) {
     const row = this.store.statement("SELECT payload FROM dashboard_snapshots WHERE key=?").get(key);
