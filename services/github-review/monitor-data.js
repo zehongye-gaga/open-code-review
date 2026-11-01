@@ -212,13 +212,18 @@ class Monitor {
       const crSources = [];
       let reviewSource = { ...previous?.reviewSource, error: false, limitBytes: this.stateMaxBytes };
       try {
-        const file = path.join(this.config.stateDirectory, "state.json"), fd = fs.openSync(file, "r");
         let state;
-        try {
-          reviewSource.sizeBytes = fs.fstatSync(fd).size;
-          if (reviewSource.sizeBytes > this.stateMaxBytes) throw Object.assign(Error("Review state exceeds configured limit"), { code: "STATE_TOO_LARGE" });
-          state = JSON.parse(fs.readFileSync(fd, "utf8"));
-        } finally { fs.closeSync(fd); }
+        if (this.reviewStateSource) {
+          state = this.reviewStateSource.read();
+          reviewSource = { ...this.reviewStateSource.status };
+        } else {
+          const file = path.join(this.config.stateDirectory, "state.json"), fd = fs.openSync(file, "r");
+          try {
+            reviewSource.sizeBytes = fs.fstatSync(fd).size;
+            if (reviewSource.sizeBytes > this.stateMaxBytes) throw Object.assign(Error("Review state exceeds configured limit"), { code: "STATE_TOO_LARGE" });
+            state = JSON.parse(fs.readFileSync(fd, "utf8"));
+          } finally { fs.closeSync(fd); }
+        }
         if (state.version !== 1 || !Array.isArray(state.jobs)) throw new Error("Invalid OCR state");
         nativeJobs = state.jobs;
         audit = auditRows(state);
