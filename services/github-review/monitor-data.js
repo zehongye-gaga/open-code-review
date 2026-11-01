@@ -178,6 +178,8 @@ async function githubPulls(config, request = fetch) {
 class Monitor {
   constructor(options, dependencies = {}) {
     this.options = options;
+    this.stateMaxBytes = options.stateMaxBytes ?? 64 * 1024 * 1024;
+    if (!Number.isSafeInteger(this.stateMaxBytes) || this.stateMaxBytes < 1024 || this.stateMaxBytes > 64 * 1024 * 1024) throw Error("Invalid monitor stateMaxBytes");
     this.now = dependencies.now || Date.now;
     this.unit = dependencies.unit || unitStatus;
     this.health = dependencies.health || getHealth;
@@ -208,14 +210,26 @@ class Monitor {
       ]);
       let audit = previous?.audit || [], ocrJobs = [], nativeJobs = [], ocrError = false, crError = false, crJobs = [];
       const crSources = [];
+      let reviewSource = { ...previous?.reviewSource, error: false, limitBytes: this.stateMaxBytes };
       try {
-        const state = readJSON(path.join(this.config.stateDirectory, "state.json"));
+        const file = path.join(this.config.stateDirectory, "state.json"), fd = fs.openSync(file, "r");
+        let state;
+        try {
+          reviewSource.sizeBytes = fs.fstatSync(fd).size;
+          if (reviewSource.sizeBytes > this.stateMaxBytes) throw Object.assign(Error("Review state exceeds configured limit"), { code: "STATE_TOO_LARGE" });
+          state = JSON.parse(fs.readFileSync(fd, "utf8"));
+        } finally { fs.closeSync(fd); }
         if (state.version !== 1 || !Array.isArray(state.jobs)) throw new Error("Invalid OCR state");
         nativeJobs = state.jobs;
         audit = auditRows(state);
         void this.agentUsage?.collect(state.agentSessions);
         ocrJobs = state.jobs.map(ocrRow);
-      } catch { ocrError = true; ocrJobs = previous?.ocrJobs || []; }
+        reviewSource = { ...reviewSource, collectedAt: new Date(this.now()).toISOString(), code: null };
+      } catch (error) {
+        ocrError = true; ocrJobs = previous?.ocrJobs || [];
+        reviewSource = { ...reviewSource, error: true, code: error.code === "STATE_TOO_LARGE" ? error.code : "STATE_UNAVAILABLE" };
+      }
+      if (reviewSource.code !== (previous?.reviewSource?.code || null)) console.error(JSON.stringify({ event: "monitor_review_source", ...reviewSource }));
       for (const source of this.options.cragent?.states || []) {
         let lastPoll = null, error = false;
         try {
@@ -258,7 +272,7 @@ class Monitor {
         if (this.analytics) this.dataset?.append("ocr_run", runRows(this.analytics.ledger));
         this.dataset?.append("agent_usage", (this.agentUsage?.snapshot().sessions || []).map(({ observedAt, ...r }) => r));
       } catch { datasetError = true; }
-      this.local = { datasetError, audit, collectedAt: new Date(this.now()).toISOString(), ocrJobs, crJobs, usage, analytics, completedUsage: completed.map((job) => ({ repository: canonicalRepo(job.repository), report: reports.get(String(job.id)) || null })),
+      this.local = { datasetError, reviewSource, audit, collectedAt: new Date(this.now()).toISOString(), ocrJobs, crJobs, usage, analytics, completedUsage: completed.map((job) => ({ repository: canonicalRepo(job.repository), report: reports.get(String(job.id)) || null })),
         resources: this.resources(this.options.volumes || [{ label: "Root", path: "/" }, { label: "Review data", path: this.config.stateDirectory }]),
         services: {
           ocr: { ...ocrUnit, ...ocrCounts, running: health.running ?? ocrCounts.running, queued: health.queued ?? ocrCounts.queued,
@@ -352,6 +366,7 @@ class Monitor {
       queued: work.filter((job) => job.engine === engine && queuedStates.has(job.state)).length,
     }]));
     return { version: 1, ready: true, repositories, repository, scopedCounts, collectedAt: local.collectedAt, stale,
+      dataSourceError: Boolean(local.services.ocr.sourceError || local.analytics?.error), reviewSource: local.reviewSource,
       github: { updatedAt: this.remote.updatedAt, stale: githubStale, error: this.remote.error, remaining: this.remote.remaining },
       services, resources: local.resources, usage, analytics,
       audit: (local.audit || []).filter(matches).slice(0, 200),
