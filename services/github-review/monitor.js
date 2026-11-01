@@ -64,7 +64,7 @@ function createMonitorServer(monitor, { bearerToken } = {}) {
     if (req.url === "/healthz") {
       try {
         const snapshot = monitor.snapshot();
-        return send(snapshot.ready && !snapshot.stale ? 200 : 503, { ready: snapshot.ready, collectedAt: snapshot.collectedAt });
+        return send(snapshot.ready && !snapshot.stale && !snapshot.dataSourceError ? 200 : 503, { ready: snapshot.ready, collectedAt: snapshot.collectedAt });
       } catch { return send(503, { ready: false }); }
     }
     const asset = assets.get(url.pathname);

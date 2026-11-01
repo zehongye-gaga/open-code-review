@@ -123,10 +123,12 @@ test("corrupt daily backup is repaired and overlapping backups use private indep
 test("ledger write failure retains coherent last successful summaries and SQL detail", async (t) => {
   const f = await fixture(t), before = f.reader.snapshot().analytics;
   write(path.join(f.root, "state.json"), { version: 1, jobs: [{ id: "11", repository: "org/repo", number: 11, state: "running", createdAt: f.at }] });
+  f.advance(10000);
   const rename = fs.renameSync;
   fs.renameSync = (from, to) => { if (to === f.monitor.analytics.file) throw Object.assign(Error("disk full"), { code: "ENOSPC" }); return rename(from, to); };
   try { await f.monitor.collect(); } finally { fs.renameSync = rename; }
   assert.equal(f.monitor.local.analytics.error, true);
+  assert.notEqual(f.monitor.local.reviewSource.collectedAt, before.collectedAt);
   assert.ok(f.monitor.analytics.ledger.jobs["11"]);
   f.writer.publish(f.monitor);
   assert.deepEqual(f.reader.snapshot().analytics, { ...before, error: true });
@@ -148,4 +150,11 @@ test("restart restores raw GitHub data and rejoins current local job state", asy
   assert.equal(actual.github.updatedAt, f.at); assert.equal(actual.github.error, true);
   assert.equal(actual.pulls[0].ocr.jobState, "complete"); assert.equal(actual.pulls[0].ocr.attempt, 2);
   assert.equal(actual.pulls[0].ocr.findings, 3);
+});
+
+test("old persisted snapshots expose source failure immediately after reader upgrade", async (t) => {
+  const f = await fixture(t), value = f.writer.value("status:");
+  delete value.dataSourceError; value.services.ocr.sourceError = true;
+  f.writer.store.statement("UPDATE dashboard_snapshots SET payload=? WHERE key='status:'").run(JSON.stringify(value));
+  assert.equal(f.reader.snapshot().dataSourceError, true);
 });

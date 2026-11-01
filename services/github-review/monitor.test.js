@@ -288,3 +288,31 @@ test("published analytics preserve scoped summaries and details without the inge
   assert.ok(target.snapshot().repositories.includes("org/repo"));
   f.advance(46000); assert.equal(target.snapshot().stale, true);
 });
+
+test("trusted review state above the artifact limit is collected with explicit source freshness", async (t) => {
+  const f = fixture(t), monitor = new Monitor(f.options, f.dependencies);
+  write(path.join(f.root, "state.json"), { version: 1, jobs: [], padding: "x".repeat(17 * 1024 * 1024) });
+  await monitor.collect();
+  const value = monitor.snapshot();
+  assert.equal(value.services.ocr.sourceError, false); assert.equal(value.dataSourceError, false);
+  assert.equal(value.reviewSource.collectedAt, at); assert.ok(value.reviewSource.sizeBytes > 16 * 1024 * 1024);
+});
+
+test("oversize or malformed state retains previous rows and source timestamp, degrades health, then recovers", async (t) => {
+  const f = fixture(t); f.options.stateMaxBytes = 2048;
+  write(path.join(f.root, "state.json"), { version: 1, jobs: [{ id: 1, repository: "org/repo", number: 1, state: "running", createdAt: at }] });
+  const monitor = new Monitor(f.options, f.dependencies); await monitor.collect();
+  f.advance(10000);
+  write(path.join(f.root, "state.json"), { version: 1, jobs: [], padding: "x".repeat(3000) });
+  await monitor.collect(); let value = monitor.snapshot();
+  assert.equal(value.reviewSource.code, "STATE_TOO_LARGE"); assert.equal(value.reviewSource.collectedAt, at);
+  assert.equal(value.work.length, 1); assert.equal(value.stale, false); assert.equal(value.dataSourceError, true);
+  assert.equal(connectionState(value, false, Date.parse(at) + 10000), "collectionFailed");
+  const url = await serve(t, monitor); assert.equal((await fetch(url + "/healthz")).status, 503);
+  fs.writeFileSync(path.join(f.root, "state.json"), "{"); await monitor.collect();
+  assert.equal(monitor.snapshot().reviewSource.code, "STATE_UNAVAILABLE");
+  write(path.join(f.root, "state.json"), { version: 1, jobs: [] }); await monitor.collect(); value = monitor.snapshot();
+  assert.equal(value.dataSourceError, false); assert.equal(value.work.length, 0);
+  assert.equal(value.reviewSource.collectedAt, "2026-10-15T10:00:10.000Z");
+  assert.equal((await fetch(url + "/healthz")).status, 200);
+});

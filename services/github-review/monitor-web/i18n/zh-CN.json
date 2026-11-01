@@ -289,5 +289,9 @@
   "hostNav": "运行资源",
   "trendData": "查看趋势数据",
   "trendDate": "日期",
-  "trendValue": "数值"
+  "trendValue": "数值",
+  "collectionFailed": "审查数据采集异常",
+  "reviewCollectionFailed": "审查数据采集失败：当前显示上次成功采集的数据，资源刷新不代表审查数据已更新。",
+  "lastReviewCollection": "审查状态最后读取：",
+  "lastAnalyticsCollection": "用量最后更新："
 }

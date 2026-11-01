@@ -66,6 +66,7 @@ class MonitorSQLite {
     }
     const now = this.now(), age = (time) => Number.isFinite(Date.parse(time)) ? Math.max(0, (now - Date.parse(time)) / 1000) : Infinity;
     value.stale = age(value.collectedAt) > 45;
+    value.dataSourceError = Boolean(value.dataSourceError || value.services.ocr?.sourceError || value.analytics?.error);
     value.github.stale = age(value.github.updatedAt) > 180;
     for (const service of Object.values(value.services)) if (service) {
       service.pollStale = age(service.lastPoll) > Math.max(90, service.pollSeconds * 3);

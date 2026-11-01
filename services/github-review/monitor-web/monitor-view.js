@@ -29,6 +29,7 @@
   function connectionState(data, disconnected, now = Date.now()) {
     if (disconnected) return "disconnected";
     if (!data?.ready) return "connecting";
+    if (data.dataSourceError) return "collectionFailed";
     if (data.stale || now - Date.parse(data.collectedAt) > 45000) return "stale";
     return "connected";
   }
