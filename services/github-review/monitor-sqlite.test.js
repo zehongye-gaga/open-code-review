@@ -158,3 +158,23 @@ test("old persisted snapshots expose source failure immediately after reader upg
   f.writer.store.statement("UPDATE dashboard_snapshots SET payload=? WHERE key='status:'").run(JSON.stringify(value));
   assert.equal(f.reader.snapshot().dataSourceError, true);
 });
+
+test("dashboard collection uses checkpointed SQLite state without reading the legacy JSON", async (t) => {
+  const f = await fixture(t);
+  const state = new (require("./state.js").State)(f.root, { sqlite: true });
+  t.after(() => state.database.close());
+  state.save();
+  f.monitor.reviewStateSource = new (require("./state-sync.js").StateSync)(path.join(f.root, "state.db"), f.writer.store);
+  fs.writeFileSync(path.join(f.root, "state.json"), "corrupt legacy export");
+  await f.monitor.collect(); f.writer.publish(f.monitor);
+  assert.equal(f.reader.snapshot().reviewSource.mode, "bootstrap");
+  assert.equal(f.reader.snapshot().dataSourceError, false);
+  state.data.sequence = 2; state.database.save(state.data);
+  await f.monitor.collect(); f.writer.publish(f.monitor);
+  const source = f.reader.snapshot().reviewSource;
+  assert.equal(source.mode, "incremental"); assert.equal(source.changedRows, 1);
+  assert.equal(source.revision, state.database.head.revision);
+  f.monitor.reviewStateSource.sourceFile = path.join(f.root, "missing.db");
+  await f.monitor.collect(); f.writer.publish(f.monitor);
+  assert.equal(f.reader.snapshot().dataSourceError, true);
+});

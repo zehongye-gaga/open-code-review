@@ -3,15 +3,16 @@
 "use strict";
 const fs = require("node:fs"), path = require("node:path");
 const { DatabaseSync, backup } = require("node:sqlite");
-async function backupMonitor(database, directory, now = new Date()) {
+async function backupMonitor(database, directory, now = new Date(), stateSource = false) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const name = `audit-${now.toISOString().slice(0, 10)}.db`, target = path.join(directory, name);
+  const prefix = stateSource ? "state" : "audit";
+  const name = `${prefix}-${now.toISOString().slice(0, 10)}.db`, target = path.join(directory, name);
   const valid = (file) => {
     let check;
     try {
       check = new DatabaseSync(file, { readOnly: true });
       return check.prepare("PRAGMA integrity_check").get().integrity_check === "ok" &&
-        check.prepare("SELECT 1 FROM meta WHERE key='dashboard'").get() !== undefined;
+        (stateSource ? check.prepare("SELECT 1 FROM state_head WHERE id=1").get() : check.prepare("SELECT 1 FROM meta WHERE key='dashboard'").get()) !== undefined;
     } catch { return false; } finally { check?.close(); }
   };
   if (fs.existsSync(target) && valid(target)) return target;
@@ -26,7 +27,7 @@ async function backupMonitor(database, directory, now = new Date()) {
     fs.renameSync(temporary, target);
     const dir = fs.openSync(directory, "r");
     try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
-    for (const file of fs.readdirSync(directory).filter((f) => /^audit-\d{4}-\d{2}-\d{2}\.db$/.test(f)).sort().slice(0, -7)) {
+    for (const file of fs.readdirSync(directory).filter((f) => /^(audit|state)-\d{4}-\d{2}-\d{2}\.db$/.test(f) && f.startsWith(prefix + "-")).sort().slice(0, -7)) {
       try { fs.unlinkSync(path.join(directory, file)); } catch (error) { if (error.code !== "ENOENT") throw error; }
     }
   } finally {
@@ -37,6 +38,9 @@ async function backupMonitor(database, directory, now = new Date()) {
 if (require.main === module) {
   const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   backupMonitor(config.sqlite.database, config.sqlite.backupDirectory || path.join(path.dirname(config.sqlite.database), "backups"))
-    .then(() => console.log("SQLite backup verified")).catch((error) => { console.error(error.message); process.exitCode = 1; });
+    .then(async () => {
+      if (config.sqlite.stateSource) await backupMonitor(config.sqlite.stateSource, config.sqlite.backupDirectory || path.join(path.dirname(config.sqlite.database), "backups"), new Date(), true);
+      console.log("SQLite backup verified");
+    }).catch((error) => { console.error(error.message); process.exitCode = 1; });
 }
 module.exports = { backupMonitor };

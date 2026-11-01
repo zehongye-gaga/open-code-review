@@ -7,14 +7,24 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 class State {
-  constructor(directory) {
+  constructor(directory, { sqlite = false } = {}) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.file = path.join(directory, "state.json");
     this.data = { version: 1, sequence: Date.now(), initialized: {}, pulls: {}, checkpoints: {}, jobs: [] };
-    if (fs.existsSync(this.file)) {
+    if (sqlite) {
+      this.database = new (require("./state-sqlite.js").SQLiteState)(path.join(directory, "state.db"));
+      const persisted = this.database.load();
+      if (persisted) this.data = persisted;
+      else {
+        if (fs.existsSync(this.file)) this.data = JSON.parse(fs.readFileSync(this.file, "utf8"));
+        if (this.data.version !== 1 || !Array.isArray(this.data.jobs)) throw Error("Unsupported or corrupt service state");
+        this.database.save(this.data);
+      }
+    } else if (fs.existsSync(this.file)) {
       this.data = JSON.parse(fs.readFileSync(this.file, "utf8"));
       if (this.data.version !== 1 || !Array.isArray(this.data.jobs)) throw new Error("Unsupported or corrupt service state");
     }
+    if (this.data.version !== 1 || !Array.isArray(this.data.jobs)) throw Error("Unsupported or corrupt service state");
     this.data.checkpoints ||= {};
     for (const job of this.data.jobs) {
       if (job.state === "running") { job.state = "queued"; job.nextAt = 0; }
@@ -27,6 +37,7 @@ class State {
   }
 
   write() {
+    this.database?.save(this.data);
     const temporary = this.file + ".tmp";
     const fd = fs.openSync(temporary, "w", 0o600);
     try { fs.writeFileSync(fd, JSON.stringify(this.data, null, 2)); fs.fsyncSync(fd); }

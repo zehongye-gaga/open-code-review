@@ -11,6 +11,7 @@ async function main() {
   const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   const monitor = new Monitor(config), target = new MonitorSQLite(config, { readOnly: false });
   target.restoreGitHub(monitor);
+  if (config.sqlite.stateSource) monitor.reviewStateSource = new (require("./state-sync.js").StateSync)(config.sqlite.stateSource, target.store, monitor.stateMaxBytes);
   const trends = new ResourceTrends(config.resourceHistoryDirectory || "/var/lib/ocr-server-monitor/history");
   let stopped = false, timer;
   const stopGitHub = startGitHubPolling(monitor, () => { console.error("GitHub polling worker exited; restarting collector"); process.exit(1); });

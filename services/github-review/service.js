@@ -21,6 +21,7 @@ function configuration(input) {
     binary: "/usr/local/bin/ocr", provider: "openai-codex", model: "gpt-6-astra",
     budget: 0, timeoutSeconds: 1500, fetchTimeoutSeconds: 600, maxAttempts: 3, publicationMaxAttempts: 3, retrySeconds: 60,
     retentionDays: 7, prConcurrency: 1, dispatchConcurrency: 8, statusContext: "ocr-review", blockSeverity: "high", ...input };
+  if (config.stateStorage && !["json", "sqlite"].includes(config.stateStorage)) throw Error("Invalid stateStorage");
   if (!path.isAbsolute(config.stateDirectory || "")) throw new Error("stateDirectory must be absolute");
   if (!path.isAbsolute(config.binary)) throw new Error("binary must be absolute");
   if (!Array.isArray(config.repositories) || !config.repositories.length) throw new Error("Configure at least one repository");
@@ -49,7 +50,7 @@ class ReviewService {
   constructor({ config, github, state, log = console.log, prepare = prepareReview, run = runReview, publish = publishReview }) {
     this.config = configuration(config);
     this.github = github;
-    this.state = state || new State(this.config.stateDirectory);
+    this.state = state || new State(this.config.stateDirectory, { sqlite: this.config.stateStorage === "sqlite" });
     this.log = (event, details = {}) => log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
     this.prepare = prepare; this.run = run; this.publish = publish;
     this.commitStatusWrites = new Map();
