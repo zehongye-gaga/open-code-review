@@ -102,8 +102,10 @@ class ReviewService {
     const pending = this.state.data.jobs.findLast((job) => job.key === `${repository}#${pr.number}` &&
       ["queued", "running"].includes(job.state));
     const pendingBaseChanged = pending && pending.base !== pr.base.sha;
-    const job = this.state.enqueue(repository, pr, { ...options, force: options.force || pendingBaseChanged,
-      fullReview: options.fullReview ?? (options.force === true) });
+    const previous = this.config.gitea && this.state.data.jobs.findLast((job) => job.key === `${repository}#${pr.number}`);
+    const giteaBaseChanged = previous && previous.base !== pr.base.sha;
+    const job = this.state.enqueue(repository, pr, { ...options, force: options.force || pendingBaseChanged || giteaBaseChanged,
+      fullReview: options.fullReview ?? (options.force === true || Boolean(giteaBaseChanged)) });
     this.abortSuperseded();
     if (job) this.log("queued", { id: job.id, repository, number: job.number, head: job.head });
     return job;

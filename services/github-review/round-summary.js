@@ -50,7 +50,7 @@ async function publishRoundSummary({ github, owner, repo, prNumber, body, metada
   const text = `${marker}\n${incomplete || blocking ? "⚠️" : skipped ? "ℹ️" : "✅"} **${title} · ${metadata.head.slice(0, 7)}**\n\n${verdict}${details ? `\n\n${details}` : ""}`;
   const { data: current } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
   if (current.state !== "open" || current.head.sha !== metadata.head || current.base.sha !== metadata.base) throw new Error("PR changed before round summary publication");
-  if (target) {
+  if (target && github.capabilities?.updateReview !== false) {
     const { data: updated } = await github.rest.pulls.updateReview({ owner, repo, pull_number: prNumber,
       review_id: target.id, body: `${target.body || ""}\n${text}`.trim() });
     return { id: updated.id, url: updated.html_url };

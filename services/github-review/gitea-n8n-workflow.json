@@ -1,0 +1,112 @@
+{
+  "name": "OCR Gitea ingress",
+  "active": false,
+  "nodes": [
+    {
+      "name": "Gitea Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "gitea-ci",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "18cddcb9-918b-4003-b458-69d2d7ad85dd"
+    },
+    {
+      "name": "Forward signed event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.2.46.202:8790/webhooks/gitea",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-gitea-event",
+              "value": "={{ $json.headers['x-gitea-event'] }}"
+            },
+            {
+              "name": "x-gitea-signature",
+              "value": "={{ $json.headers['x-gitea-signature'] }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "a620a63f-9385-4156-ae60-8ec1ccc85f2d"
+    },
+    {
+      "name": "Return acceptance",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}"
+        }
+      },
+      "id": "56372600-daec-49d5-b359-565a004f099e"
+    }
+  ],
+  "connections": {
+    "Gitea Webhook": {
+      "main": [
+        [
+          {
+            "node": "Forward signed event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Forward signed event": {
+      "main": [
+        [
+          {
+            "node": "Return acceptance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
