@@ -79,9 +79,20 @@ class OrgCI {
     if (this.config.enabled !== true) fail("Organization CI is staged and not enabled", 503);
     const normalized = identity(input);
     if (!["direct", "agent"].includes(route)) fail("Invalid n8n route");
+    const existing = this.receipts[normalized.request_id];
+    const reopening = existing?.state === "superseded" && ["pr_closed", "pr_changed_or_closed"].includes(existing.reason);
+    const retrying = existing?.state === "failed" && !existing.jobId && !this.dispatching.has(existing.request_id) &&
+      typeof input.retry_key === "string" && /^[0-9]+:[0-9]+$/.test(input.retry_key) &&
+      Number(input.retry_key.split(":")[1]) >= 2 && !(existing.retryKeys || []).includes(input.retry_key);
+    if (existing && !retrying && !reopening) {
+      // An existing durable receipt can be acknowledged while the watchdog is awaiting GitHub.
+      await this.retrySubmission(existing, input.retry_key);
+      this.s.state.save();
+      return this.view(existing);
+    }
     return this.lock(normalized.request_id, async () => {
       let r = this.receipts[normalized.request_id];
-      if (r) { await this.retrySubmission(r, input.retry_key); await this.reopen(r); await this.refresh(r); return this.view(r); }
+      if (r) { await this.retrySubmission(r, input.retry_key); await this.reopen(r); this.s.state.save(); return this.view(r); }
       await this.current(normalized);
       if (Object.keys(this.receipts).length >= 25000) fail("CI receipt capacity reached", 503);
       for (const old of Object.values(this.receipts)) {
@@ -91,8 +102,8 @@ class OrgCI {
         createdAt: Date.now(), heartbeatAt: Date.now(), dispatchAttempts: 0, nextDispatchAt: 0 };
       if (input.retry_key !== undefined) await this.retrySubmission(r, input.retry_key);
       this.s.state.save();
-      if (await this.reuseExisting(r)) await this.refresh(r);
-      else await this.publish(r, "pending", "OCR accepted; waiting for background dispatch");
+      // Admission ends at durable storage; GitHub publication belongs to the watchdog.
+      this.adoptExisting(r);
       return this.view(r);
     });
   }
@@ -136,7 +147,6 @@ class OrgCI {
       r.state = "queued";
     }
     this.s.state.save();
-    await this.publish(r, "pending", "OCR reaccepted after PR reopened");
   }
   async submitReview(args, actor) {
     const id = args.request_id?.replace(/^github:/, "");
@@ -191,7 +201,7 @@ class OrgCI {
     if (r.dispatchAttempts >= 8) { this.stop(r, "failed", "dispatch_retries_exhausted"); return; }
     this.dispatching.add(r.request_id); r.state = "dispatching"; r.dispatchAttempts++; this.s.state.save();
     try {
-      await this.refresh(r);
+      await this.refresh(r, false);
       if (r.jobId || terminal.has(r.state)) return;
       if (r.route === "agent") {
         try {
@@ -222,7 +232,7 @@ class OrgCI {
       else { r.state = "retrying"; r.nextDispatchAt = nextAt; }
       this.s.state.save();
     } finally { this.dispatching.delete(r.request_id); }
-    await this.refresh(r);
+    await this.refresh(r, false);
   }
   async tick(input) {
     const r = this.lookup(input); r.heartbeatAt = Date.now(); this.s.state.save();
@@ -260,7 +270,7 @@ class OrgCI {
     r.state = "queued"; delete r.finalStatus; delete r.reason;
     this.s.state.save();
   }
-  async refresh(r) {
+  async refresh(r, publishStatus = true) {
     await this.reconcileLegacy(r);
     if (!terminal.has(r.state) && !r.jobId) this.adoptExisting(r);
     const now = Date.now(), j = this.s.state.data.jobs.find((job) => job.id === r.jobId);
@@ -282,6 +292,7 @@ class OrgCI {
         r.finishedAt = now; this.s.state.save();
       }
     }
+    if (!publishStatus) { this.s.state.save(); return; }
     if (terminal.has(r.state)) {
       const result = receiptOutcome(r, j);
       await this.publish(r, r.finalStatus || result.commitStatus, r.state === result.receiptState ? result.description :

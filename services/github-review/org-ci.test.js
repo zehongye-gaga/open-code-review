@@ -38,15 +38,18 @@ test("receipt persists before pending publication; duplicates retain route", asy
   const { ci, s, p, statuses } = fixture(t);
   const original = s.github.rest.repos.createCommitStatus;
   s.github.rest.repos.createCommitStatus = async (args) => { assert.ok(JSON.parse(fs.readFileSync(s.state.file)).ciReceipts[p.request_id]); await original(args); };
-  const r = await ci.submit(p, "direct"); assert.equal(r.durable, true); assert.equal(r.commit_status, "pending");
+  const r = await ci.submit(p, "direct"); assert.equal(r.durable, true); assert.equal(r.commit_status, null);
+  assert.equal(statuses.length, 0); await ci.watchdog();
   await ci.submit(p, "agent"); assert.equal(ci.receipts[p.request_id].route, "direct"); assert.equal(statuses.length, 1);
 });
 test("pending status failure is retried without creating another receipt", async (t) => {
   const { ci, s, p } = fixture(t); const original = s.github.rest.repos.createCommitStatus;
   s.github.rest.repos.createCommitStatus = async () => { throw new Error("offline"); };
-  await assert.rejects(ci.submit(p, "direct")); assert.equal(ci.view(ci.receipts[p.request_id]).status_published, false);
+  assert.equal((await ci.submit(p, "direct")).durable, true);
+  await ci.watchdog(); assert.equal(ci.view(ci.receipts[p.request_id]).status_published, false);
   s.github.rest.repos.createCommitStatus = original;
-  assert.equal((await ci.submit(p, "direct")).status_published, true); assert.equal(Object.keys(ci.receipts).length, 1);
+  assert.equal((await ci.submit(p, "direct")).status_published, false);
+  await ci.watchdog(); assert.equal(ci.view(ci.receipts[p.request_id]).status_published, true); assert.equal(Object.keys(ci.receipts).length, 1);
 });
 test("concurrent dispatch and retries create one job with medium floor", async (t) => {
   const { ci, s, p } = fixture(t); await ci.submit(p, "direct");
@@ -121,7 +124,7 @@ test("HTTP gateway enforces both credentials and supports submit/query/track", a
   assert.equal((await send("ci_submit", { ...p, route: "direct" }, { "x-ocr-ci-token": "wrong" })).status, 401);
   assert.equal((await send("ci_submit", { ...p, route: "direct" }, { authorization: "wrong" })).status, 401);
   const submitted = await send("ci_submit", { ...p, route: "direct" }); assert.equal(submitted.status, 202);
-  const ack = await submitted.json(); assert.equal(ack.status_published, true);
+  const ack = await submitted.json(); assert.equal(ack.status_published, false);
   assert.equal((await send("ci_tick", ack)).status, 200);
   await service.githubEvents.tick();
   assert.equal(service.state.data.jobs.length, 1);
@@ -152,8 +155,9 @@ test("Agent-route receipt immediately adopts a completed legacy task without dis
   job.state = "complete"; job.progress = { complete: true }; job.result = { findings: 1, blocking: 1 };
   ci.agentDispatch = async () => { assert.fail("must not call Agent for existing snapshot"); };
   const ack = await ci.submit(p, "agent");
-  assert.equal(ack.job_id, job.id); assert.equal(ack.terminal, true);
-  assert.equal(ack.commit_status, "failure"); assert.equal(statuses.length, 1);
+  assert.equal(ack.job_id, job.id); assert.equal(ack.terminal, false);
+  assert.equal(ack.commit_status, null); assert.equal(statuses.length, 0);
+  await ci.watchdog(); assert.equal(ci.view(ci.receipts[p.request_id]).commit_status, "failure");
   assert.equal(ci.receipts[p.request_id].dispatchMethod, "reused_existing");
   assert.equal(ci.receipts[p.request_id].fallbackReason, undefined);
   await ci.dispatch(ci.receipts[p.request_id]); assert.equal(s.state.data.jobs.length, 1);
@@ -198,6 +202,7 @@ test("reopened closed PR reaccepts the same receipt and dispatches only once", a
   pr.state = "open";
   await Promise.all([ci.submit(p, "direct"), ci.submit(p, "direct")]);
   const r = ci.receipts[p.request_id]; assert.equal(r.state, "accepted"); assert.equal(r.reopenHistory.length, 1);
+  await ci.watchdog();
   assert.equal(statuses.at(-1).state, "pending");
   await ci.dispatch(r); assert.equal(s.state.data.jobs.length, 1);
 });
@@ -338,6 +343,8 @@ test("real Policy Python client accepts backend HTTP admission and all terminal 
  const client=process.env.OCR_POLICY_CLIENT || path.resolve(__dirname,'../../../github-policy-public/ocr/ci_client.py');
  if(!fs.existsSync(client)){t.skip('Set OCR_POLICY_CLIENT to run the cross-repository contract test');return;}
  const {ci,s,p,pr}=fixture(t);const dir=path.dirname(s.state.file);
+ const publish = s.github.rest.repos.createCommitStatus; let statusCalls = 0;
+ s.github.rest.repos.createCommitStatus = async () => { statusCalls++; throw Error('GitHub status offline'); };
  const eventFile=path.join(dir,'event.json');fs.writeFileSync(eventFile,JSON.stringify({pull_request:pr}));
  const gateway=require('node:http').createServer(async(req,res)=>{
   try {let body='';for await(const chunk of req)body+=chunk;
@@ -352,7 +359,8 @@ test("real Policy Python client accepts backend HTTP admission and all terminal 
   const child=require('node:child_process').spawn('python3',['-c',script,client,`http://127.0.0.1:${gateway.address().port}/`],{env:{...process.env,GITHUB_EVENT_NAME:'pull_request_target',GITHUB_REPOSITORY:p.repository,GITHUB_EVENT_PATH:eventFile,OCR_CI_TOKEN:'fixture'}});
   let output='';child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>output+=b);child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(Error(output)));
  });
- assert.equal(s.state.data.jobs.length,0);
+ assert.equal(s.state.data.jobs.length,0); assert.equal(statusCalls,0);
+ s.github.rest.repos.createCommitStatus = publish;
  s.githubEvents=new(require('./events.js').GitHubEvents)(s);await s.githubEvents.tick();assert.equal(s.state.data.jobs.length,1);
  const j=s.state.data.jobs[0],r=ci.receipts[p.request_id],rows=[];
  for(const kind of ['complete','blocked','skipped','execution_failed','publication_failed','cancelled','superseded']){
@@ -429,4 +437,61 @@ test("CI transient dispatch failures back off through eight attempts", async t =
     if(n<8) assert.ok(r.nextDispatchAt>=before+(n>=5?240000:30000*2**(n-1)));
   }
   assert.equal(r.reason,"dispatch_retries_exhausted");
+});
+
+test("durable ACK and duplicate do not wait for a hung background status request", async t => {
+  for (const failed of [false, true]) {
+  const { ci, s, p } = fixture(t);
+  let release, started;
+  const entered = new Promise(resolve => { started = resolve; });
+  const blocked = new Promise(resolve => { release = resolve; });
+  s.github.rest.repos.createCommitStatus = async () => { started(); await blocked; };
+  const ack = await ci.submit(p, "direct");
+  assert.equal(ack.acceptance, "accepted"); assert.equal(ack.status_published, false);
+  if (failed) ci.stop(ci.receipts[p.request_id], "failed", "dispatch_retries_exhausted");
+  const watchdog = ci.watchdog(); await entered;
+  try {
+    s.github.rest.pulls.get = async () => { throw new Error("GitHub offline"); };
+    const duplicate = await Promise.race([
+      ci.submit(p, "agent"),
+      new Promise((_, reject) => { const timer = setTimeout(() => reject(Error("ACK blocked by watchdog")), 500); timer.unref(); }),
+    ]);
+    assert.equal(duplicate.task_id, ack.task_id); assert.equal(duplicate.durable, true);
+    assert.equal(ci.receipts[p.request_id].route, "direct");
+  } finally { release(); await watchdog; }
+  }
+});
+
+test("failed persistence never returns a durable ACK, including repeated admission", async t => {
+  for (const duplicate of [false, true]) {
+    const { ci, s, p } = fixture(t);
+    if (duplicate) await ci.submit(p, "direct");
+    s.state.save = () => { throw Object.assign(Error("disk full"), { persistence: true }); };
+    await assert.rejects(ci.submit(p, "direct"), { persistence: true });
+    await assert.rejects(ci.submit(p, "direct"), { persistence: true });
+  }
+});
+
+test("restart retries unpublished receipt without rerunning or duplicating its job", async t => {
+  const { ci, s, p, statuses } = fixture(t);
+  const original = s.github.rest.repos.createCommitStatus;
+  s.github.rest.repos.createCommitStatus = async () => { throw Error("status unavailable"); };
+  await ci.submit(p, "direct"); await ci.watchdog();
+  await ci.dispatch(ci.receipts[p.request_id]);
+  assert.equal(s.state.data.jobs.length, 1);
+  const id = ci.receipts[p.request_id].jobId;
+  s.state = new State(path.dirname(s.state.file)); const restarted = new OrgCI(s); s.orgCI = restarted;
+  const ack = await restarted.submit(p, "direct"); assert.equal(ack.job_id, id);
+  s.github.rest.repos.createCommitStatus = original;
+  await restarted.watchdog(); await restarted.dispatch(restarted.receipts[p.request_id]);
+  assert.equal(statuses.at(-1).state, "pending"); assert.equal(s.state.data.jobs.length, 1);
+});
+
+test("first admission still rejects invalid PR snapshots before storing a receipt", async t => {
+  const { ci, s, p, pr } = fixture(t); pr.head.sha = "c".repeat(40);
+  await assert.rejects(ci.submit(p, "direct"), { code: "PR_SNAPSHOT_CHANGED" });
+  assert.equal(Object.keys(ci.receipts).length, 0);
+  s.github.rest.pulls.get = async () => { throw Error("GitHub unavailable"); };
+  await assert.rejects(ci.submit(p, "direct"), /GitHub unavailable/);
+  assert.equal(Object.keys(ci.receipts).length, 0);
 });
