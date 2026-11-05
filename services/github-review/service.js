@@ -43,6 +43,7 @@ function configuration(input) {
   if (typeof config.bootstrapExisting !== "boolean") throw new Error("bootstrapExisting must be boolean");
   if (!Number.isSafeInteger(config.port) || config.port < 0 || config.port > 65535) throw new Error("Invalid port");
   validateInfrastructure(config);
+  require("./admission-reconciliation.js").validateConfiguration(config);
   return config;
 }
 
@@ -54,6 +55,7 @@ class ReviewService {
     this.log = (event, details = {}) => log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
     this.prepare = prepare; this.run = run; this.publish = publish;
     this.commitStatusWrites = new Map();
+    this.admissionReconciliation = new (require("./admission-reconciliation.js").AdmissionReconciliation)(this);
     this.workers = new Map(); this.stopping = false; this.lastPoll = null; this.pollError = null;
     fs.mkdirSync(path.join(this.config.stateDirectory, "runs"), { recursive: true, mode: 0o700 });
   }
@@ -140,6 +142,7 @@ class ReviewService {
 
   async poll() {
     if (this.config.infrastructure?.externalDispatch) {
+      await this.admissionReconciliation.tick();
       this.lastPoll = new Date().toISOString(); this.pollError = null;
       await this.flushStatuses(); return;
     }
