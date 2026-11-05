@@ -1,0 +1,23 @@
+{
+  "listen": "127.0.0.1",
+  "port": 8790,
+  "stateDirectory": "/var/lib/ocr-gitea",
+  "stateStorage": "sqlite",
+  "apiTokenFile": "/etc/ocr-gitea/operator.token",
+  "gitTokenFile": "/etc/ocr-gitea/gitea.token",
+  "gitea": {
+    "origin": "https://gitea.example.com",
+    "tokenFile": "/etc/ocr-gitea/gitea.token",
+    "webhookSecretFile": "/etc/ocr-gitea/webhook.secret"
+  },
+  "repositories": [{"name": "organization/repository", "baseBranches": ["main"]}],
+  "binary": "/usr/local/bin/ocr",
+  "provider": "openai-responses",
+  "model": "gpt-6-astra",
+  "budget": 0,
+  "pollSeconds": 60,
+  "bootstrapExisting": true,
+  "prConcurrency": 1,
+  "timeoutSeconds": 3600,
+  "statusContext": "ocr-review"
+}

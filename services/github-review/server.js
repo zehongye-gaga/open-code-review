@@ -17,12 +17,14 @@ function equal(a, b) {
 
 function createServer(service, { apiToken, webhookSecret } = {}) {
   const infrastructure = require("./transport.js").createInfrastructureHandler(service, apiToken);
+  const giteaWebhook = require("./gitea-webhook.js").createGiteaWebhook(service);
   return http.createServer(async (req, res) => {
     const send = (status, data) => {
       res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify(data));
     };
     try {
+      if (await giteaWebhook(req, res)) return;
       if (await infrastructure(req, res)) return;
       if (req.url === "/healthz" && req.method === "GET") {
         const degraded = service.pollError || service.statusError || !service.lastPoll;
@@ -85,7 +87,7 @@ async function main() {
   const configFile = process.argv[2] || process.env.OCR_SERVICE_CONFIG;
   if (!configFile) throw new Error("Usage: node services/github-review/server.js /path/to/config.json");
   const config = JSON.parse(fs.readFileSync(configFile, "utf8"));
-  const github = createGitHub({ githubAuth: config.githubAuth, tokenFile: config.githubTokenFile, token: process.env.OCR_GITHUB_TOKEN });
+  const github = config.gitea ? require("./gitea.js").createGitea(config.gitea) : createGitHub({ githubAuth: config.githubAuth, tokenFile: config.githubTokenFile, token: process.env.OCR_GITHUB_TOKEN });
   await github.getToken();
   const service = new ReviewService({ config, github });
   const secret = (file, value) => file ? fs.readFileSync(file, "utf8").trim() : value;

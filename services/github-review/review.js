@@ -57,14 +57,14 @@ async function prepareReview({ github, context, core, prNumber, cwd = process.cw
   const gitEnv = { ...childEnvironment(), GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
   if (token) {
     gitEnv.GIT_CONFIG_COUNT = "1";
-    gitEnv.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
+    gitEnv.GIT_CONFIG_KEY_0 = `http.${github.gitOrigin || "https://github.com"}/.extraheader`;
     gitEnv.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
   }
   const git = async (args) => (await exec("git", ["-c", "credential.helper=", "-c", "core.hooksPath=/dev/null",
     "-c", "core.fsmonitor=false", ...args], { cwd, env: gitEnv, timeout: gitTimeoutMs, signal })).stdout.trim();
   if (!fs.existsSync(path.join(cwd, ".git"))) {
     await git(["init"]);
-    await git(["remote", "add", "origin", `https://github.com/${context.repo.owner}/${context.repo.repo}.git`]);
+    await git(["remote", "add", "origin", `${github.gitOrigin || "https://github.com"}/${context.repo.owner}/${context.repo.repo}.git`]);
   }
   if (snapshot) {
     if (!SHA.test(metadata.base) || !SHA.test(metadata.head)) throw new Error("Invalid saved snapshot");
