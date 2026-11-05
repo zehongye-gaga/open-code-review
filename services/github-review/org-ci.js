@@ -9,6 +9,12 @@ const { fail, resolveOptions } = require("./options.js");
 const { dispatchAgent } = require("./agent-dispatch.js");
 const { jobOutcome, receiptOutcome, receiptTerminal: terminal } = require("./outcome.js");
 const keys = ["base_ref", "base_sha", "head_sha", "pull_number", "repository"];
+function requestId(value) {
+  const ordered = Object.fromEntries(keys.map(k => [k, value[k]]));
+  // Match Python json.dumps(..., ensure_ascii=True), including surrogate pairs.
+  const serialized = JSON.stringify(ordered).replace(/[\u007f-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+  return "ocr-ci-" + crypto.createHash("sha256").update(serialized).digest("hex");
+}
 function identity(input) {
   if (!input || input.schema !== "ocr-ci/v1" || typeof input.repository !== "string" ||
       !/^lexmount\/[a-z0-9_.-]+$/.test(input.repository) ||
@@ -16,9 +22,7 @@ function identity(input) {
       !/^[a-f0-9]{40}$/.test(input.head_sha) || !/^[a-f0-9]{40}$/.test(input.base_sha) ||
       typeof input.base_ref !== "string" || !input.base_ref || input.base_ref.length > 1024) fail("Invalid CI coordinates");
   const value = Object.fromEntries(keys.map((k) => [k, input[k]]));
-  // Match Python json.dumps(..., ensure_ascii=True), including surrogate pairs.
-  const serialized = JSON.stringify(value).replace(/[\u007f-\uffff]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
-  const id = "ocr-ci-" + crypto.createHash("sha256").update(serialized).digest("hex");
+  const id = requestId(value);
   if (input.request_id !== id) fail("CI request ID does not match snapshot", 409);
   return { schema: "ocr-ci/v1", request_id: id, ...value };
 }
@@ -315,4 +319,4 @@ class OrgCI {
     } finally { this.watching = false; }
   }
 }
-module.exports = { OrgCI, identity };
+module.exports = { OrgCI, identity, requestId };
