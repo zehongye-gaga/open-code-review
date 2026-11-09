@@ -169,3 +169,38 @@ test("a refused reopen does not consume the recovery cap or starve another PR", 
   assert.equal(Object.values(s.orgCI.receipts).find(r => r.pull_number === 2).state, "accepted");
   advance(); assert.equal((await scan.tick()).admitted, 0);
 });
+
+
+test("initial baseline skips exact historical snapshots but recovers new and changed PRs", async t => {
+  const { s, current, pr, advance } = fixture(t);
+  const id = snapshot("lexmount/example", pr).request_id;
+  s.config.admissionReconciliation.initialBaseline = [id];
+  const scan = new AdmissionReconciliation(s, () => current.now);
+  await scan.tick(); advance(); await scan.tick();
+  assert.equal(s.state.data.admissionSnapshots["lexmount/example#1"].status, "baseline");
+  assert.equal(Object.keys(s.orgCI.receipts).length, 0);
+  const restarted = new AdmissionReconciliation(s, () => current.now);
+  advance(); await restarted.tick();
+  assert.equal(Object.keys(s.orgCI.receipts).length, 0);
+  current.pulls = [{ ...pr, number: 2 }, { ...pr, base: { ...pr.base, ref: "main" } }];
+  s.github.rest.pulls.get = async args => ({ data: current.pulls.find(p => p.number === args.pull_number) });
+  advance(); await restarted.tick();
+  assert.equal(Object.keys(s.orgCI.receipts).length, 0);
+  advance(); await restarted.tick();
+  assert.equal(Object.keys(s.orgCI.receipts).length, 2);
+});
+
+test("initial baseline validates canonical IDs and cannot suppress a changed head or base", async t => {
+  for (const field of ["head", "base"]) {
+    const { s, config, current, pr, advance } = fixture(t);
+    const id = snapshot("lexmount/example", pr).request_id;
+    for (const initialBaseline of [null, {}, ["invalid"], [null]]) {
+      assert.throws(() => configuration({ ...config, admissionReconciliation: { initialBaseline } }), /initialBaseline/);
+    }
+    s.config.admissionReconciliation.initialBaseline = [id];
+    const scan = new AdmissionReconciliation(s, () => current.now);
+    await scan.tick(); pr[field].sha = "c".repeat(40);
+    advance(); await scan.tick(); advance(); await scan.tick();
+    assert.equal(Object.keys(s.orgCI.receipts).length, 1);
+  }
+});

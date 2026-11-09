@@ -40,3 +40,9 @@ Logs: `ci_reconciliation_scan`, `ci_reconciliation_accepted`, and `ci_reconcilia
 This restores **review admission**, not a failed GitHub Actions workflow run. A failed required workflow remains failed until separately retried or the ruleset uses the backend-owned admission status. Existing oncall notifications only cover terminal review failures; scanner/network failure notification is a separate alerting concern and is not silently enabled here.
 
 Validate in `observe` mode on the test repository, then enable `repair` there and exercise lost ingress, delayed delivery, retarget, reopen, restart, and rate limiting before production rollout. Do not change the running production config merely to install this code.
+
+## First activation without historical backfill
+
+`initialBaseline` is an optional array of canonical `ocr-ci-<sha256>` request IDs captured by a read-only scan immediately before activation. Include all existing eligible open PR snapshots, including already owned snapshots. Capture every configured repository successfully before enabling repair. Baseline IDs are configuration, retained across restarts; they do not create synthetic receipts or successful statuses.
+
+An unowned exact baseline snapshot is recorded as `baseline` and is never automatically admitted. A new PR, changed head, changed base SHA, or changed target branch has a different identity and follows the normal grace and recovery rules. The baseline is immutable: do not regenerate it during routine deployment or restart, because doing so would suppress newly missed events. Delayed webhook and Policy ingress remain active and may legitimately admit baseline snapshots. An unchanged historical PR reopening remains excluded by this opt-in baseline; an actual new snapshot is required for automatic recovery.
