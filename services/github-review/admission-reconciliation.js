@@ -13,6 +13,10 @@ function validateConfiguration(config) {
   for (const [key, min, max] of [["intervalSeconds", 300, 86400], ["graceSeconds", 60, 86400], ["maxAdmissionsPerScan", 1, 100]]) {
     if (!Number.isSafeInteger(c[key]) || c[key] < min || c[key] > max) throw Error(`Invalid admissionReconciliation.${key}`);
   }
+  if (c.initialBaseline !== undefined && (!Array.isArray(c.initialBaseline) || c.initialBaseline.length > 10000 ||
+      c.initialBaseline.some(id => typeof id !== "string" || !/^ocr-ci-[a-f0-9]{64}$/.test(id)))) {
+    throw Error("Invalid admissionReconciliation initialBaseline");
+  }
   if (c.enabled && (config.gitea || !config.infrastructure?.enabled || !config.infrastructure.externalDispatch || !config.infrastructure.orgCI?.enabled)) {
     throw Error("Admission reconciliation requires the GitHub external-dispatch CI control plane");
   }
@@ -30,7 +34,10 @@ function snapshot(repository, pr) {
   return identity({ ...value, request_id: requestId(value) });
 }
 class AdmissionReconciliation {
-  constructor(service, now = Date.now) { this.s = service; this.now = now; this.running = false; }
+  constructor(service, now = Date.now) {
+    this.s = service; this.now = now; this.running = false;
+    this.initialBaseline = new Set(settings(service.config).initialBaseline || []);
+  }
   owner(p) {
     const d = this.s.state.data;
     const receipt = d.ciReceipts?.[p.request_id];
@@ -79,6 +86,9 @@ class AdmissionReconciliation {
             if (row?.request_id !== p.request_id) row = snapshots[key] = { ...p, firstSeenAt: now };
             row.lastSeenAt = now; row.owner = this.owner(p); delete row.error;
             if (row.owner) { row.status = "owned"; delete row.missingSinceAt; continue; }
+            if (this.initialBaseline.has(p.request_id)) {
+              row.status = "baseline"; delete row.missingSinceAt; continue;
+            }
             row.missingSinceAt ??= now;
             summary.missing++;
             if (now - row.missingSinceAt < c.graceSeconds * 1000) { row.status = "grace"; continue; }
