@@ -35,7 +35,7 @@ class GitHubEvents {
       state === "error" ? "OCR dispatch failed; review did not start" : "OCR dispatch skipped; PR snapshot is no longer eligible";
     const hasOwner = () => this.service.state.data.jobs.some((job) => job.repository === event.repository &&
       job.head === event.head && !job.settings?.preview) ||
-      Object.values(this.service.state.data.ciReceipts || {}).some((receipt) => receipt.repository === event.repository && receipt.head_sha === event.head);
+      Object.values(this.service.state.data.ciReceipts || {}).some((receipt) => receipt.repository === event.repository && receipt.head_sha === event.head && receipt.admissionVerified !== false);
     const write = this.service.writeCommitStatus(event.repository, event.head, state, description, undefined, () => {
       if (hasOwner() || event.state === "dispatched") return false;
       const newer = (this.service.state.data.deliveries || []).findLast((entry) => entry.admitted && entry.repository === event.repository && entry.head === event.head);
@@ -151,7 +151,6 @@ class GitHubEvents {
     record = events.at(-1);
     if (args.fallback) this.fallback(record, "ingress_ack_missing");
     this.service.state.save();
-    await this.publishAdmission(record);
     return { ...view(record), accepted: true };
   }
   status(args, actor) {

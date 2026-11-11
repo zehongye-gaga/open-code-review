@@ -21,6 +21,8 @@
     "repository_access_failed": "无法访问 GitHub 仓库",
     "dispatch_configuration_or_access_error": "调度配置或访问权限错误",
     "dispatch_retries_exhausted": "调度重试次数已用尽",
+    "admission_retries_exhausted": "PR 快照核验重试次数已用尽",
+    "admission_deadline_exceeded": "任务受理核验超过总等待时限",
     "review_incomplete_or_failed": "审查未完成或执行失败",
     "fetch failed": "网络请求失败，需结合任务日志确认具体阶段",
     "repository_not_allowed": "仓库未纳入审查准入范围",

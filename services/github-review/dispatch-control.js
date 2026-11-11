@@ -21,8 +21,9 @@ async function dispatchTick(service, events = service.githubEvents) {
   }
   if (service.config.infrastructure?.orgCI?.enabled) {
     for (const receipt of Object.values(service.orgCI?.receipts || {})) {
-      if (!receipt.jobId && !receiptTerminal.has(receipt.state) && receipt.nextDispatchAt <= Date.now()) candidates.push({
-        at: receipt.createdAt, id: receipt.request_id, key: key(receipt.repository, receipt.pull_number),
+      const pending = receipt.pendingAdmission;
+      if (pending ? pending.nextAt <= Date.now() : !receipt.jobId && !receiptTerminal.has(receipt.state) && receipt.nextDispatchAt <= Date.now()) candidates.push({
+        at: pending?.requestedAt || receipt.createdAt, id: receipt.request_id, key: key(receipt.repository, receipt.pull_number),
         run: async (k) => { try { await service.orgCI.dispatch(receipt); }
           finally { events.activeDispatches.delete(k); } } });
     }

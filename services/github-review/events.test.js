@@ -30,6 +30,65 @@ function fixture(t, repository = "org/repo") {
   };
   return { s, events, actor, pull, envelope, dir, calls: () => getCalls, fail: () => { failNext = true; } };
 }
+async function serveEvents(h) {
+  h.s.githubEvents = h.events;
+  const server = require("./server.js").createServer(h.s);
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  return {
+    post: (payload) => fetch(`http://127.0.0.1:${server.address().port}/v2/github_event`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: "Bearer test-secret" },
+      body: JSON.stringify(payload), signal: AbortSignal.timeout(2000),
+    }),
+    close: async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); },
+  };
+}
+test("HTTP ACK confirms committed receipt before any GitHub status request", { timeout: 5000 }, async t => {
+  const h = fixture(t), blocked = deferred(); let writes = 0;
+  h.s.github.rest.repos.createCommitStatus = async () => { writes++; await blocked.promise; };
+  const http = await serveEvents(h), args = h.envelope();
+  try {
+    const response = await http.post(args), body = await response.json();
+    assert.equal(response.status, 202); assert.equal(body.accepted, true); assert.equal(body.delivery_id, args.delivery_id);
+    const saved = require("./state-sqlite.js").readState(path.join(h.dir, "state.db")).data;
+    assert.equal(saved.deliveries[0].id, args.delivery_id); assert.equal(saved.deliveries[0].state, "pending");
+    assert.equal(writes, 0); assert.equal(h.calls(), 0); assert.equal(saved.jobs.length, 0);
+    assert.equal(require("./n8n-workflow.js").normalizeAcknowledgement(
+      { statusCode: response.status, body }, { envelope: args }).acknowledged, true);
+    const invalid = await http.post({ ...args, signature: "sha256=" + "0".repeat(64) });
+    assert.equal(invalid.status, 401); await invalid.json();
+    assert.equal(h.s.state.data.deliveries.length, 1);
+  } finally { blocked.resolve(); await http.close(); }
+});
+test("HTTP ACK stays independent of a blocked background status write and request replay", { timeout: 5000 }, async t => {
+  const h = fixture(t), blocked = deferred(), entered = deferred(); let writes = 0, publishing, timer;
+  h.s.github.rest.repos.createCommitStatus = async () => { writes++; entered.resolve(); await blocked.promise; };
+  const args = h.envelope(); await h.events.accept(args, h.actor);
+  h.s.state.data.deliveries[0].nextAt = Date.now() + 60000; h.s.state.save();
+  const http = await serveEvents(h);
+  try {
+    publishing = h.events.tick();
+    await Promise.race([entered.promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Error("Background publication did not start")), 2000);
+    })]);
+    clearTimeout(timer);
+    const replay = await http.post(args), replayBody = await replay.json();
+    assert.equal(replay.status, 202); assert.equal(replayBody.deduplicated, true);
+    const fresh = await http.post(h.envelope("edited", "delivery-2")), freshBody = await fresh.json();
+    assert.equal(fresh.status, 202); assert.equal(freshBody.accepted, true);
+    assert.equal(writes, 1); assert.equal(h.calls(), 0);
+    const saved = require("./state-sqlite.js").readState(path.join(h.dir, "state.db")).data;
+    assert.deepEqual(saved.deliveries.map(event => event.id), [args.delivery_id, "delivery-2"]);
+    assert.equal(saved.jobs.length, 0);
+  } finally { clearTimeout(timer); blocked.resolve(); await publishing; await http.close(); }
+});
+test("ACK is rejected if the receipt transaction cannot commit", async t => {
+  const h = fixture(t); let writes = 0;
+  h.s.github.rest.repos.createCommitStatus = async () => { writes++; };
+  h.s.state.database.db.exec("CREATE TRIGGER reject_receipt BEFORE INSERT ON state_changes BEGIN SELECT RAISE(ABORT,'storage unavailable'); END");
+  await assert.rejects(h.events.accept(h.envelope(), h.actor), error => error.persistence === true && /storage unavailable/.test(error.message));
+  const saved = require("./state-sqlite.js").readState(path.join(h.dir, "state.db")).data;
+  assert.equal((saved.deliveries || []).length, 0); assert.equal(writes, 0);
+});
 test("signed event is durably acknowledged before GitHub calls and dispatches exactly once", async (t) => {
   const h = fixture(t), args = h.envelope();
   assert.equal((await h.events.accept(args, h.actor)).state, "pending");
@@ -405,7 +464,7 @@ test("a failed PR releases its dispatch slot without failing other PRs", async (
   assert.equal(h.events.activeDispatches.size, 0);
 });
 
-test("admission publishes pending after durable acceptance and before Agent dispatch", async (t) => {
+test("admission pending is published separately from the durable acknowledgement", async (t) => {
   const h = fixture(t), statuses = [];
   h.s.github.rest.repos.createCommitStatus = async (status) => {
     assert.equal(require("./state-sqlite.js").readState(path.join(h.dir, "state.db")).data.deliveries.length, 1);
@@ -413,6 +472,8 @@ test("admission publishes pending after durable acceptance and before Agent disp
     statuses.push(status);
   };
   await h.events.accept(h.envelope(), h.actor);
+  assert.equal(statuses.length, 0);
+  await h.events.publishAdmission(h.s.state.data.deliveries[0]);
   assert.equal(statuses.length, 1); assert.equal(statuses[0].state, "pending");
   assert.equal(statuses[0].description, "OCR accepted; waiting for review dispatch");
   await h.events.accept(h.envelope(), h.actor);
@@ -423,6 +484,7 @@ test("draft, closed and out-of-scope branches do not publish admission pending",
     const h = fixture(t), statuses = [];
     h.s.github.rest.repos.createCommitStatus = async (status) => statuses.push(status);
     mutation(h.pull); await h.events.accept(h.envelope(), h.actor);
+    await h.events.publishAdmission(h.s.state.data.deliveries[0]);
     assert.equal(statuses.length, 0);
   }
 });
@@ -431,10 +493,36 @@ test("admission status API failure is retried without losing the durable event",
   h.s.github.rest.repos.createCommitStatus = async () => { if (fail) throw new Error("GitHub unavailable"); count++; };
   await h.events.accept(h.envelope(), h.actor);
   const e = h.s.state.data.deliveries[0];
+  await h.events.publishAdmission(e);
   assert.equal(e.state, "pending"); assert.equal(h.s.state.data.jobs.length, 0);
   assert.match(e.statusError, /unavailable/);
   fail = false; e.statusRetryAt = 0; await h.events.publishAdmission(e);
   assert.equal(count, 1); assert.equal(e.admissionPublished, "pending");
+});
+test("background publication retry survives restart and recovered delivery dispatches only once", async t => {
+  const h = fixture(t), args = h.envelope(); let fail = true, attempts = 0;
+  h.s.github.rest.repos.createCommitStatus = async () => { attempts++; if (fail) throw new Error("GitHub unavailable"); };
+  const receipt = await h.events.accept(args, h.actor);
+  assert.equal(receipt.accepted, true); assert.equal(attempts, 0);
+  const original = h.s.state.data.deliveries[0]; original.nextAt = Date.now() + 60000; h.s.state.save();
+  await h.events.tick();
+  const saved = require("./state-sqlite.js").readState(path.join(h.dir, "state.db")).data.deliveries[0];
+  assert.match(saved.statusError, /unavailable/); assert.ok(saved.statusRetryAt > Date.now());
+  assert.equal(attempts, 1);
+  const service = new ReviewService({ config: h.s.config, github: h.s.github, log() {} }), events = new GitHubEvents(service);
+  try {
+    fail = false; await events.tick(); assert.equal(attempts, 1);
+    const event = service.state.data.deliveries[0];
+    assert.equal(event.statusRetryAt, saved.statusRetryAt);
+    event.statusRetryAt = 0; service.state.save(); await events.tick();
+    assert.equal(attempts, 2); assert.equal(event.admissionPublished, "pending");
+    assert.equal(event.statusError, undefined); assert.equal(event.statusRetryAt, undefined);
+    assert.equal(require("./state-sqlite.js").readState(path.join(h.dir, "state.db")).data.deliveries[0].admissionPublished, "pending");
+    event.nextAt = 0; await events.tick();
+    assert.equal(service.state.data.jobs.length, 1); assert.equal(event.state, "dispatched");
+    assert.equal((await events.accept(args, h.actor)).deduplicated, true);
+    await events.tick(); assert.equal(service.state.data.jobs.length, 1);
+  } finally { service.state.database.close(); }
 });
 test("completed tasks and Policy receipts own the status instead of duplicate App events", async (t) => {
   const h = fixture(t), statuses = [];
@@ -442,10 +530,12 @@ test("completed tasks and Policy receipts own the status instead of duplicate Ap
   h.s.state.data.jobs[0].state = "complete";
   h.s.github.rest.repos.createCommitStatus = async (status) => statuses.push(status);
   await h.events.accept(h.envelope("edited", "duplicate-head"), h.actor);
+  await h.events.publishAdmission(h.s.state.data.deliveries.at(-1));
   assert.equal(statuses.length, 0);
   const other = fixture(t); other.s.state.data.ciReceipts = { test: { repository: "org/repo", head_sha: other.pull.head.sha } };
   other.s.github.rest.repos.createCommitStatus = async (status) => statuses.push(status);
   await other.events.accept(other.envelope(), other.actor);
+  await other.events.publishAdmission(other.s.state.data.deliveries[0]);
   assert.equal(statuses.length, 0);
 });
 test("in-flight admission pending cannot overwrite a later final job status", async (t) => {
@@ -454,9 +544,10 @@ test("in-flight admission pending cannot overwrite a later final job status", as
     if (status.state === "pending") { entered.resolve(); await gate.promise; }
     statuses.push(status.state);
   };
-  const acceptance = h.events.accept(h.envelope(), h.actor); await entered.promise;
+  await h.events.accept(h.envelope(), h.actor);
+  const publication = h.events.publishAdmission(h.s.state.data.deliveries[0]); await entered.promise;
   const final = h.s.status({repository:"org/repo",head:h.pull.head.sha}, "success", "Review complete");
-  gate.resolve(); await Promise.all([acceptance, final]);
+  gate.resolve(); await Promise.all([publication, final]);
   assert.deepEqual(statuses, ["pending", "success"]);
 });
 test("dispatch failures and skipped snapshots settle their early pending status", async (t) => {
@@ -464,9 +555,10 @@ test("dispatch failures and skipped snapshots settle their early pending status"
     const h = fixture(t), statuses = [];
     h.s.github.rest.repos.createCommitStatus = async (status) => statuses.push(status.state);
     await h.events.accept(h.envelope(), h.actor);
+    await h.events.publishAdmission(h.s.state.data.deliveries[0]);
     if (expected === "error") h.s.github.rest.pulls.get = async () => { throw Object.assign(new Error("Denied"), {status:403}); };
     else h.pull.draft = true;
-    await h.events.tick();
+    await h.events.tick(); await h.events.tick();
     assert.deepEqual(statuses, ["pending", expected]);
     assert.equal(h.s.state.data.jobs.length, 0);
   }

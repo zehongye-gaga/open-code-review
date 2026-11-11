@@ -41,7 +41,7 @@ class AdmissionReconciliation {
   owner(p) {
     const d = this.s.state.data;
     const receipt = d.ciReceipts?.[p.request_id];
-    if (receipt) return receipt.state === "superseded" && ["pr_closed", "pr_changed_or_closed"].includes(receipt.reason) ? null : "receipt";
+    if (receipt) return !receipt.pendingAdmission && receipt.state === "superseded" && ["pr_closed", "pr_changed_or_closed"].includes(receipt.reason) ? null : "receipt";
     if (d.jobs.some(j => j.repository === p.repository && j.number === p.pull_number && j.head === p.head_sha &&
         j.base === p.base_sha && j.baseRef === p.base_ref && !j.settings?.preview && !["cancelled", "superseded"].includes(j.state))) return "job";
     if ((d.deliveries || []).some(e => e.repository === p.repository && e.number === p.pull_number &&
@@ -95,16 +95,17 @@ class AdmissionReconciliation {
             if (now - row.missingSinceAt < c.graceSeconds * 1000) { row.status = "grace"; continue; }
             row.status = "missing";
             if (c.mode === "observe" || summary.admitted >= c.maxAdmissionsPerScan) continue;
-            // A second authenticated PR read in submit rejects stale scan results.
+            // The backend verifies this frozen snapshot before dispatching it.
             try {
               const ack = await this.s.orgCI.submit(p, "agent");
               const receipt = this.s.orgCI.receipts[p.request_id];
-              if (receipt.state === "superseded") {
+              if (receipt.state === "superseded" && !receipt.pendingAdmission) {
                 row.status = "reopen_blocked"; row.taskId = ack.task_id;
                 this.s.state.save(); continue;
               }
               receipt.reconciliation ||= { source: "scheduled_snapshot_scan", at: now };
-              row.status = "recovered"; row.taskId = ack.task_id; row.recoveredAt = now;
+              row.status = receipt.pendingAdmission ? "verification_pending" : "recovered"; row.taskId = ack.task_id; row.acceptedAt = now;
+              if (!receipt.pendingAdmission) row.recoveredAt = now;
               summary.admitted++;
               this.s.state.save();
               this.s.log("ci_reconciliation_accepted", { repository, number: pr.number, head: p.head_sha, request_id: p.request_id });
