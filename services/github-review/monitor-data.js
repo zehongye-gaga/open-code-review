@@ -157,7 +157,7 @@ async function githubPulls(config, request = fetch) {
   const auth = require("./github-auth.js").githubAuth(config, request);
   const pulls = []; let remaining = null;
   for (const repository of config.repositories) {
-    const [owner, name] = repository.name.split("/"); let after = null;
+    const [owner, name] = (repository.githubName || repository.name).split("/"); let after = null;
     for (let page = 0; page < 10; page++) {
       const response = await auth.request("https://api.github.com/graphql", { method: "POST", redirect: "error",
         headers: { "content-type": "application/json", "user-agent": "ocr-review-monitor" },

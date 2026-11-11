@@ -73,6 +73,16 @@ Keep `KillMode=mixed`: Node sends one termination signal to each OCR child so
 it can flush its manifest. Sending signals to the whole control group as well
 would deliver a second signal, which native OCR treats as a forced exit.
 
+For a GitHub repository renamed within the same owner, keep its configured
+`name` as the retained review identity and set `githubName` to its current
+`owner/repository` name. For example, `{ "name": "owner/old-name",
+"githubName": "owner/new-name", "baseBranches": ["main"] }` sends GitHub
+requests to the current name and accepts events and CI receipts under either
+name. History, checkpoints, baseline exclusions and existing native sessions
+keep their original identity. Alias names must be unique across configured
+repositories. This changes only the review service configuration; repository
+settings and webhook configuration on GitHub do not need to change.
+
 ```sh
 systemctl daemon-reload
 systemctl enable --now ocr-review.service

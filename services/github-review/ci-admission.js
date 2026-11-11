@@ -4,11 +4,13 @@
 const { fail } = require("./options.js");
 const { receiptTerminal, isRepositorySkip } = require("./outcome.js");
 const { dispatchFailure, dispatchRetry } = require("./dispatch-control.js");
+const { sameRepository, sameSnapshot, closedReceipt, receiptOwner, hasNewerReceipt } = require("./repositories.js");
 
 function queueAdmission(ci, normalized, route, retryKey) {
   if (retryKey !== undefined && (typeof retryKey !== "string" || !/^[0-9]+:[0-9]+$/.test(retryKey) || retryKey.length > 80)) fail("Invalid retry key");
   let r = ci.receipts[normalized.request_id];
-  if (!ci.s.repo(normalized.repository)) {
+  const repository = ci.s.repo(normalized.repository);
+  if (!repository) {
     let skipped = false;
     if (!r?.jobId && !(r && isRepositorySkip(r))) {
       r = ci.createReceipt(normalized, route, r);
@@ -21,7 +23,19 @@ function queueAdmission(ci, normalized, route, retryKey) {
   }
   let kind;
   if (!r || isRepositorySkip(r)) {
+    const previous = repository.githubName && Object.values(ci.receipts).map(peer => receiptOwner(ci.s, peer)).find(peer =>
+      peer.repository !== normalized.repository && closedReceipt(peer) && sameSnapshot(ci.s, peer, normalized));
     r = ci.createReceipt(normalized, route, r); r.admissionVerified = false; kind = "new";
+    if (previous) {
+      r.state = previous.state; r.reason = previous.reason; r.jobId = previous.jobId;
+      r.predecessorReceipt = previous.request_id; kind = "reopen";
+    }
+  } else if (r.successorReceipt) {
+    const owner = receiptOwner(ci.s, r);
+    if (owner !== r && !owner.pendingAdmission && closedReceipt(owner)) {
+      r.state = owner.state; r.reason = owner.reason; r.jobId = owner.jobId;
+      r.predecessorReceipt = owner.request_id; delete r.successorReceipt; kind = "reopen";
+    }
   }
   const newKey = retryKey !== undefined && Number(retryKey.split(":")[1]) >= 2 && !(r.retryKeys || []).includes(retryKey);
   const job = r.jobId && ci.s.state.data.jobs.find(candidate => candidate.id === r.jobId);
@@ -31,8 +45,7 @@ function queueAdmission(ci, normalized, route, retryKey) {
     if (failedReopen && reusable && newKey) kind = "reopen";
     else if (r.state === "failed" && !r.jobId && newKey) kind = "retry";
     else if (r.state === "superseded" && reusable && ["pr_closed", "pr_changed_or_closed"].includes(r.reason) &&
-        !Object.values(ci.receipts).some(other => other !== r && other.repository === r.repository &&
-          other.pull_number === r.pull_number && other.sequence > r.sequence && other.admissionVerified !== false)) kind = "reopen";
+        !hasNewerReceipt(ci.s, r)) kind = "reopen";
   }
   if (newKey) { r.retryKeys ||= []; r.retryKeys.push(retryKey); }
   if (kind) {
@@ -77,8 +90,9 @@ async function verifyAdmission(ci, r) {
     r.lastAdmission = { ...pending, state: "verified", finishedAt: Date.now() };
     delete r.pendingAdmission;
     for (const older of Object.values(ci.receipts)) {
-      if (older !== r && older.repository === r.repository && older.pull_number === r.pull_number &&
+      if (older !== r && sameRepository(ci.s, older.repository, r.repository) && older.pull_number === r.pull_number &&
           older.sequence < r.sequence && !receiptTerminal.has(older.state) && !receiptTerminal.has(r.state)) {
+        if (older.repository !== r.repository && sameSnapshot(ci.s, older, r)) continue;
         ci.stop(older, "superseded", "new_snapshot");
       }
     }

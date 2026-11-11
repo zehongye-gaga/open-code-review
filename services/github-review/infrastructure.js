@@ -2,6 +2,7 @@
 // Copyright 2026 alibaba/open-code-review Contributors
 
 "use strict";
+const { sameRepository } = require("./repositories.js");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -51,7 +52,7 @@ class Infrastructure {
   authorizeScope(name, actor) {
     validate({ repository: name }, { type: "object", properties: { repository: repo }, required: ["repository"] });
     name = name.toLowerCase();
-    if (actor.role !== "admin" && !(actor.repositories || []).some((p) => p.toLowerCase() === name || p.toLowerCase() === `${name.split("/")[0]}/*`)) fail("Repository is outside client scope", 403, "CLIENT_SCOPE_DENIED");
+    if (actor.role !== "admin" && !(actor.repositories || []).some((p) => sameRepository(this.service, p, name) || p.toLowerCase() === `${name.split("/")[0]}/*`)) fail("Repository is outside client scope", 403, "CLIENT_SCOPE_DENIED");
   }
   authorize(name, actor, mutation = false) {
     this.authorizeScope(name, actor);

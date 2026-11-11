@@ -65,6 +65,8 @@ async function prepareReview({ github, context, core, prNumber, cwd = process.cw
   if (!fs.existsSync(path.join(cwd, ".git"))) {
     await git(["init"]);
     await git(["remote", "add", "origin", `${github.gitOrigin || "https://github.com"}/${context.repo.owner}/${context.repo.repo}.git`]);
+  } else {
+    await git(["config", "--replace-all", "remote.origin.url", `${github.gitOrigin || "https://github.com"}/${context.repo.owner}/${context.repo.repo}.git`]);
   }
   if (snapshot) {
     if (!SHA.test(metadata.base) || !SHA.test(metadata.head)) throw new Error("Invalid saved snapshot");

@@ -2,6 +2,7 @@
 // Copyright 2026 alibaba/open-code-review Contributors
 
 "use strict";
+const { sameRepository } = require("./repositories.js");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const { Infrastructure } = require("./infrastructure.js");
@@ -33,9 +34,9 @@ class GitHubEvents {
     if (event.admissionPublished === state) return;
     const description = state === "pending" ? "OCR accepted; waiting for review dispatch" :
       state === "error" ? "OCR dispatch failed; review did not start" : "OCR dispatch skipped; PR snapshot is no longer eligible";
-    const hasOwner = () => this.service.state.data.jobs.some((job) => job.repository === event.repository &&
+    const hasOwner = () => this.service.state.data.jobs.some((job) => sameRepository(this.service, job.repository, event.repository) &&
       job.head === event.head && !job.settings?.preview) ||
-      Object.values(this.service.state.data.ciReceipts || {}).some((receipt) => receipt.repository === event.repository && receipt.head_sha === event.head && receipt.admissionVerified !== false);
+      Object.values(this.service.state.data.ciReceipts || {}).some((receipt) => sameRepository(this.service, receipt.repository, event.repository) && receipt.head_sha === event.head && receipt.admissionVerified !== false);
     const write = this.service.writeCommitStatus(event.repository, event.head, state, description, undefined, () => {
       if (hasOwner() || event.state === "dispatched") return false;
       const newer = (this.service.state.data.deliveries || []).findLast((entry) => entry.admitted && entry.repository === event.repository && entry.head === event.head);
@@ -98,7 +99,7 @@ class GitHubEvents {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) fail("Invalid GitHub payload");
     const repositoryName = typeof payload.repository?.full_name === "string" ? payload.repository.full_name.toLowerCase() : "";
     const unsigned = !args.signature && repositoryName &&
-      ((config.unsignedWebhookRepositories || []).includes(repositoryName) ||
+      ((config.unsignedWebhookRepositories || []).some(name => sameRepository(this.service, name, repositoryName)) ||
         (config.unsignedWebhookOrganizations || []).includes(repositoryName.split("/")[0]));
     if (unsigned) {
       this.api.authorizeScope(repositoryName, actor);
@@ -130,7 +131,7 @@ class GitHubEvents {
     const pull = payload.pull_request;
     if (!push && (!pull || !Number.isSafeInteger(pull.number) || pull.number < 1 ||
         !/^[a-f0-9]{40}$/.test(pull.head?.sha) || !/^[a-f0-9]{40}$/.test(pull.base?.sha) ||
-        pull.base?.repo?.full_name?.toLowerCase() !== repository.name)) fail("Invalid PR coordinates");
+        !sameRepository(this.service, pull.base?.repo?.full_name, repository.name))) fail("Invalid PR coordinates");
     if (config.dispatchEnabled !== true || config.externalDispatch !== true) fail("Direct event dispatch requires completed routing cutover", 409);
     const digest = crypto.createHash("sha256").update(raw).update(args.event).update(args.route).digest("hex");
     this.service.state.data.deliveries ||= [];
@@ -173,7 +174,7 @@ class GitHubEvents {
     const children = [];
     for (const pull of pulls) {
       if (!this.service.eligible(event.repository, pull) || pull.head.sha !== event.head ||
-          pull.head.ref !== event.ref.slice(11) || pull.head.repo?.full_name?.toLowerCase() !== event.repository) continue;
+          pull.head.ref !== event.ref.slice(11) || !sameRepository(this.service, pull.head.repo?.full_name, event.repository)) continue;
       const id = `push-${crypto.createHash("sha256").update(event.id).digest("hex")}-${pull.number}`;
       if (!events.some((entry) => entry.id === id) && !children.some((entry) => entry.id === id)) children.push({
         id, parentDelivery: event.id, digest: event.digest, repository: event.repository,

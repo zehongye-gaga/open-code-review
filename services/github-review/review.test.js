@@ -55,10 +55,10 @@ test("PR resolution rejects malformed numbers and skips stale, closed and draft 
   await assert.rejects(resolvePullRequest({ ...harness(makePR({ head: { sha: "--help" } })), prNumber: "1" }), /valid head/);
 });
 
-test("fetches exact PR objects while retaining the trusted base working tree", async (t) => {
+test("repairs a reused checkout origin and fetches exact PR objects while retaining the trusted base", async (t) => {
   const directory = temp(t);
-  const origin = path.join(directory, "origin"), checkout = path.join(directory, "checkout");
-  fs.mkdirSync(origin);
+  const origin = path.join(directory, "owner", "repo.git"), checkout = path.join(directory, "checkout");
+  fs.mkdirSync(origin, { recursive: true });
   const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   git(origin, "init", "--initial-branch=main");
   git(origin, "config", "user.name", "Contract test");
@@ -73,10 +73,13 @@ test("fetches exact PR objects while retaining the trusted base working tree", a
   const headSha = git(origin, "rev-parse", "HEAD");
   git(origin, "update-ref", "refs/pull/1/head", headSha);
   git(directory, "clone", "--branch", "main", origin, checkout);
+  git(checkout, "remote", "set-url", "origin", path.join(directory, "previous-name.git"));
   const h = harness(makePR({ head: { sha: headSha }, base: { sha: baseSha, repo: { full_name: "owner/repo" } } }));
+  h.github.gitOrigin = "file://" + directory;
   await prepareReview({ ...h, context: { ...h.context, runId: "service-job", runAttempt: 2 },
     prNumber: "1", cwd: checkout, temp: directory, token: "test-token" });
   assert.equal(h.outputs.should_review, "true");
+  assert.equal(git(checkout, "remote", "get-url", "origin"), "file://" + origin);
   assert.equal(fs.readFileSync(path.join(checkout, "trusted.txt"), "utf8"), "trusted base\n");
   assert.equal(fs.existsSync(path.join(checkout, "untrusted.sh")), false);
   assert.equal(git(checkout, "rev-parse", "HEAD"), baseSha);

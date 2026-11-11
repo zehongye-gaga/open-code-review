@@ -3,7 +3,8 @@
 
 "use strict";
 const { receiptTerminal } = require("./outcome.js");
-function key(repository, number) { return JSON.stringify([repository.toLowerCase(), number]); }
+const { repositoryKey } = require("./repositories.js");
+function key(service, repository, number) { return JSON.stringify([repositoryKey(service, repository), number]); }
 async function dispatchTick(service, events = service.githubEvents) {
   if (service.stopping || !events) return;
   const pending = (service.state.data.deliveries || []).filter((event) => event.admitted &&
@@ -15,7 +16,7 @@ async function dispatchTick(service, events = service.githubEvents) {
     for (const event of service.state.data.deliveries || []) {
       if (event.state === "pending" && event.nextAt <= Date.now()) candidates.push({
         at: Date.parse(event.createdAt) || 0, id: event.id,
-        key: key(event.repository, event.kind === "push" ? event.ref : event.number),
+        key: key(service, event.repository, event.kind === "push" ? event.ref : event.number),
         run: (k) => events.process(event, k) });
     }
   }
@@ -23,7 +24,7 @@ async function dispatchTick(service, events = service.githubEvents) {
     for (const receipt of Object.values(service.orgCI?.receipts || {})) {
       const pending = receipt.pendingAdmission;
       if (pending ? pending.nextAt <= Date.now() : !receipt.jobId && !receiptTerminal.has(receipt.state) && receipt.nextDispatchAt <= Date.now()) candidates.push({
-        at: pending?.requestedAt || receipt.createdAt, id: receipt.request_id, key: key(receipt.repository, receipt.pull_number),
+        at: pending?.requestedAt || receipt.createdAt, id: receipt.request_id, key: key(service, receipt.repository, receipt.pull_number),
         run: async (k) => { try { await service.orgCI.dispatch(receipt); }
           finally { events.activeDispatches.delete(k); } } });
     }
