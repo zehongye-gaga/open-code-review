@@ -174,7 +174,10 @@ Metadata, original OCR JSON, stderr and exit codes live in `stateDirectory/runs`
 Job records expose `range`, `snapshot`, `progress` (session, range, coverage
 completion and artifact directory), and a replacement job ID when pushes queue
 behind a running snapshot. Logs include `review_range`, `checkpoint_saved` and
-`reuse_completed_review` events. Per-PR checkpoints persist in `state.json`.
+`reuse_completed_review` events. Tasks, status and per-PR checkpoints persist in `state.db`.
+SQLite is the runtime state store; legacy `state.json` is imported only when no committed database state exists.
+Saving a task updates its changed records in a transaction without serializing all historical tasks or exporting JSON.
+See [SQLITE-AUDIT.md](SQLITE-AUDIT.md) for operational readers, checkpointed collection and explicit rollback exports.
 Completed artifacts and job records expire after `retentionDays` (default seven);
 active/retry artifacts remain. OCR session history and Git object caches have
 their own lifecycle and are not deleted by this retention job. Monitor the
@@ -331,20 +334,19 @@ apply. The per-attempt budget is not a cumulative monetary spending limit.
 ### Persistent routing Agent sessions
 
 The service stores one GoClaw session binding per repository, PR, Agent model,
-endpoint and credential identity in `state.json`. Session bindings are retained
+endpoint and credential identity in `state.db`. Session bindings are retained
 across process restarts and review-artifact cleanup. A tools-disabled bootstrap
 captures the server-issued session key before any review dispatch. Subsequent
-commit events reuse `session_key`; dispatch and feedback serialize per binding.
+commit events reuse `session_key`; dispatches serialize per binding.
 An unavailable existing session is surfaced as an error, never silently replaced.
 
-Budget escalation and terminal attempt outcomes enter a durable feedback outbox.
-The worker posts them into the bound session with `tool_choice: none` and stable
-`client_message_id` values. Transport failures retry with backoff; authorization
-or missing-session failures remain visible for operator reconciliation. Feedback
-never calls submit/retry tools. Automated submissions also deduplicate by repository,
+The backend publishes review comments and statuses directly to the code host.
+Budget escalation and terminal outcomes stay in task history and the usage API;
+they are not sent back to the routing Agent. Startup retires pending historical
+feedback entries as `disabled` while preserving their payloads and attempts.
+Automated submissions also deduplicate by repository,
 PR, head and base independently of profile and request ID. Explicit administrator
-reruns remain available. Sent outbox entries follow artifact retention; pending and
-failed entries are retained.
+reruns remain available. Disabled historical feedback is retained for audit.
 
 ### Event dispatch concurrency
 

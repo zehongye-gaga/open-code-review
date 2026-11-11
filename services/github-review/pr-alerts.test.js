@@ -70,3 +70,26 @@ test("legacy failure and blocking notification identities migrate without anothe
     assert.equal(alerts.state.seen[events({ jobs: [record] }, true)[0].key].migratedFrom, legacyKey);
   }
 });
+
+test("alert CLI reads SQLite through the legacy config path without reading obsolete JSON", t => {
+ const config=setup(t),stateFile=path.join(config.directory,"state.json"),file=path.join(config.directory,"config.json");
+ require("./state-test-helpers.js").writeState(config.directory,{version:1,jobs:[job],ciReceipts:{},deliveries:[]});
+ fs.writeFileSync(stateFile,"broken obsolete JSON");fs.writeFileSync(file,JSON.stringify({...config,stateFile}));
+ const result=require("node:child_process").spawnSync(process.execPath,[path.join(__dirname,"pr-alerts.js"),file],{encoding:"utf8",timeout:5000});
+ assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),{baseline:1,sent:0});
+ assert.equal(fs.readFileSync(stateFile,"utf8"),"broken obsolete JSON");
+});
+test("admission failures retain request identity and each explicit generation alerts once",async t=>{
+ const config=setup(t);let calls=0;
+ const alerts=new Alerts(config,async()=>{calls++;return {ok:true,json:async()=>({code:0})};});
+ await alerts.collect({jobs:[]},1);
+ const receipt={state:"failed",repository:"org/repo",pull_number:2,request_id:"ocr-ci-fixture",head_sha:"abc",createdAt:1,
+  reason:"admission_retries_exhausted",lastAdmission:{state:"failed",generation:1,attempts:8}};
+ const source={jobs:[],ciReceipts:{r:receipt}},row=events(source)[0];
+ assert.equal(row.taskId,receipt.request_id);assert.equal(row.attempt,8);
+ assert.ok(message(row).includes(receipt.request_id));
+ await alerts.collect(source,2);await alerts.collect(source,3);assert.equal(calls,1);
+ receipt.pendingAdmission={kind:"retry",generation:2};assert.equal(events(source).length,0);
+ await alerts.collect(source,4);delete receipt.pendingAdmission;receipt.lastAdmission.generation=2;
+ await alerts.collect(source,5);await alerts.collect(source,6);assert.equal(calls,2);
+});

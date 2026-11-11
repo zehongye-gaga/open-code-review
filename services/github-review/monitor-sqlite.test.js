@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 alibaba/open-code-review Contributors
 "use strict";
+const { writeState } = require("./state-test-helpers.js");
 const test = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { Monitor } = require("./monitor-data.js");
@@ -15,7 +16,7 @@ async function fixture(t) {
   const options = { ocrConfig: path.join(root, "config.json"), sqlite: { database: path.join(root, "audit.db") },
     analytics: { directory: path.join(root, "analytics"), sessionDirectory: path.join(root, "sessions"), timeZone: "UTC", retentionDays: 90 } };
   write(options.ocrConfig, { stateDirectory: root, repositories: [{ name: "org/repo" }] });
-  write(path.join(root, "state.json"), { version: 1, jobs: [] });
+  writeState(root, { version: 1, jobs: [] });
   const monitor = new Monitor(options, { now: () => now, unit: async () => ({ state: "active" }),
     health: async () => ({ ok: true, reachable: true, lastPoll: at }), resources: () => ({ volumes: [] }),
     github: async () => ({ pulls: [], remaining: 50 }) });
@@ -32,7 +33,7 @@ test("SQLite dashboard discovers new jobs and sessions through the existing coll
   const directory = path.join(f.root, "runs/ocr-pr-test"), file = path.join(f.options.analytics.sessionDirectory, encoded(workspace), "session.jsonl");
   write(path.join(directory, "metadata.json"), { number: 7, head: "head", base: "base", merge_base: "base",
     telemetry: { repository: "org/repo", jobId: "1", workspace, preparedAt: f.at } });
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [{ id: "1", repository: "org/repo", number: 7, head: "head", base: "base", directory, workspace,
+  writeState(f.root, { version: 1, jobs: [{ id: "1", repository: "org/repo", number: 7, head: "head", base: "base", directory, workspace,
     state: "running", attempt: 1, createdAt: f.at, startedAt: f.at, updatedAt: f.at }] });
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, [{ type: "session_start", cwd: workspace, sessionId: "session", timestamp: f.at, diffTo: "head", diffFrom: "base" },
@@ -122,7 +123,7 @@ test("corrupt daily backup is repaired and overlapping backups use private indep
 
 test("ledger write failure retains coherent last successful summaries and SQL detail", async (t) => {
   const f = await fixture(t), before = f.reader.snapshot().analytics;
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [{ id: "11", repository: "org/repo", number: 11, state: "running", createdAt: f.at }] });
+  writeState(f.root, { version: 1, jobs: [{ id: "11", repository: "org/repo", number: 11, state: "running", createdAt: f.at }] });
   f.advance(10000);
   const rename = fs.renameSync;
   fs.renameSync = (from, to) => { if (to === f.monitor.analytics.file) throw Object.assign(Error("disk full"), { code: "ENOSPC" }); return rename(from, to); };
@@ -161,7 +162,7 @@ test("old persisted snapshots expose source failure immediately after reader upg
 
 test("dashboard collection uses checkpointed SQLite state without reading the legacy JSON", async (t) => {
   const f = await fixture(t);
-  const state = new (require("./state.js").State)(f.root, { sqlite: true });
+  const state = new (require("./state.js").State)(f.root);
   t.after(() => state.database.close());
   state.save();
   f.monitor.reviewStateSource = new (require("./state-sync.js").StateSync)(path.join(f.root, "state.db"), f.writer.store);

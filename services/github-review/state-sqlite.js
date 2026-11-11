@@ -66,6 +66,9 @@ class SQLiteState {
     const next = flatten(data), changes = [];
     for (const [key, payload] of next) if (this.rows.get(key) !== payload) changes.push({ key, payload });
     for (const key of this.rows.keys()) if (!next.has(key)) changes.push({ key, payload: null });
+    this.saveChanges(changes);
+  }
+  saveChanges(changes) {
     const epoch = this.head?.epoch || randomUUID(), revision = (this.head?.revision || 0) + 1;
     const token = randomUUID();
     this.db.exec("BEGIN IMMEDIATE");
@@ -86,8 +89,32 @@ class SQLiteState {
       this.db.prepare("DELETE FROM state_changes WHERE revision<=?").run(revision - 1000);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-    this.head = { epoch, revision, token }; this.rows = next;
+    this.head = { epoch, revision, token };
+    for (const { key, payload } of changes) {
+      if (payload === null) this.rows.delete(key); else this.rows.set(key, payload);
+    }
   }
   close() { this.db.close(); }
 }
-module.exports = { SQLiteState, flatten, inflate };
+function stateDatabase(config) {
+  if (config.stateDatabase) return config.stateDatabase;
+  const directory = config.stateDirectory || (config.stateFile && path.dirname(config.stateFile));
+  if (!directory) throw Error("Configure stateDatabase or stateDirectory");
+  return path.join(directory, "state.db");
+}
+function readState(file, { maxBytes = Infinity, kinds } = {}) {
+  const source = new SQLiteState(file, { readOnly: true });
+  try {
+    source.db.exec("BEGIN");
+    const head = source.db.prepare("SELECT * FROM state_head WHERE id=1").get();
+    if (!head) throw Error("Source state not initialized");
+    const placeholders = kinds?.map(() => "?").join(",");
+    const where = kinds ? ` WHERE json_extract(key,'$[0]') IN (${placeholders}) OR (json_extract(key,'$[0]') IN ('$types','$values') AND json_extract(key,'$[1]') IN (${placeholders}))` : "";
+    const parameters = kinds ? [...kinds, ...kinds] : [];
+    const sizeBytes = source.db.prepare("SELECT coalesce(sum(length(cast(key AS BLOB))+length(cast(payload AS BLOB))),0) AS n FROM state_rows" + where).get(...parameters).n;
+    if (sizeBytes > maxBytes) throw Object.assign(Error("Review state exceeds configured limit"), { code: "STATE_TOO_LARGE" });
+    const rows = source.db.prepare("SELECT key,payload FROM state_rows" + where).all(...parameters).map(row => [row.key, row.payload]);
+    return { data: inflate(rows), head, sizeBytes };
+  } finally { source.close(); }
+}
+module.exports = { SQLiteState, flatten, inflate, readState, stateDatabase };

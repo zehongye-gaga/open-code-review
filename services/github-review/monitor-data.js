@@ -217,12 +217,10 @@ class Monitor {
           state = this.reviewStateSource.read();
           reviewSource = { ...this.reviewStateSource.status };
         } else {
-          const file = path.join(this.config.stateDirectory, "state.json"), fd = fs.openSync(file, "r");
-          try {
-            reviewSource.sizeBytes = fs.fstatSync(fd).size;
-            if (reviewSource.sizeBytes > this.stateMaxBytes) throw Object.assign(Error("Review state exceeds configured limit"), { code: "STATE_TOO_LARGE" });
-            state = JSON.parse(fs.readFileSync(fd, "utf8"));
-          } finally { fs.closeSync(fd); }
+          const { readState, stateDatabase } = require("./state-sqlite.js");
+          const snapshot = readState(stateDatabase(this.config), { maxBytes: this.stateMaxBytes });
+          state = snapshot.data;
+          reviewSource = { ...reviewSource, sizeBytes: snapshot.sizeBytes, revision: snapshot.head.revision, epoch: snapshot.head.epoch };
         }
         if (state.version !== 1 || !Array.isArray(state.jobs)) throw new Error("Invalid OCR state");
         nativeJobs = state.jobs;

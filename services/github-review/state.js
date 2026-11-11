@@ -5,31 +5,30 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { SQLiteState } = require("./state-sqlite.js");
+const { StateRecords } = require("./state-records.js");
 
 class State {
-  constructor(directory, { sqlite = false } = {}) {
+  constructor(directory) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.file = path.join(directory, "state.json");
-    this.data = { version: 1, sequence: Date.now(), initialized: {}, pulls: {}, checkpoints: {}, jobs: [] };
-    if (sqlite) {
-      this.database = new (require("./state-sqlite.js").SQLiteState)(path.join(directory, "state.db"));
+    this.database = new SQLiteState(path.join(directory, "state.db"));
+    try {
       const persisted = this.database.load();
-      if (persisted) this.data = persisted;
-      else {
-        if (fs.existsSync(this.file)) this.data = JSON.parse(fs.readFileSync(this.file, "utf8"));
-        if (this.data.version !== 1 || !Array.isArray(this.data.jobs)) throw Error("Unsupported or corrupt service state");
-        this.database.save(this.data);
-      }
-    } else if (fs.existsSync(this.file)) {
-      this.data = JSON.parse(fs.readFileSync(this.file, "utf8"));
-      if (this.data.version !== 1 || !Array.isArray(this.data.jobs)) throw new Error("Unsupported or corrupt service state");
-    }
-    if (this.data.version !== 1 || !Array.isArray(this.data.jobs)) throw Error("Unsupported or corrupt service state");
+      const data = persisted || (fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, "utf8"))
+        : { version: 1, sequence: Date.now(), initialized: {}, pulls: {}, checkpoints: {}, jobs: [] });
+      if (data.version !== 1 || !Array.isArray(data.jobs)) throw Error("Unsupported or corrupt service state");
+      if (!persisted) this.database.save(data);
+      this.records = new StateRecords(data);
+    } catch (error) { this.database.close(); throw error; }
     this.data.checkpoints ||= {};
     for (const job of this.data.jobs) {
       if (job.state === "running") { job.state = "queued"; job.nextAt = 0; }
     }
   }
+
+  get data() { return this.records.data; }
+  set data(value) { this.records = new StateRecords(value, { replace: true }); }
 
   save() {
     try { this.write(); }
@@ -37,14 +36,9 @@ class State {
   }
 
   write() {
-    this.database?.save(this.data);
-    const temporary = this.file + ".tmp";
-    const fd = fs.openSync(temporary, "w", 0o600);
-    try { fs.writeFileSync(fd, JSON.stringify(this.data, null, 2)); fs.fsyncSync(fd); }
-    finally { fs.closeSync(fd); }
-    fs.renameSync(temporary, this.file);
-    const directory = fs.openSync(path.dirname(this.file), "r");
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    const pending = this.records.changes(this.database.rows);
+    this.database.saveChanges(pending.changes);
+    pending.commit();
   }
 
   enqueue(repository, pr, { force = false, baseline = false, fullReview = false, settings, identity, requestId, requestedBy, ciRequestId, deduplicateSnapshot = false } = {}) {
@@ -75,7 +69,7 @@ class State {
     }
     this.data.jobs.push(job);
     this.save();
-    return job;
+    return this.data.jobs.at(-1);
   }
 
   cancel(repository, number) {

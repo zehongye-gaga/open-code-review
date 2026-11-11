@@ -27,3 +27,13 @@ test("CPU samples exclude guest double counting and handle warmup", () => {
   assert.equal(second.usage.busy, 35); assert.equal(second.usage.system, 15); assert.equal(second.usage.iowait, 5);
   assert.equal(cpuSample(null).usage, null);
 });
+test("audit exposes admission verification separately from an old completed job", () => {
+  const receipt = { request_id:"ci", jobId:1, state:"failed", pendingAdmission:{ requestedAt:1000, attempts:2, nextAt:2000,
+    lastError:{ status:503, message:"SECRET" } } };
+  const state = { jobs:[{id:1,state:"complete"}], ciReceipts:{ci:receipt} };
+  const pending = auditRows(state)[0];assert.equal(pending.state,"accepted");assert.equal(pending.admissionPending,true);
+  assert.equal(pending.admissionAttempts,2);assert.equal(pending.admissionErrorCode,503);assert.ok(pending.stages.some(s=>s.stage==="verification_requested"));
+  assert.equal(JSON.stringify(pending).includes("SECRET"),false);
+  receipt.lastAdmission={...receipt.pendingAdmission,state:"failed"};delete receipt.pendingAdmission;
+  assert.equal(auditRows(state)[0].state,"failed");
+});

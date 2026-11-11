@@ -9,7 +9,7 @@ const { OrgCI } = require("./org-ci.js");
 const { AdmissionReconciliation, snapshot } = require("./admission-reconciliation.js");
 function fixture(t, extra = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ocr-reconcile-"));
-  const state = new State(dir, { sqlite: true });
+  const state = new State(dir);
   t.after(() => { state.database.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   const repository = "lexmount/example", logs = [], calls = [];
   const pr = { number: 1, state: "open", draft: true, head: { sha: "a".repeat(40) },
@@ -88,8 +88,9 @@ test("head or target changes restart grace, and stale API snapshots cannot dispa
   assert.equal(Object.keys(s.orgCI.receipts).length, 0);
   assert.equal(s.state.data.admissionSnapshots["lexmount/example#1"].firstSeenAt, current.now);
   advance(); current.pr = { ...pr, head: { sha: "c".repeat(40) } };
-  await scan.tick(); assert.equal(Object.keys(s.orgCI.receipts).length, 0);
-  assert.equal(s.state.data.admissionSnapshots["lexmount/example#1"].error, "PR_SNAPSHOT_CHANGED");
+  await scan.tick(); assert.equal(Object.keys(s.orgCI.receipts).length, 1);
+  const receipt=Object.values(s.orgCI.receipts)[0];await s.orgCI.dispatch(receipt);
+  assert.equal(receipt.reason,"pr_snapshot_changed");assert.equal(s.state.data.jobs.length,0);
 });
 test("closed PRs disappear only after a successful complete list, not on API failure", async t => {
   const { s, scan, current, advance } = fixture(t);
@@ -138,6 +139,8 @@ test("missed reopen reaccepts a closed receipt after a new grace period", async 
   assert.equal(s.orgCI.receipts[p.request_id].state, "superseded");
   assert.equal(s.state.data.admissionSnapshots["lexmount/example#1"].missingSinceAt, current.now);
   advance(); await scan.tick();
+  assert.equal(s.orgCI.receipts[p.request_id].pendingAdmission.kind,"reopen");
+  await s.orgCI.watchdog();
   assert.equal(s.orgCI.receipts[p.request_id].state, "accepted");
   assert.equal(s.orgCI.receipts[p.request_id].reopenHistory.length, 1);
 });
@@ -149,9 +152,12 @@ test("a stale PR does not starve other missing PRs in the same repository", asyn
   s.github.rest.pulls.get = async args => ({ data: args.pull_number === 1
     ? { ...pr, head: { sha: "c".repeat(40) } } : current.pulls[1] });
   const result = await scan.tick();
-  assert.equal(result.admitted, 1); assert.equal(result.errors, 1);
-  assert.equal(Object.keys(s.orgCI.receipts).length, 1);
-  assert.equal(Object.values(s.orgCI.receipts)[0].pull_number, 2);
+  assert.equal(result.admitted, 2); assert.equal(result.errors, 0);
+  assert.equal(Object.keys(s.orgCI.receipts).length, 2);
+  for(const receipt of Object.values(s.orgCI.receipts))await s.orgCI.dispatch(receipt);
+  assert.equal(Object.values(s.orgCI.receipts).find(r=>r.pull_number===1).state,"superseded");
+  assert.equal(Object.values(s.orgCI.receipts).find(r=>r.pull_number===2).state,"queued");
+  assert.equal(s.state.data.jobs.length,1);
 });
 
 test("a refused reopen does not consume the recovery cap or starve another PR", async t => {

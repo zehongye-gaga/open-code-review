@@ -41,3 +41,9 @@ test("unenrolled repository receipts are successful policy skips without a revie
  assert.equal(result.reason,"repository_not_enabled");
  assert.equal(receiptOutcome(receipt,{state:"complete",progress:{complete:true},result:{blocking:1}}).kind,"blocked");
 });
+test("pending admission and failed verification are distinct from an older job result",()=>{
+ const receipt={state:"failed",reason:"admission_retries_exhausted",pendingAdmission:{kind:"reopen",generation:2}};
+ const pending=receiptOutcome(receipt,skip);assert.equal(pending.kind,"accepted");assert.equal(pending.terminal,false);assert.equal(pending.alert,false);
+ delete receipt.pendingAdmission;receipt.lastAdmission={state:"failed",generation:2};
+ assert.equal(receiptOutcome(receipt,skip).kind,"dispatch_failed");assert.equal(receiptOutcome(receipt,skip).alert,true);
+});

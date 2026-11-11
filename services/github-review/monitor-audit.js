@@ -14,7 +14,12 @@ function auditRows(state) {
     const creator = job?.requestedBy;
     const actual = creator === "insightflow-agent" ? "agent" : creator?.includes("fallback") ? "direct_fallback" :
       event.dispatchMethod === "reused_existing" ? "unknown" : event.dispatchMethod || (job && (event.route === "direct" || !creator) ? "direct" : "unknown");
-    const stages = [["accepted", event.createdAt || job?.createdAt], ["agent_ack", event.agentAcknowledgedAt],
+    const admission = event.pendingAdmission || event.lastAdmission;
+    let state = job?.state || event.state;
+    if (event.pendingAdmission) state = "accepted";
+    else if (event.state === "failed" && event.lastAdmission?.state === "failed") state = "failed";
+    const stages = [["accepted", event.createdAt || job?.createdAt], ["verification_requested", admission?.requestedAt],
+      ["verified", event.lastAdmission?.state === "verified" ? event.lastAdmission.finishedAt : null], ["agent_ack", event.agentAcknowledgedAt],
       ["fallback", event.fallbackAt], ["queued", job?.createdAt], ["started", job?.startedAt],
       ["finished", ["complete", "failed", "checkpointed", "superseded"].includes(job?.state) ? job.updatedAt : null],
       ["published", event.published?.at]].map(([stage, at]) => ({ stage, at: date(at) })).filter((s) => s.at).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
@@ -26,8 +31,10 @@ function auditRows(state) {
       reviewAttempts: job?.attempt || 0, retryBudget: job?.retryBudget ?? null,
       coverage: job?.progress ? { selected: job.progress.selected ?? null, complete: job.progress.complete === true, budgetExceeded: job.progress.budgetExceeded === true } : null,
       jobId: job ? String(job.id) : null, requestedRoute: event.route || "unknown", actualRoute: actual,
-      reused: event.dispatchMethod === "reused_existing", state: job?.state || event.state,
-      dispatchState: event.state, attempts: event.attempts || event.dispatchAttempts || 0,
+      reused: event.dispatchMethod === "reused_existing", state,
+      dispatchState: event.pendingAdmission ? "accepted" : event.state, attempts: event.attempts || event.dispatchAttempts || 0,
+      admissionPending: !!event.pendingAdmission, admissionAttempts: admission?.attempts || 0,
+      admissionRetryAt: date(event.pendingAdmission?.nextAt), admissionErrorCode: admission?.lastError?.code || admission?.lastError?.status || null,
       profile: job?.settings?.profile || null, budget: job?.settings?.options?.budget ?? null,
       findings: job?.result?.findings ?? null, blocking: job?.result?.blocking ?? null,
       fallbackReason: ["agent_ack_timeout", "agent_unacknowledged", "agent_error", "agent_timeout"].includes(event.fallbackReason) ? event.fallbackReason : event.fallbackAt ? "fallback" : null,

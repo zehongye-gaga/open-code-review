@@ -8,7 +8,7 @@ function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "state-sync-"));
   const initial = { version: 1, sequence: 1, initialized: {}, pulls: {}, checkpoints: {}, jobs: [{ id: 1, repository: "org/repo", number: 1, state: "complete", result: { findings: 2 } }], deliveries: [], ciReceipts: {}, agentSessions: {} };
   fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(initial));
-  const state = new State(dir, { sqlite: true }), store = new AuditSQLite(path.join(dir, "audit.db"));
+  const state = new State(dir), store = new AuditSQLite(path.join(dir, "audit.db"));
   const sync = new StateSync(path.join(dir, "state.db"), store);
   t.after(() => { state.database.close(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   return { dir, state, store, sync, initial };
@@ -23,7 +23,7 @@ test("one-time import checkpoints data; subsequent sync consumes only changed re
   const value = f.sync.read(); assert.deepEqual(value.jobs, []); assert.equal(value.ciReceipts.a.state, "accepted");
   fs.writeFileSync(f.state.file, "invalid legacy snapshot");
   assert.deepEqual(new StateSync(path.join(f.dir, "state.db"), f.store).read(), value);
-  const reopened = new State(f.dir, { sqlite: true });
+  const reopened = new State(f.dir);
   try { assert.deepEqual(reopened.data, value); } finally { reopened.database.close(); }
 });
 test("source transaction failure rolls back state and revision", (t) => {
@@ -57,10 +57,12 @@ test("database replacement or rollback cannot silently reuse another epoch/check
   f.state.database.db.prepare("UPDATE state_head SET epoch=?").run("replacement");
   f.sync.read(); assert.equal(f.sync.status.mode, "resnapshot"); assert.equal(f.sync.status.epoch, "replacement");
 });
-test("a failed compatibility JSON write does not lose the authoritative SQLite commit", (t) => {
+test("an unwritable legacy JSON destination does not affect SQLite commits", (t) => {
   const f = fixture(t); f.state.data.jobs[0].result.findings = 7;
-  fs.mkdirSync(f.state.file + ".tmp"); assert.throws(() => f.state.save());
-  const reopened = new State(f.dir, { sqlite: true });
+  const json = fs.readFileSync(f.state.file, "utf8");
+  fs.mkdirSync(f.state.file + ".tmp"); f.state.save();
+  assert.equal(fs.readFileSync(f.state.file, "utf8"), json);
+  const reopened = new State(f.dir);
   try { assert.equal(reopened.data.jobs[0].result.findings, 7); } finally { reopened.database.close(); }
   assert.equal(f.sync.read().jobs[0].result.findings, 7);
 });
@@ -103,7 +105,7 @@ test("rollback export preserves the latest authoritative state without restart n
 });
 
 test("an unchanged stale writer cannot overwrite the compatibility export", (t) => {
-  const f = fixture(t), other = new State(f.dir, { sqlite: true });
+  const f = fixture(t), other = new State(f.dir);
   try {
     f.state.data.sequence++; f.state.save();
     const json = fs.readFileSync(f.state.file, "utf8");

@@ -28,7 +28,7 @@ function identity(input) {
 }
 class OrgCI {
   constructor(service) {
-    this.s = service; this.locks = new Map(); this.dispatching = new Set();
+    this.s = service; this.locks = new Map(); this.dispatching = new Set(); this.verifyingAdmissions = new Set();
     service.state.data.ciReceipts ||= {};
   }
   get config() { return this.s.config.infrastructure?.orgCI || {}; }
@@ -50,10 +50,15 @@ class OrgCI {
     return record;
   }
   view(r) {
-    return { ...identity(r), outcome: receiptOutcome(r, this.s.state.data.jobs.find((j) => j.id === r.jobId)).kind, state: r.state, durable: true, task_id: r.request_id,
-      acceptance: "accepted", scheduler: "backend", contract_version: 2, status_published: !!r.published, commit_status: r.published?.state || null,
-      job_id: r.jobId || null, reason: r.reason || null, terminal: isRepositorySkip(r) || terminal.has(r.state) && !!r.published && r.published.state !== "pending" };
+    const pending = !!r.pendingAdmission;
+    return { ...identity(r), outcome: receiptOutcome(r, this.s.state.data.jobs.find((j) => j.id === r.jobId)).kind, state: pending ? "accepted" : r.state, durable: true, task_id: r.request_id,
+      acceptance: "accepted", scheduler: "backend", contract_version: 2, status_published: !pending && !!r.published, commit_status: pending ? null : r.published?.state || null,
+      job_id: pending ? null : r.jobId || null, reason: pending ? null : r.reason || null,
+      admission_pending: pending, admission_attempts: r.pendingAdmission?.attempts || r.lastAdmission?.attempts || 0,
+      admission_retry_at: r.pendingAdmission?.nextAt || null,
+      terminal: !pending && (isRepositorySkip(r) || terminal.has(r.state) && !!r.published && r.published.state !== "pending") };
   }
+  owns(r, generation) { return this.receipts[r.request_id] === r && r.admissionGeneration === generation && !r.pendingAdmission; }
   async current(r) {
     const { data } = await this.s.github.rest.pulls.get({ ...this.s.coordinates(r.repository), pull_number: r.pull_number });
     if (!this.s.eligible(r.repository, data, { ciRequestId: r.request_id }) ||
@@ -64,6 +69,10 @@ class OrgCI {
     return data;
   }
   stop(r, state, reason) {
+    if (r.pendingAdmission) {
+      r.lastAdmission = { ...r.pendingAdmission, state, reason, finishedAt: Date.now() };
+      delete r.pendingAdmission;
+    }
     r.state = state; r.reason = reason; r.finishedAt = Date.now();
     const job = this.s.state.data.jobs.find((j) => j.id === r.jobId);
     if (job && ["queued", "running"].includes(job.state)) job.state = "cancelled";
@@ -71,11 +80,19 @@ class OrgCI {
     this.s.state.save();
   }
   async publish(r, state, description, target) {
+    const generation = r.admissionGeneration;
     return this.lock(`${r.repository}:${r.head_sha}`, async () => {
-      const newer = Object.values(this.receipts).some((other) => other.repository === r.repository && other.head_sha === r.head_sha && other.sequence > r.sequence);
-      if (newer) { r.published = { state: "failure", suppressed: true }; this.s.state.save(); return; }
+      if (!this.owns(r, generation)) return;
+      const newer = Object.values(this.receipts).some((other) => other !== r && other.repository === r.repository && other.head_sha === r.head_sha &&
+        other.admissionVerified !== false && (other.sequence > r.sequence || r.admissionVerified === false));
+      const executionOwner = r.admissionVerified === false && (
+        this.s.state.data.jobs.some(job => job.repository === r.repository && job.head === r.head_sha && !job.settings?.preview) ||
+        (this.s.state.data.deliveries || []).some(event => event.repository === r.repository && event.head === r.head_sha &&
+          event.admitted && !["ignored", "superseded"].includes(event.state)));
+      if (newer || executionOwner) { r.published = { state: "failure", suppressed: true }; this.s.state.save(); return; }
       if (r.published?.state === state && r.published?.description === description) return;
-      await this.s.writeCommitStatus(r.repository, r.head_sha, state, description, target);
+      const written = await this.s.writeCommitStatus(r.repository, r.head_sha, state, description, target, () => this.owns(r, generation));
+      if (written === false || !this.owns(r, generation)) return;
       r.published = { state, description, at: Date.now() }; this.s.state.save();
     });
   }
@@ -83,87 +100,40 @@ class OrgCI {
     if (this.config.enabled !== true) fail("Organization CI is staged and not enabled", 503);
     const normalized = identity(input);
     if (!["direct", "agent"].includes(route)) fail("Invalid n8n route");
-    if (!this.s.repo(normalized.repository)) return this.lock(normalized.request_id, () => {
-      const existing = this.receipts[normalized.request_id];
-      if (existing?.jobId || existing && isRepositorySkip(existing)) {
-        this.s.state.save(); return this.view(existing);
-      }
-      const r = this.createReceipt(normalized, route, existing);
-      r.state = "skipped"; r.reason = "repository_not_enabled"; r.finishedAt = Date.now();
-      this.s.state.save();
-      this.s.log("ci_repository_skipped", { repository: r.repository, number: r.pull_number, request_id: r.request_id });
-      return this.view(r);
-    });
-    const existing = this.receipts[normalized.request_id];
-    const reopening = existing?.state === "superseded" && ["pr_closed", "pr_changed_or_closed"].includes(existing.reason);
-    const retrying = existing?.state === "failed" && !existing.jobId && !this.dispatching.has(existing.request_id) &&
-      typeof input.retry_key === "string" && /^[0-9]+:[0-9]+$/.test(input.retry_key) &&
-      Number(input.retry_key.split(":")[1]) >= 2 && !(existing.retryKeys || []).includes(input.retry_key);
-    if (existing && !isRepositorySkip(existing) && !retrying && !reopening) {
-      // An existing durable receipt can be acknowledged while the watchdog is awaiting GitHub.
-      await this.retrySubmission(existing, input.retry_key);
-      this.s.state.save();
-      return this.view(existing);
-    }
-    return this.lock(normalized.request_id, async () => {
-      let r = this.receipts[normalized.request_id];
-      if (r && !isRepositorySkip(r)) { await this.retrySubmission(r, input.retry_key); await this.reopen(r); this.s.state.save(); return this.view(r); }
-      await this.current(normalized);
-      if (!r && Object.keys(this.receipts).length >= 25000) fail("CI receipt capacity reached", 503);
-      for (const old of Object.values(this.receipts)) {
-        if (old.repository === normalized.repository && old.pull_number === normalized.pull_number && !terminal.has(old.state)) this.stop(old, "superseded", "new_snapshot");
-      }
-      r = this.createReceipt(normalized, route, r);
-      if (input.retry_key !== undefined) await this.retrySubmission(r, input.retry_key);
-      this.s.state.save();
-      // Admission ends at durable storage; GitHub publication belongs to the watchdog.
-      this.adoptExisting(r);
-      return this.view(r);
-    });
+    return require("./ci-admission.js").queueAdmission(this, normalized, route, input.retry_key);
   }
   createReceipt(normalized, route, previous) {
     if (!previous && Object.keys(this.receipts).length >= 25000) fail("CI receipt capacity reached", 503);
     const r = { ...normalized, route, state: "accepted", sequence: ++this.s.state.data.sequence,
       createdAt: Date.now(), heartbeatAt: Date.now(), dispatchAttempts: 0, nextDispatchAt: 0 };
     if (previous) r.admissionHistory = [...(previous.admissionHistory || []), {
-      state: previous.state, reason: previous.reason, createdAt: previous.createdAt, finishedAt: previous.finishedAt }];
-    return this.receipts[normalized.request_id] = r;
-  }
-  async retrySubmission(r, retryKey) {
-    if (retryKey === undefined) return;
-    if (typeof retryKey !== "string" || !/^[0-9]+:[0-9]+$/.test(retryKey) || retryKey.length > 80) fail("Invalid retry key");
-    if (Number(retryKey.split(":")[1]) < 2 || (r.retryKeys || []).includes(retryKey)) return;
-    (r.retryKeys ||= []).push(retryKey); this.s.state.save();
-    if (r.state !== "failed" || r.jobId || this.dispatching.has(r.request_id)) return;
-    await this.current(r);
-    (r.retryHistory ||= []).push({ state: r.state, reason: r.reason, finishedAt: r.finishedAt, dispatchAttempts: r.dispatchAttempts });
-    r.state = "accepted"; r.createdAt = Date.now(); r.nextDispatchAt = 0; r.dispatchAttempts = 0;
-    r.sequence = ++this.s.state.data.sequence;
-    for (const key of ["reason", "finishedAt", "finalStatus", "published", "lastDispatchError"]) delete r[key];
-    this.s.state.save();
+      state: previous.state, reason: previous.reason, createdAt: previous.createdAt, finishedAt: previous.finishedAt,
+      pendingAdmission: previous.pendingAdmission, lastAdmission: previous.lastAdmission }];
+    this.receipts[normalized.request_id] = r;
+    return this.receipts[normalized.request_id];
   }
   async status(input) {
     return this.lock(identity(input).request_id, async () => {
       const r = this.lookup(input); await this.refresh(r); return this.view(r);
     });
   }
-  async reopen(r) {
-    if (r.state !== "superseded" || !["pr_closed", "pr_changed_or_closed"].includes(r.reason)) return;
-    await this.current(r);
+  reopen(r, sequence) {
+    const retry = r.state === "failed" && r.lastAdmission?.state === "failed" && r.lastAdmission.kind === "reopen";
+    if (!retry && (r.state !== "superseded" || !["pr_closed", "pr_changed_or_closed"].includes(r.reason))) fail("Previous review is no longer reopenable", 409, "REOPEN_UNAVAILABLE");
     const newer = Object.values(this.receipts).some((other) => other.repository === r.repository &&
-      other.pull_number === r.pull_number && other.sequence > r.sequence);
-    if (newer) return;
+      other.pull_number === r.pull_number && other.sequence > r.sequence && other.admissionVerified !== false);
+    if (newer) fail("A newer verified snapshot owns this PR", 409, "PR_SNAPSHOT_CHANGED");
     const job = this.s.state.data.jobs.find((j) => j.id === r.jobId);
     if (this.dispatching.has(r.request_id) || [...this.s.workers.values()].some((w) => w.job.id === r.jobId)) {
       fail("Previous PR dispatch is still stopping; retry acceptance", 503);
     }
-    if (r.jobId && !job) return;
-    if (job && (job.replacement || !["cancelled", "complete"].includes(job.state))) return;
+    if (r.jobId && !job || job && (job.replacement || !["cancelled", "complete"].includes(job.state))) fail("Previous review job cannot be resumed", 409, "REOPEN_UNAVAILABLE");
     const now = Date.now();
-    (r.reopenHistory ||= []).push({ at: now, previousState: r.state, previousReason: r.reason,
-      createdAt: r.createdAt, finishedAt: r.finishedAt, jobId: r.jobId || null, dispatchAttempts: r.dispatchAttempts });
+    r.reopenHistory ||= [];
+    r.reopenHistory.push({ at: now, previousState: r.state, previousReason: r.reason,
+      createdAt: r.createdAt, finishedAt: r.finishedAt, jobId: r.jobId || null, dispatchAttempts: r.dispatchAttempts, admission: r.lastAdmission });
     r.state = "accepted"; r.createdAt = now; r.heartbeatAt = now; r.nextDispatchAt = 0; r.dispatchAttempts = 0;
-    r.sequence = ++this.s.state.data.sequence;
+    r.sequence = sequence;
     for (const key of ["reason", "finishedAt", "finalStatus", "published", "lastWorkerStatus", "fallbackAt", "fallbackReason", "dispatchMethod"]) delete r[key];
     if (job) {
       if (job.state === "cancelled") {
@@ -172,7 +142,6 @@ class OrgCI {
       }
       r.state = "queued";
     }
-    this.s.state.save();
   }
   async submitReview(args, actor) {
     const id = args.request_id?.replace(/^github:/, "");
@@ -180,12 +149,15 @@ class OrgCI {
     if (!r || this.config.enabled !== true) fail("No active CI receipt", 409);
     if (actor.id !== "org-ci-dispatcher" && (r.route !== "agent" || actor.id !== this.s.config.infrastructure.agentDispatch?.clientId)) fail("CI submission actor mismatch", 403);
     return this.lock(id, async () => {
+      const generation = r.admissionGeneration;
+      if (r.pendingAdmission) fail("CI admission is awaiting verification", 409);
       if (terminal.has(r.state)) fail("CI receipt is already terminal", 409);
       for (const key of ["repository", "pull_number", "head_sha", "base_sha"]) if (args[key] !== r[key]) fail("CI submission snapshot mismatch", 409);
       const recovered = this.s.state.data.jobs.find((j) => j.ciRequestId === id);
       if (recovered) { r.jobId = recovered.id; this.s.state.save(); }
       if (r.jobId) return { job_id: r.jobId, state: r.state, deduplicated: true };
       const pr = await this.current(r), repository = this.s.repo(r.repository);
+      if (!this.owns(r, generation)) fail("CI admission changed during verification", 409);
       if (terminal.has(r.state)) fail("CI receipt became terminal", 409);
       const settings = resolveOptions(this.s.config, repository, args.profile || repository.defaultProfile || "standard", args.options || {});
       if (!["low", "medium"].includes(settings.options.blockSeverity)) settings.options.blockSeverity = "medium";
@@ -203,6 +175,7 @@ class OrgCI {
     return this.adoptExisting(r);
   }
   adoptExisting(r) {
+    if (r.pendingAdmission || r.admissionVerified === false) return false;
     if (terminal.has(r.state) || r.jobId) return !!r.jobId;
     const job = this.s.state.data.jobs.findLast((j) => j.repository === r.repository &&
       j.number === r.pull_number && j.head === r.head_sha && j.base === r.base_sha &&
@@ -223,12 +196,16 @@ class OrgCI {
     }
   }
   async dispatch(r) {
+    if (this.dispatching.has(r.request_id)) return;
+    if (r.pendingAdmission) await this.lock(r.request_id, () => require("./ci-admission.js").verifyAdmission(this, r));
+    if (r.pendingAdmission || this.receipts[r.request_id] !== r) return;
     if (this.dispatching.has(r.request_id) || r.jobId || terminal.has(r.state) || Date.now() < r.nextDispatchAt) return;
     if (r.dispatchAttempts >= 8) { this.stop(r, "failed", "dispatch_retries_exhausted"); return; }
+    const generation = r.admissionGeneration;
     this.dispatching.add(r.request_id); r.state = "dispatching"; r.dispatchAttempts++; this.s.state.save();
     try {
       await this.refresh(r, false);
-      if (r.jobId || terminal.has(r.state)) return;
+      if (!this.owns(r, generation) || r.jobId || terminal.has(r.state)) return;
       if (r.route === "agent") {
         try {
           if (this.config.agentReady !== true) fail("Agent MCP cutover is not ready", 409);
@@ -238,8 +215,11 @@ class OrgCI {
           if (!r.jobId) throw new Error("Agent did not acknowledge this CI receipt");
           r.dispatchMethod ||= "agent";
         } catch (error) {
-          if (error.persistence || terminal.has(r.state)) throw error;
+          if (error.persistence) throw error;
+          if (!this.owns(r, generation)) return;
+          if (terminal.has(r.state)) throw error;
           if (!r.jobId) await this.reuseExisting(r);
+          if (!this.owns(r, generation)) return;
           if (!r.jobId) {
             r.fallbackAt = Date.now(); r.fallbackReason = ["TimeoutError", "AbortError"].includes(error.name) ? "agent_ack_timeout" : "agent_unacknowledged";
             r.dispatchMethod = "direct_fallback"; this.s.state.save();
@@ -249,6 +229,7 @@ class OrgCI {
       } else await this.submitReview({ ...r, request_id: `github:${r.request_id}` }, { id: "org-ci-dispatcher", role: "dispatcher" });
     } catch (error) {
       if (error.persistence) throw error;
+      if (!this.owns(r, generation)) return;
       if (terminal.has(r.state) || r.jobId) return;
       r.lastDispatchError = { status: error.status || null, code: error.code || null, at: Date.now() };
       this.s.log("ci_dispatch_rejected", { id: r.request_id, status: error.status, code: error.code, error: error.message });
@@ -271,9 +252,11 @@ class OrgCI {
   async publishJobStatus(job, state, description, target) {
     const r = this.receipts[job.ciRequestId];
     if (!r) fail("CI receipt disappeared", 409);
-    if (terminal.has(r.state)) return;
+    const generation = r.admissionGeneration;
+    if (r.pendingAdmission || terminal.has(r.state)) return;
     if (state !== "pending") {
       await this.current(r);
+      if (!this.owns(r, generation)) return;
     }
     if (state !== "pending") {
       r.lastWorkerStatus = { state, description, target }; this.s.state.save(); return;
@@ -287,20 +270,27 @@ class OrgCI {
   }
   async reconcileLegacy(r) {
     if (!this.repairable(r)) return;
+    const generation = r.admissionGeneration;
     const previous = { state: r.state, reason: r.reason, published: r.published, finishedAt: r.finishedAt };
     try { await this.current(r); }
     catch (error) {
+      if (!this.owns(r, generation)) return;
       if (error.code !== "PR_SNAPSHOT_CHANGED") throw error;
       r.reconciliation = { at: Date.now(), previous, result: "superseded" };
       this.stop(r, "superseded", error.prClosed ? "pr_closed" : "pr_snapshot_changed"); return;
     }
+    if (!this.owns(r, generation)) return;
     r.reconciliation = { at: Date.now(), previous, result: "verified_backend_outcome" };
     r.state = "queued"; delete r.finalStatus; delete r.reason;
     this.s.state.save();
   }
   async refresh(r, publishStatus = true) {
     if (isRepositorySkip(r)) { this.s.state.save(); return; }
+    if (r.pendingAdmission) await require("./ci-admission.js").verifyAdmission(this, r);
+    if (r.pendingAdmission) return;
+    const generation = r.admissionGeneration;
     await this.reconcileLegacy(r);
+    if (!this.owns(r, generation)) return;
     if (!terminal.has(r.state) && !r.jobId) this.adoptExisting(r);
     const now = Date.now(), j = this.s.state.data.jobs.find((job) => job.id === r.jobId);
     const observed = jobOutcome(j);
@@ -311,10 +301,12 @@ class OrgCI {
     if (!terminal.has(r.state)) {
       try { await this.current(r); }
       catch (error) {
+        if (!this.owns(r, generation)) return;
         if (error.code === "PR_SNAPSHOT_CHANGED") this.stop(r, "superseded", error.prClosed ? "pr_closed" : "pr_snapshot_changed");
         else if ([401, 403, 404].includes(error.status) && !require("./dispatch-control.js").dispatchFailure(error).retryable) this.stop(r, "failed", "repository_access_failed");
         else throw error;
       }
+      if (!this.owns(r, generation)) return;
       const result = jobOutcome(j);
       if (!terminal.has(r.state) && result?.terminal) {
         r.state = result.receiptState; r.reason = result.reason; r.finalStatus = result.commitStatus;
@@ -338,7 +330,7 @@ class OrgCI {
     try {
       for (const r of Object.values(this.receipts)) {
         if (isRepositorySkip(r)) continue;
-        if (terminal.has(r.state) && r.published?.state && r.published.state !== "pending" && !this.repairable(r)) continue;
+        if (!r.pendingAdmission && terminal.has(r.state) && r.published?.state && r.published.state !== "pending" && !this.repairable(r)) continue;
         try { await this.lock(r.request_id, () => this.refresh(r)); }
         catch (error) { this.s.log("ci_watchdog_retry", { id: r.request_id, error: error.message }); if (error.persistence) throw error; }
       }

@@ -2,6 +2,7 @@
   "listen": "127.0.0.1",
   "port": 8787,
   "stateDirectory": "/var/lib/ocr-review",
+  "stateStorage": "sqlite",
   "githubTokenFile": "/etc/ocr-review/github-token",
   "apiTokenFile": "/etc/ocr-review/api-token",
   "repositories": [

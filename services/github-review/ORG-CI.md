@@ -13,7 +13,9 @@ n8n chooses `agent` or `direct`; repository rulesets do not choose the route. Th
 
 Both entrances share snapshot admission keyed by repository, PR number, head SHA, base SHA and base branch. Existing non-preview tasks are reused, including completed or failed tasks; a failed result is not silently rerun. Explicit administrator retries remain separate operations.
 
-CI receipts immediately attach to an existing matching task and record `reused_existing`. They also check again after an Agent acknowledgement failure before scheduling fallback. Existing result settings and review artifacts are preserved. A pending receipt cannot attach to preview, cancelled, superseded, or mismatched snapshots.
+CI receipts attach to an existing matching task after background snapshot verification and record `reused_existing`. They also check again after an Agent acknowledgement failure before scheduling fallback. Existing result settings and review artifacts are preserved. A receipt awaiting verification cannot attach to a task; verified receipts cannot attach to preview, cancelled, superseded, or mismatched snapshots.
+
+The submit endpoint commits local acceptance before any GitHub API operation. It persists first-admission, retry and reopen intents on the receipt, returning the version-2 durable ACK without waiting for a PR query, an existing receipt lock, or a status write. The backend validates the frozen coordinates before dispatch and records bounded retries or terminal failures. This keeps the CI gate's meaning as reliable backend takeover. `admission_pending` means the request is saved but GitHub verification is still outstanding. Receipt outcome, audit rows and failure notifications expose that phase and its failures.
 
 The webhook keeps its existing event, draft and target-branch checks. Organization CI snapshots use the workflow/ruleset scope and may include draft PRs. The current CI identity validator is restricted to the `lexmount` organization; this is a deployment-specific restriction, not a generic multi-organization gateway.
 
@@ -34,4 +36,4 @@ Enable `infrastructure.orgCI.enabled` only after configuring its `tokenFile`. En
 
 Before a server switch, drain work, back up configuration and state, retain the previous release, and merge task identities before enabling both entrances. Rollback must preserve post-cutover task identities; restoring a stale snapshot can cause duplicate reviews. A legacy MCP address can remain as a compatibility proxy to the new executor.
 
-Completed Agent feedback is pruned using the existing `retentionDays` policy. Pending and failed feedback remains available for reconciliation.
+The backend does not send review-result feedback to the dispatch Agent. Historical pending feedback is durably marked `disabled` at startup and retained for audit, along with failed feedback. Already-sent history follows the existing `retentionDays` policy. Agent dispatch sessions and task acceptance responses are unaffected.

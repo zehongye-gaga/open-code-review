@@ -137,10 +137,11 @@ class Infrastructure {
         const existing = s.state.data.jobs.findLast((j) => j.repository === repository.name && j.number === pull.number && j.head === pull.head.sha && j.base === pull.base.sha);
         if (existing && ["running", "queued"].includes(existing.state)) fail("An active review must be explicitly cancelled first", 409);
         if (existing?.state === "skipped") return safeJob(existing);
-        const j = { id: ++s.state.data.sequence, key: `${repository.name}#${pull.number}`, repository: repository.name, number: pull.number,
+        let j = { id: ++s.state.data.sequence, key: `${repository.name}#${pull.number}`, repository: repository.name, number: pull.number,
           head: pull.head.sha, base: pull.base.sha, baseRef: pull.base.ref, state: "skipped", attempt: 0,
           result: { reviewed: false, reason: args.reason }, requestedBy: actor.id, createdAt: new Date().toISOString() };
         s.state.data.jobs.push(j); s.state.save();
+        j = s.state.data.jobs.at(-1);
         const outcome = require("./outcome.js").jobOutcome(j);
         await s.status(j, outcome.commitStatus, outcome.description);
         return safeJob(j);
@@ -213,11 +214,13 @@ class Infrastructure {
       if (j.ciRequestId) {
         const receipt = s.orgCI?.receipts[j.ciRequestId];
         if (!receipt || receipt.jobId !== j.id) fail("CI receipt no longer owns this task", 409);
-        (receipt.retryHistory ||= []).push({ at: Date.now(), state: receipt.state, reason: receipt.reason, finishedAt: receipt.finishedAt });
+        receipt.retryHistory ||= [];
+        receipt.retryHistory.push({ at: Date.now(), state: receipt.state, reason: receipt.reason, finishedAt: receipt.finishedAt });
         receipt.state = "queued"; receipt.createdAt = Date.now();
         for (const key of ["reason", "finishedAt", "finalStatus", "published"]) delete receipt[key];
       }
-      (j.retryHistory ||= []).push({ at: new Date().toISOString(), attempt: j.attempt, publicationAttempts: j.publicationAttempts || 0 });
+      j.retryHistory ||= [];
+      j.retryHistory.push({ at: new Date().toISOString(), attempt: j.attempt, publicationAttempts: j.publicationAttempts || 0 });
       if (args.resume_only !== undefined) j.resumeOnly = args.resume_only;
       j.publicationAttempts = 0; j.state = "queued"; j.attempt = 0; j.nextAt = 0; j.pendingSent = false;
       delete j.error; delete j.cancelReason; s.state.save(); await s.flushStatuses(); return safeJob(j);

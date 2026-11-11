@@ -7,7 +7,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { State } = require("./state.js");
 const { jobOutcome } = require("./outcome.js");
-const { queueFeedback } = require("./agent-session.js");
+const { retireAgentFeedback } = require("./agent-session.js");
 const { prepareReview, runReview, publishReview } = require("./review.js");
 const { planReview, readProgress, checkpointFor } = require("./progress.js");
 
@@ -20,8 +20,8 @@ function configuration(input) {
   const config = { listen: "127.0.0.1", port: 8787, pollSeconds: 30, bootstrapExisting: true,
     binary: "/usr/local/bin/ocr", provider: "openai-codex", model: "gpt-6-astra",
     budget: 0, timeoutSeconds: 1500, fetchTimeoutSeconds: 600, maxAttempts: 3, publicationMaxAttempts: 3, retrySeconds: 60,
-    retentionDays: 7, prConcurrency: 1, dispatchConcurrency: 8, statusContext: "ocr-review", blockSeverity: "high", ...input };
-  if (config.stateStorage && !["json", "sqlite"].includes(config.stateStorage)) throw Error("Invalid stateStorage");
+    retentionDays: 7, prConcurrency: 1, dispatchConcurrency: 8, statusContext: "ocr-review", blockSeverity: "high", stateStorage: "sqlite", ...input };
+  if (config.stateStorage !== "sqlite") throw Error("stateStorage must be sqlite; legacy JSON is imported once on startup");
   if (!path.isAbsolute(config.stateDirectory || "")) throw new Error("stateDirectory must be absolute");
   if (!path.isAbsolute(config.binary)) throw new Error("binary must be absolute");
   if (!Array.isArray(config.repositories) || !config.repositories.length) throw new Error("Configure at least one repository");
@@ -51,8 +51,9 @@ class ReviewService {
   constructor({ config, github, state, log = console.log, prepare = prepareReview, run = runReview, publish = publishReview }) {
     this.config = configuration(config);
     this.github = github;
-    this.state = state || new State(this.config.stateDirectory, { sqlite: this.config.stateStorage === "sqlite" });
+    this.state = state || new State(this.config.stateDirectory);
     this.log = (event, details = {}) => log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
+    retireAgentFeedback(this);
     this.prepare = prepare; this.run = run; this.publish = publish;
     this.commitStatusWrites = new Map();
     this.admissionReconciliation = new (require("./admission-reconciliation.js").AdmissionReconciliation)(this);
@@ -379,7 +380,8 @@ class ReviewService {
     const next = policy.mode === "unlimited" || policy.unlimitedAfter && current >= policy.unlimitedAfter ? 0 : Math.min(limit, current * policy.multiplier);
     if (next !== 0 && next <= current) return false;
     resolveOptions(this.config, repository, job.settings.profile, { ...job.settings.options, budget: next });
-    (job.budgetRetries ||= []).push({ attempt: job.attempt, from: current, to: next,
+    job.budgetRetries ||= [];
+    job.budgetRetries.push({ attempt: job.attempt, from: current, to: next,
       directory: job.directory, reason: "native_budget_guard", at: new Date().toISOString(),
       policy: policy.mode || "multiply", requestedBudget: job.settings.options.budget,
       requestedBy: job.requestedBy || "default", sessionId: job.progress?.sessionId || null });
@@ -428,7 +430,7 @@ class ReviewService {
         try { const now = new Date(); fs.utimesSync(job.directory, now, now); }
         catch (error) { this.log("artifact_timestamp_failed", { id: job.id, error: error.message }); }
       }
-      try { queueFeedback(this, job); this.state.save(); } finally { this.workers.delete(slot); }
+      try { this.state.save(); } finally { this.workers.delete(slot); }
       this.log("finished", { id: job.id, state: job.state });
     }
   }

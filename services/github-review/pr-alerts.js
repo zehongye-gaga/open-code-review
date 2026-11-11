@@ -17,13 +17,18 @@ function events(state, notifyBlocking=false) {
    retries:j.budgetRetries?.length||0,route:j.requestedBy||"default",link:j.result?.summaryURL});
  }
  for(const [kind,items] of [["ci",values(state.ciReceipts)],["webhook",values(state.deliveries)]])for(const e of items){
-  if(e.state!=="failed" || (e.jobId && covered.has(String(e.jobId))))continue;
+  const admission=e.lastAdmission?.state==="failed"?e.lastAdmission:null;
+  if(e.state!=="failed" || (!admission && e.jobId && covered.has(String(e.jobId))))continue;
   const j=jobs.get(String(e.jobId));if(!receiptOutcome(e,j).alert)continue;
   if(e.jobId)covered.add(String(e.jobId));
-  rows.push({key:e.jobId?`job:${e.jobId}:failed`:`${kind}:${e.request_id||e.id}:${e.createdAt}`,
+  let key;
+  if(admission)key=`${kind}:${e.request_id||e.id}:admission:${admission.generation}`;
+  else if(e.jobId)key=`job:${e.jobId}:failed`;
+  else key=`${kind}:${e.request_id||e.id}:${e.createdAt}`;
+  rows.push({key,
    repository:e.repository,number:e.pull_number||e.number||j?.number,head:e.head_sha||e.head||j?.head,type:"failed",
-   reason:e.reason||e.error||e.lastError||j?.error,time:e.finishedAt||e.updatedAt||e.createdAt,jobId:e.jobId,
-   attempt:j?.attempt||e.dispatchAttempts||e.attempts,budget:j?.retryBudget??j?.settings?.options?.budget,
+   reason:e.reason||e.error||e.lastError||j?.error,time:e.finishedAt||e.updatedAt||e.createdAt,jobId:e.jobId,taskId:e.request_id||e.id,
+   attempt:admission?.attempts??(j?.attempt||e.dispatchAttempts||e.attempts),budget:j?.retryBudget??j?.settings?.options?.budget,
    retries:j?.budgetRetries?.length||0,route:e.dispatchMethod||e.route||kind});
  }
  return rows.filter(r=>/^[\w.-]+\/[\w.-]+$/.test(r.repository||"") && Number.isSafeInteger(r.number) && r.number>0);
@@ -34,7 +39,7 @@ function message(e, now=Date.now()) {
  const reason=clean(e.reason);
  return [e.type==="blocked"?copy.blocked:copy.failed,`${copy.repository}: ${e.repository}`,`PR: https://github.com/${e.repository}/pull/${e.number}`,
   `Commit: ${e.head||copy.unknown}`,`${copy.time}: ${when} (UTC+8)`,`${copy.reason}: ${copy.reasons[e.reason]||reason}`,
-  `${copy.rawReason}: ${reason}`,`${copy.job}: ${e.jobId||copy.unknown}`,`${copy.attempt}: ${e.attempt??0}; ${copy.retries}: ${e.retries??0}`,
+  `${copy.rawReason}: ${reason}`,`${copy.job}: ${e.jobId||e.taskId||copy.unknown}`,`${copy.attempt}: ${e.attempt??0}; ${copy.retries}: ${e.retries??0}`,
   `${copy.budget}: ${e.budget??copy.unknown}`,`${copy.route}: ${e.route||copy.unknown}`,
   `${copy.notice}: ${new Date(now).toISOString()}`,`${copy.event}: ${crypto.createHash("sha256").update(e.key).digest("hex").slice(0,16)}`].join("\n");
 }
@@ -53,7 +58,7 @@ class Alerts {
     (policy.infrastructure?.organizations||[]).some(o=>o.name?.toLowerCase()===e.repository.split("/")[0].toLowerCase());
   const current=events(source,this.config.notifyBlocking===true).filter(eligible),map=new Map(current.map(e=>[e.key,e]));
   if(!this.state){this.state={initializedAt:now,seen:Object.fromEntries(current.map(e=>[e.key,{baseline:true,at:now}])),pending:{}};this.save();return {baseline:current.length,sent:0};}
-  for(const e of current)if(e.jobId && !this.state.seen[e.key]) {
+  for(const e of current)if(e.jobId && e.key.startsWith("job:") && !this.state.seen[e.key]) {
    const legacy=Object.keys(this.state.seen).find(k=>k.startsWith(`job:${e.jobId}:`) && k.endsWith(`:${e.type === "blocked" ? "complete" : "failed"}`));
    if(legacy)this.state.seen[e.key]={...this.state.seen[legacy],migratedFrom:legacy};
   }
@@ -71,5 +76,8 @@ class Alerts {
 }
 module.exports={Alerts,events,message};
 if(require.main===module){const config=JSON.parse(fs.readFileSync(process.argv[2]));const a=new Alerts(config);
- (process.argv.includes("--test")?a.send(copy.test).then(()=>({test:"delivered"})):a.collect(JSON.parse(fs.readFileSync(config.stateFile))))
+ (process.argv.includes("--test")?a.send(copy.test).then(()=>({test:"delivered"})):Promise.resolve().then(()=>{
+  const {readState,stateDatabase}=require("./state-sqlite.js");
+  return a.collect(readState(stateDatabase(config),{kinds:["jobs","ciReceipts","deliveries"]}).data);
+ }))
  .then(result=>console.log(JSON.stringify(result))).catch(()=>{console.error("PR notification collection failed");process.exitCode=1;});}

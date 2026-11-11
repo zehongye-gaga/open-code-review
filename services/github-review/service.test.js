@@ -111,6 +111,61 @@ test("four isolated workers fill freed slots without exceeding the limit or dupl
   assert.equal(h.statuses.filter((s) => s.state === "success").length, 5);
 });
 
+test("Agent-routed reviews publish results directly without producing feedback", async t => {
+  const h = setup(t), tokenFile = path.join(h.directory, "agent.token");
+  fs.writeFileSync(tokenFile, "fixture");
+  h.service.config.repositories[0].requiresAgent = true;
+  h.service.config.infrastructure = { agentDispatch: { url: "https://example.test/chat", model: "fixture", tokenFile, clientId: "agent" } };
+  let publications = 0;
+  h.service.publish = async () => {
+    publications++;
+    return { summaryURL: "https://github.com/owner/repo/pull/1#issuecomment-1", comments: [{ severity: "high" }], incomplete: false };
+  };
+  const job = h.service.accept(repository, h.current.pr); job.requestedBy = "agent";
+  await h.service.tick();
+  assert.equal(publications, 1); assert.equal(job.state, "complete");
+  assert.equal(job.result.blocking, 1);
+  assert.equal(h.statuses.at(-1).state, "failure");
+  assert.equal(job.result.summaryURL, "https://github.com/owner/repo/pull/1#issuecomment-1");
+  assert.equal(h.service.state.data.agentFeedback, undefined);
+  assert.equal(new State(h.directory).data.agentFeedback, undefined);
+});
+
+test("server startup retires the legacy backlog without a recurring feedback sender", { timeout: 15000 }, async t => {
+  const h = setup(t), tokenFile = path.join(h.directory, "fixture.token"), configFile = path.join(h.directory, "server.json");
+  fs.writeFileSync(tokenFile, "fixture");
+  const item = { id: "old-feedback", state: "pending", repository, number: 1, attempts: 3322,
+    error: "Agent feedback HTTP 409", nextAt: 0, payload: { budget: 0 } };
+  h.service.state.data.agentFeedback = [item]; h.service.state.save();
+  fs.writeFileSync(configFile, JSON.stringify({ ...h.config, listen: "127.0.0.1", port: 0, pollSeconds: 300,
+    githubTokenFile: tokenFile, apiTokenFile: tokenFile,
+    infrastructure: { enabled: true, externalDispatch: true, agentDispatch: { url: "https://example.test/chat", model: "fixture", tokenFile } } }));
+  const script = `const { State } = require(${JSON.stringify(path.join(__dirname, "state.js"))});
+    let requests = 0, saves = 0;
+    global.fetch = async () => { requests++; throw Error("Unexpected external request"); };
+    const original = State.prototype.save;
+    State.prototype.save = function () { saves++; return original.call(this); };
+    require(${JSON.stringify(path.join(__dirname, "server.js"))}).main().then(() => {
+      setTimeout(() => {
+        console.log(JSON.stringify({ probe: true, requests, saves }));
+        process.kill(process.pid, "SIGTERM");
+      }, 2200);
+    }).catch(error => { console.error(error.stack); process.exitCode = 1; });`;
+  const child = require("node:child_process").spawn(process.execPath, ["-e", script], {
+    env: { ...process.env, OCR_SERVICE_CONFIG: configFile }, stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+  let output = "", errors = "";
+  child.stdout.on("data", chunk => { output += chunk; }); child.stderr.on("data", chunk => { errors += chunk; });
+  const [code, signal] = await require("node:events").once(child, "exit");
+  assert.equal(signal, null, errors); assert.equal(code, 0, errors);
+  const probe = output.split("\n").filter(Boolean).map(line => JSON.parse(line)).find(row => row.probe);
+  assert.deepEqual(probe, { probe: true, requests: 0, saves: 2 });
+  const history = new State(h.directory).data.agentFeedback[0];
+  assert.equal(history.state, "disabled"); assert.equal(history.attempts, item.attempts);
+  assert.deepEqual(history.payload, item.payload);
+});
+
 test("a superseded PR waits for its old worker to exit without cancelling unrelated PRs", async (t) => {
   const h = parallelSetup(t, 2), first = h.service.tick();
   await until(() => h.running.size === 2);
@@ -172,6 +227,13 @@ test("health lists all active PRs and concurrency configuration is validated", a
   }
 });
 
+test("SQLite is the runtime default and an explicit JSON backend requires configuration migration", t => {
+  const h = setup(t);
+  assert.equal(configuration(h.config).stateStorage, "sqlite");
+  assert.equal(configuration({ ...h.config, stateStorage: "sqlite" }).stateStorage, "sqlite");
+  assert.throws(() => configuration({ ...h.config, stateStorage: "json" }), /stateStorage must be sqlite/);
+});
+
 test("durable queue deduplicates head/base, coalesces updates and recovers an interrupted worker", (t) => {
   const { service, directory } = setup(t);
   const first = service.accept(repository, pr());
@@ -183,9 +245,11 @@ test("durable queue deduplicates head/base, coalesces updates and recovers an in
   const updated = restarted.enqueue(repository, pr({ head: { sha: "c".repeat(40) } }));
   assert.equal(restarted.data.jobs[0].state, "superseded");
   assert.equal(restarted.next().id, updated.id);
-  assert.equal(fs.statSync(path.join(directory, "state.json")).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(directory, "state.db")).mode & 0o777, 0o600);
   fs.writeFileSync(path.join(directory, "state.json"), "broken");
-  assert.throws(() => new State(directory), SyntaxError);
+  const sqlite = new State(directory);
+  try { assert.equal(sqlite.data.jobs.length, 2); } finally { sqlite.database.close(); }
+  restarted.database.close();
 });
 
 test("polling seeds existing heads only once and detects new commits without workflows", async (t) => {
@@ -530,7 +594,7 @@ test("budget guard raises the persisted attempt budget within policy then stops 
   await h.service.tick();
   assert.equal(job.state, "queued"); assert.equal(job.retryBudget, 400000);
   assert.equal(h.statuses.at(-1).state, "pending");
-  const saved = JSON.parse(fs.readFileSync(h.service.state.file)).jobs[0];
+  const saved = require("./state-sqlite.js").readState(path.join(h.directory, "state.db")).data.jobs[0];
   assert.equal(saved.retryBudget, 400000); assert.equal(saved.budgetRetries.length, 1);
   job.nextAt = 0; await h.service.tick();
   assert.equal(job.state, "queued"); assert.equal(job.retryBudget, 800000);
@@ -684,7 +748,9 @@ test("publication has its own retry allowance after execution exhausts its attem
 
 test("Agent budget exhaustion switches directly to unlimited with attribution and compatible resume",async(t)=>{
  const h=setup(t);Object.assign(h.service.config,{maxAttempts:1});
+ const tokenFile=path.join(h.directory,'agent.token');fs.writeFileSync(tokenFile,'fixture');
  h.service.config.infrastructure={dispatchEnabled:true,allowUnlimitedBudget:true,limits:{budget:4000000},
+  agentDispatch:{url:'https://example.test/chat',model:'fixture',tokenFile,clientId:'agent'},
   clients:[{id:'agent',role:'agent',repositories:[repository]}],
   budgetRetry:{enabled:true,mode:'unlimited',maxRetries:1,multiplier:2}};
  const settings=require('./options.js').resolveOptions(h.service.config,h.service.repo(repository),'standard',{budget:500000});
@@ -693,10 +759,12 @@ test("Agent budget exhaustion switches directly to unlimited with attribution an
  h.service.run=async({directory,budget,resume})=>{budgets.push(budget);resumes.push(resume);writeReport(directory,{state:budgets.length===1?'partial':'complete',budgetExceeded:budgets.length===1});};
  h.service.publish=async()=>({comments:[]});
  await h.service.tick();assert.equal(job.state,'queued');assert.equal(job.retryBudget,0);
+ assert.equal(h.service.state.data.agentFeedback,undefined);
  assert.equal(job.budgetRetries[0].requestedBudget,500000);assert.equal(job.budgetRetries[0].requestedBy,'agent');
  assert.equal(job.budgetRetries[0].policy,'unlimited');assert.equal(job.budgetRetries[0].sessionId,sessionId);
  job.nextAt=0;await h.service.tick();assert.equal(job.state,'complete');assert.deepEqual(budgets,[500000,0]);
  assert.equal(resumes[1],sessionId);assert.equal(job.settings.options.budget,500000);
+ assert.equal(h.service.state.data.agentFeedback,undefined);
 });
 
 for (const failure of ['missing', 'rejected', 'none']) {

@@ -35,7 +35,7 @@ class GitHubEvents {
       state === "error" ? "OCR dispatch failed; review did not start" : "OCR dispatch skipped; PR snapshot is no longer eligible";
     const hasOwner = () => this.service.state.data.jobs.some((job) => job.repository === event.repository &&
       job.head === event.head && !job.settings?.preview) ||
-      Object.values(this.service.state.data.ciReceipts || {}).some((receipt) => receipt.repository === event.repository && receipt.head_sha === event.head);
+      Object.values(this.service.state.data.ciReceipts || {}).some((receipt) => receipt.repository === event.repository && receipt.head_sha === event.head && receipt.admissionVerified !== false);
     const write = this.service.writeCommitStatus(event.repository, event.head, state, description, undefined, () => {
       if (hasOwner() || event.state === "dispatched") return false;
       const newer = (this.service.state.data.deliveries || []).findLast((entry) => entry.admitted && entry.repository === event.repository && entry.head === event.head);
@@ -133,7 +133,8 @@ class GitHubEvents {
         pull.base?.repo?.full_name?.toLowerCase() !== repository.name)) fail("Invalid PR coordinates");
     if (config.dispatchEnabled !== true || config.externalDispatch !== true) fail("Direct event dispatch requires completed routing cutover", 409);
     const digest = crypto.createHash("sha256").update(raw).update(args.event).update(args.route).digest("hex");
-    const events = this.service.state.data.deliveries ||= [];
+    this.service.state.data.deliveries ||= [];
+    const events = this.service.state.data.deliveries;
     const old = events.find((e) => e.id === args.delivery_id);
     if (old) {
       if (old.digest !== digest) fail("Delivery ID was reused with different content", 409);
@@ -141,15 +142,15 @@ class GitHubEvents {
       return { ...view(old), deduplicated: true };
     }
     if (events.length >= 25000) fail("Delivery storage is full; contact the operator", 503);
-    const record = { id: args.delivery_id, digest, repository: repository.name, number: push ? null : pull.number,
+    let record = { id: args.delivery_id, digest, repository: repository.name, number: push ? null : pull.number,
       head: push ? payload.after : pull.head.sha, base: push ? null : pull.base.sha, action: push ? "push" : payload.action,
       ...(push ? { ref: payload.ref, kind: "push" } : {}), actor: { id: actor.id, role: actor.role, repositories: actor.repositories },
       route, state: "pending", attempts: 0, nextAt: 0, createdAt: new Date().toISOString(),
       admitted: !push && !["closed", "converted_to_draft"].includes(payload.action) && !!this.service.eligible(repository.name, pull) };
     events.push(record);
+    record = events.at(-1);
     if (args.fallback) this.fallback(record, "ingress_ack_missing");
     this.service.state.save();
-    await this.publishAdmission(record);
     return { ...view(record), accepted: true };
   }
   status(args, actor) {

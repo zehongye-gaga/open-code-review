@@ -33,10 +33,11 @@ function jobOutcome(job) {
   return outcome("execution_failed", "review_incomplete_or_failed", "OCR failed: review_incomplete_or_failed");
 }
 function receiptOutcome(receipt, job) {
+  if (receipt.pendingAdmission) return outcome("accepted", null, "OCR accepted; waiting for snapshot verification");
   // A linked backend job owns execution truth; ingress is only its transport.
   if (["cancelled", "superseded"].includes(receipt.state)) return outcome(receipt.state, receipt.reason, `OCR ${receipt.state}: ${receipt.reason || receipt.state}`);
   const result = jobOutcome(job);
-  if (receipt.state === "failed" && ["repository_access_failed", "review_deadline_exceeded"].includes(receipt.reason)) {
+  if (receipt.state === "failed" && (receipt.lastAdmission?.state === "failed" || ["repository_access_failed", "review_deadline_exceeded", "admission_deadline_exceeded"].includes(receipt.reason))) {
     return outcome("dispatch_failed", receipt.reason, `OCR failed: ${receipt.reason}`);
   }
   if (result && !(receipt.state === "failed" && ["cancelled", "superseded"].includes(result.kind))) return result;

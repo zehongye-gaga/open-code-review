@@ -7,6 +7,15 @@ const fs = require("node:fs"), os = require("node:os"), path = require("node:pat
 const { observation, overlaps, FeedbackCollector } = require("./benchmark-feedback.js");
 const thread = { id:"t",path:"a.js",originalLine:10,isResolved:true,isOutdated:true,resolvedBy:{login:"bot"},comments:{totalCount:1,nodes:[{id:"c",body:"bug <!-- ocr-12-1-abcd -->",createdAt:"2026-01-01T00:00:00Z",originalCommit:{oid:"abc"}}]} };
 const pr = {headRefOid:"def",state:"OPEN",merged:false};
+test("benchmark CLI discovers jobs from SQLite without a runtime JSON snapshot or network requests",t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),"benchmark-sqlite-"));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const token=path.join(dir,"token"),config=path.join(dir,"config.json");fs.writeFileSync(token,"fixture");
+ require("./state-test-helpers.js").writeState(dir,{version:1,jobs:[{id:1,state:"running",repository:"org/repo",number:1}]});
+ fs.writeFileSync(config,JSON.stringify({stateDirectory:dir,githubTokenFile:token}));
+ const result=require("node:child_process").spawnSync(process.execPath,[path.join(__dirname,"benchmark-feedback.js"),config,dir],{encoding:"utf8",timeout:5000});
+ assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),{checked:0,requests:0,errors:0});
+ assert.equal(fs.existsSync(path.join(dir,"state.json")),false);
+});
 test("resolved and changed code is an unverified candidate, never ground truth",()=>{
  const comparison={status:"ahead",files:[{filename:"a.js",patch:"@@ -10,2 +10,2 @@\n-old\n+new\n context"}],commits:[],total_commits:0};
  const row=observation("org/repo",1,thread,pr,comparison,[{id:1,head:"abc"}]);
