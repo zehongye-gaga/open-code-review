@@ -159,10 +159,13 @@ test("status and heartbeat queries observe completed enrollment promotion under 
     if (first) { first = false; entered(); await gate; }
     return { data: pr };
   };
-  const promotion = ci.submit(p, "direct"); await reading;
+  const promotion = await ci.submit(p, "direct");
+  assert.equal(promotion.admission_pending, true);
+  const verifying = ci.watchdog(); await reading;
   const status = ci.status(p), heartbeat = ci.tick(p);
   release();
-  for (const result of await Promise.all([promotion, status, heartbeat])) assert.equal(result.state, "accepted");
+  await verifying;
+  for (const result of await Promise.all([status, heartbeat])) assert.equal(result.state, "accepted");
   assert.equal(ci.receipts[p.request_id].state, "accepted");
   assert.equal(ci.receipts[p.request_id].admissionHistory.length, 1);
 });
@@ -249,15 +252,16 @@ test("CI adopts legacy task and legacy ingress reuses CI task", async (t) => {
   const again = s.state.enqueue(p.repository, pr, { force: true, deduplicateSnapshot: true });
   assert.equal(again.id, old.id); assert.equal(s.state.data.jobs.length, 1);
 });
-test("Agent-route receipt immediately adopts a completed legacy task without dispatch", async (t) => {
+test("Agent-route receipt adopts a completed legacy task after background verification without dispatch", async (t) => {
   const { ci, s, p, pr, statuses } = fixture(t);
   const job = s.state.enqueue(p.repository, pr, { force: true });
   job.state = "complete"; job.progress = { complete: true }; job.result = { findings: 1, blocking: 1 };
   ci.agentDispatch = async () => { assert.fail("must not call Agent for existing snapshot"); };
   const ack = await ci.submit(p, "agent");
-  assert.equal(ack.job_id, job.id); assert.equal(ack.terminal, false);
+  assert.equal(ack.job_id, null); assert.equal(ack.admission_pending, true); assert.equal(ack.terminal, false);
   assert.equal(ack.commit_status, null); assert.equal(statuses.length, 0);
   await ci.watchdog(); assert.equal(ci.view(ci.receipts[p.request_id]).commit_status, "failure");
+  assert.equal(ci.receipts[p.request_id].jobId, job.id);
   assert.equal(ci.receipts[p.request_id].dispatchMethod, "reused_existing");
   assert.equal(ci.receipts[p.request_id].fallbackReason, undefined);
   await ci.dispatch(ci.receipts[p.request_id]); assert.equal(s.state.data.jobs.length, 1);
@@ -299,29 +303,40 @@ test("reopened closed PR reaccepts the same receipt and dispatches only once", a
   const { ci, s, p, pr, statuses } = fixture(t);
   await ci.submit(p, "direct"); pr.state = "closed"; await ci.refresh(ci.receipts[p.request_id]);
   assert.equal(ci.receipts[p.request_id].reason, "pr_closed");
-  await assert.rejects(ci.submit(p, "direct"), /no longer current/);
+  assert.equal((await ci.submit(p, "direct")).admission_pending, true);
+  await ci.watchdog(); assert.equal(ci.receipts[p.request_id].reason, "pr_closed");
   pr.state = "open";
   await Promise.all([ci.submit(p, "direct"), ci.submit(p, "direct")]);
+  await ci.watchdog();
   const r = ci.receipts[p.request_id]; assert.equal(r.state, "accepted"); assert.equal(r.reopenHistory.length, 1);
   await ci.watchdog();
   assert.equal(statuses.at(-1).state, "pending");
   await ci.dispatch(r); assert.equal(s.state.data.jobs.length, 1);
 });
 test("legacy closed receipt can reopen but changed snapshots and newer receipts cannot", async (t) => {
-  const { ci, p, pr } = fixture(t); await ci.submit(p, "direct");
-  const r = ci.receipts[p.request_id]; ci.stop(r, "superseded", "pr_changed_or_closed");
-  pr.head.sha = "c".repeat(40); await assert.rejects(ci.submit(p, "direct"), /no longer current/);
-  pr.head.sha = p.head_sha; ci.receipts.newer = { ...r, sequence:r.sequence + 1, request_id:"newer" };
-  assert.equal((await ci.submit(p, "direct")).state, "superseded"); delete ci.receipts.newer;
-  assert.equal((await ci.submit(p, "direct")).state, "accepted");
+  for (const changed of [false, true]) {
+    const { ci, p, pr } = fixture(t); await ci.submit(p, "direct");
+    const r = ci.receipts[p.request_id]; ci.stop(r, "superseded", "pr_changed_or_closed");
+    if (changed) pr.head.sha = "c".repeat(40);
+    else ci.receipts.newer = { ...r, sequence:r.sequence + 1, request_id:"newer", admissionVerified:true };
+    assert.equal((await ci.submit(p, "direct")).admission_pending, changed);
+    await ci.watchdog(); assert.equal(r.state, "superseded"); assert.equal(r.jobId, undefined);
+    if (!changed) {
+      delete ci.receipts.newer; await ci.submit(p, "direct"); await ci.watchdog();
+      assert.equal(r.state, "accepted");
+    } else assert.equal(r.reason, "pr_snapshot_changed");
+  }
 });
 test("cancelled OCR job is reused only after worker and dispatch shutdown", async (t) => {
   const { ci, s, p, pr } = fixture(t); await ci.submit(p, "direct"); await ci.dispatch(ci.receipts[p.request_id]);
   const r=ci.receipts[p.request_id], job=s.state.data.jobs[0]; job.snapshot={ retained:true };
   pr.state="closed"; await ci.refresh(r); pr.state="open";
-  ci.dispatching.add(r.request_id); await assert.rejects(ci.submit(p,"direct"), /still stopping/);ci.dispatching.clear();
-  s.workers.set(0,{job});await assert.rejects(ci.submit(p,"direct"), /still stopping/);s.workers.clear();
-  await ci.submit(p,"direct"); assert.equal(r.jobId,job.id);assert.equal(job.state,"queued");assert.deepEqual(job.snapshot,{retained:true});
+  ci.dispatching.add(r.request_id); assert.equal((await ci.submit(p,"direct")).admission_pending,true);
+  await ci.refresh(r,false); assert.match(r.pendingAdmission.lastError.message,/still stopping/); ci.dispatching.clear();
+  s.workers.set(0,{job});r.pendingAdmission.nextAt=0;await ci.refresh(r,false);
+  assert.equal(job.state,"cancelled");assert.ok(r.pendingAdmission);s.workers.clear();
+  r.pendingAdmission.nextAt=0;await ci.refresh(r,false);
+  assert.equal(r.jobId,job.id);assert.equal(job.state,"queued");assert.deepEqual(job.snapshot,{retained:true});
   await ci.dispatch(r);assert.equal(s.state.data.jobs.length,1);
 });
 test("snapshot changes are not resurrected when a branch returns to the old commit", async(t)=>{
@@ -383,11 +398,13 @@ test("configuration conflicts remain failures rather than being silently superse
  await ci.dispatch(ci.receipts[p.request_id]);assert.equal(ci.receipts[p.request_id].state,"failed");
  assert.equal(ci.receipts[p.request_id].reason,"dispatch_configuration_or_access_error");
 });
-test("App delivery acknowledgement immediately binds a matching Policy receipt",async(t)=>{
+test("App delivery acknowledgement binds a matching Policy receipt after its verification",async(t)=>{
  const {ci,s,p,pr}=fixture(t);await ci.submit(p,"agent");
  const job=s.state.enqueue(p.repository,pr,{force:true});
  const event={id:'app-event',repository:p.repository,number:p.pull_number,head:p.head_sha,base:p.base_sha,route:'agent'};
  require('./delivery.js').acknowledgeDelivery(s,event,job,{id:'agent'});
+ assert.equal(ci.receipts[p.request_id].jobId,undefined);
+ await ci.refresh(ci.receipts[p.request_id],false);
  assert.equal(ci.receipts[p.request_id].jobId,job.id);assert.equal(job.ciRequestId,p.request_id);
  ci.agentDispatch=async()=>{throw new Error('Must not contact Agent again');};
  await ci.dispatch(ci.receipts[p.request_id]);assert.equal(s.state.data.jobs.length,1);
@@ -412,7 +429,8 @@ test("backend scheduler recovers persisted admission without any n8n tick", asyn
 test("explicit Actions rerun reopens failed admission once and never revives superseded work",async(t)=>{
  const {ci,p}=fixture(t);await ci.submit(p,'direct');const r=ci.receipts[p.request_id];ci.stop(r,'failed','dispatch_retries_exhausted');
  await ci.submit(p,'direct');assert.equal(r.state,'failed');
- await ci.submit({...p,retry_key:'123:2'},'direct');assert.equal(r.state,'accepted');
+ assert.equal((await ci.submit({...p,retry_key:'123:2'},'direct')).admission_pending,true);
+ await ci.watchdog();assert.equal(r.state,'accepted');
  ci.stop(r,'failed','dispatch_retries_exhausted');await ci.submit({...p,retry_key:'123:2'},'direct');assert.equal(r.state,'failed');
  ci.stop(r,'superseded','pr_snapshot_changed');await ci.submit({...p,retry_key:'123:3'},'direct');assert.equal(r.state,'superseded');
 });
@@ -500,6 +518,7 @@ test("a retry key observed before failure cannot later reopen the receipt", asyn
     await ci.submit({ ...p, retry_key: "456:2" }, "direct");
     assert.equal(receipt.state, "failed");
     await ci.submit({ ...p, retry_key: "456:3" }, "direct");
+    await ci.watchdog();
     assert.equal(receipt.state, "accepted");
   }
 });
@@ -588,11 +607,15 @@ test("restart retries unpublished receipt without rerunning or duplicating its j
   assert.equal(statuses.at(-1).state, "pending"); assert.equal(s.state.data.jobs.length, 1);
 });
 
-test("first admission still rejects invalid PR snapshots before storing a receipt", async t => {
-  const { ci, s, p, pr } = fixture(t); pr.head.sha = "c".repeat(40);
-  await assert.rejects(ci.submit(p, "direct"), { code: "PR_SNAPSHOT_CHANGED" });
-  assert.equal(Object.keys(ci.receipts).length, 0);
-  s.github.rest.pulls.get = async () => { throw Error("GitHub unavailable"); };
-  await assert.rejects(ci.submit(p, "direct"), /GitHub unavailable/);
-  assert.equal(Object.keys(ci.receipts).length, 0);
+test("first admission persists before snapshot verification and background failure cannot create jobs", async t => {
+  for (const changed of [false,true]) {
+    const {ci,s,p,pr}=fixture(t);
+    if(changed)pr.head.sha="c".repeat(40);
+    else s.github.rest.pulls.get=async()=>{throw Error("GitHub unavailable");};
+    const ack=await ci.submit(p,"direct");assert.equal(ack.admission_pending,true);assert.equal(ack.durable,true);
+    await ci.watchdog();const r=ci.receipts[p.request_id];
+    assert.equal(s.state.data.jobs.length,0);
+    if(changed){assert.equal(r.state,"superseded");assert.equal(r.reason,"pr_snapshot_changed");}
+    else{assert.equal(r.pendingAdmission.attempts,1);assert.match(r.pendingAdmission.lastError.message,/unavailable/);}
+  }
 });

@@ -35,7 +35,7 @@ Add this top-level configuration only when ready to test activation:
 
 ## Audit and limits
 
-Logs: `ci_reconciliation_scan`, `ci_reconciliation_accepted`, and `ci_reconciliation_failed`. Rows retain first/last observation, missing-since time, canonical request ID, owner, status, and recovery time. Recovered receipts record `reconciliation.source = scheduled_snapshot_scan`.
+Logs: `ci_reconciliation_scan`, `ci_reconciliation_accepted`, and `ci_reconciliation_failed`. Rows retain first/last observation, missing-since time, canonical request ID, owner, status, and acceptance/recovery time. A committed receipt awaiting background verification is marked `verification_pending`; scan admission counts refer to durable acceptance, not a verified or completed review. Such receipts already have an owner and are not repeatedly resubmitted by the scanner. Recovered receipts record `reconciliation.source = scheduled_snapshot_scan`.
 
 This restores **review admission**, not a failed GitHub Actions workflow run. A failed required workflow remains failed until separately retried or the ruleset uses the backend-owned admission status. Existing oncall notifications only cover terminal review failures; scanner/network failure notification is a separate alerting concern and is not silently enabled here.
 

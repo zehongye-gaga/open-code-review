@@ -6,6 +6,12 @@ The backend owns dispatch after durable admission. GitHub App deliveries and org
 
 The `ocr-ci/v1` coordinate schema remains unchanged. Receipt responses add `contract_version: 2`, `acceptance: accepted`, and `scheduler: backend`. A Policy workflow confirms durable admission independently of the eventual review verdict. The separate `ocr-review` status remains advisory unless a Ruleset explicitly requires it. Existing CI clients and the old n8n tracking loop can coexist during rollout; `ci_tick` remains a status/heartbeat compatibility endpoint but no longer owns dispatch.
 
+GitHub App ingress returns its correlated receipt after the delivery transaction commits, without initiating or awaiting a GitHub status API call. The existing background dispatcher publishes pending and terminal admission statuses; persisted retry timestamps survive restarts. A committed delivery remains recoverable when a status request stalls or fails. Persistence failure still rejects admission, and a transport ACK never represents a passing review verdict.
+
+Organization-CI ingress also performs only local authentication, scope/enrollment checks, coordinate and retry-key validation, and a committed receipt update. First admission, explicit retries and reopening use `pendingAdmission` on the same receipt, not a separate volatile queue. The existing version-2 ACK means the backend owns verification and subsequent processing, not that GitHub eligibility has already been verified. `admission_pending`, `admission_attempts` and `admission_retry_at` expose that phase. No Policy polling or n8n orchestration is required.
+
+The backend verifies the frozen snapshot before adopting or dispatching a job. Verification uses at most eight persisted attempts with exponential backoff and server-directed rate-limit delays, plus the existing total deadline. Obsolete snapshots become superseded; permanent access failures and exhausted verification become failed receipts observed by the existing failure notifier. Explicit failed verification generations have distinct notification identities, while transport replays keep the same generation. A pending or rejected snapshot cannot cancel a verified task or take ownership of its commit status. Receipt generations fence callbacks that complete after a newer retry or reopen was accepted. Reopening restores a cancelled job and commits its verified admission together, preserving its native session and artifacts.
+
 The shared outcome contract covers queued, running, retrying, complete, blocked, skipped, execution_failed, publication_failed, cancelled, superseded and dispatch_failed. Only typed `PR_SNAPSHOT_CHANGED` errors mean supersession. Configuration conflicts and authorization failures remain failures. Snapshot reuse checks policy version, verdict threshold, provider/model, exclusions and rule/tool resource digests. Agent profile effort choices do not create duplicate automated jobs for an unchanged snapshot.
 
 Explicit GitHub Actions reruns pass `retry_key = run_id:run_attempt`. A new key with attempt >= 2 may reopen a failed receipt that never acquired a job; duplicate keys cannot repeat that recovery. Superseded receipts are not revived. Failed native jobs retain the existing authorized `retry_review` operation and their original artifacts.
@@ -30,11 +36,13 @@ Job failure notifications use stable job/outcome identity, independent of `start
 
 1. Run service tests, Policy tests and the Python-client/HTTP-backend contract test (`OCR_POLICY_CLIENT` can point to a separate Policy checkout). Run `make check` and `make test`.
 2. Use `scripts/validation/control-plane-live.js CONFIG PR_JSON NEW_OUTPUT_DIRECTORY --live-test` against an isolated `OCR-Test-Public` PR targeting `test/control-plane-base-*`. It uses separate state and `ocr-control-test/*` contexts, real Git fetch/status/review APIs, deterministic native reports and injected failures. It never sends Feishu messages. Fixture cases are not model-quality validation.
-3. Stage an immutable backend release and keep the old code/config pointers. Switch only after running/queued jobs and pending/active dispatches are empty. Deploy backend before Policy clients and n8n.
+3. Stage an immutable backend release and keep the old code/config pointers. Switch only after running/queued jobs, pending/active dispatches and pending admission verification intents are empty. Deploy backend before Policy clients and n8n.
 4. Generate the n8n candidate with `withBackendControl(exportedWorkflow)`. Preserve credential references, signed bytes and CI token forwarding. Publish only after backend admission/recovery tests pass.
 5. Verify the deployed file hashes, health, an actual webhook/CI admission and final status. Record all release identifiers and test PRs.
 
 Rollback must restore the matching old n8n polling workflow before the old backend; an old backend with the transport-only workflow cannot dispatch CI receipts. Restore code/config pointers, never overwrite current state with an old backup. Preserve all tasks accepted after cutover. Agent budget history and recovery fields are additive state fields.
+
+Before rolling back to code without `pendingAdmission` support, drain those intents, including retries and reopens attached to terminal lifecycle records. Retaining only native jobs or overwriting state with an older backup can strand accepted work. No running configuration is changed by installing this code.
 
 ## Repository enrollment
 
