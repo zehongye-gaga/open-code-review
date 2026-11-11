@@ -17,6 +17,15 @@ CI receipts immediately attach to an existing matching task and record `reused_e
 
 The webhook keeps its existing event, draft and target-branch checks. Organization CI snapshots use the workflow/ruleset scope and may include draft PRs. The current CI identity validator is restricted to the `lexmount` organization; this is a deployment-specific restriction, not a generic multi-organization gateway.
 
+Authenticated CI requests for repositories outside the backend enrollment list
+persist a terminal `skipped` receipt with reason `repository_not_enabled`. This
+is a successful dispatch decision without an OCR job, Agent call, or review
+verdict publication. Duplicate submissions and status queries reuse that receipt.
+Enabling the repository allows a later submission for the same current snapshot
+to start review, retaining the earlier skip decision in admission history.
+Client repository scope and both CI credentials remain required. Direct review
+tools continue to reject unenrolled repositories.
+
 ## Credentials and deployment
 
 The dispatcher credential authenticates backend calls. The separate organization CI credential is sent as `X-OCR-CI-Token: Bearer <secret>`. Keep token files, GitHub credentials, model provider configuration, execution payloads and state outside the source repository. n8n must avoid retaining sensitive request headers in execution history.

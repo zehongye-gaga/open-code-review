@@ -55,7 +55,7 @@ function createInfrastructureHandler(service, legacyToken) {
         const name = url.pathname.slice(4);
         if (["ci_submit", "ci_status", "ci_tick"].includes(name)) {
           if (!["dispatcher", "admin"].includes(actor.role)) { send(403, { error: "Dispatcher required" }); return true; }
-          infra.authorize(message.repository, actor);
+          infra.authorizeScope(message.repository, actor);
           if (name !== "ci_tick") service.orgCI.authenticate(req.headers["x-ocr-ci-token"]);
           const result = name === "ci_submit" ? await service.orgCI.submit(message, message.route) :
             name === "ci_status" ? await service.orgCI.status(message) : await service.orgCI.tick(message);

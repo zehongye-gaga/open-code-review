@@ -33,3 +33,11 @@ test("explicit snapshot cancellation and access failures are not hidden by older
  assert.equal(receiptOutcome({state:"superseded",reason:"pr_snapshot_changed"},skip).kind,"superseded");
  assert.equal(receiptOutcome({state:"failed",reason:"repository_access_failed"},skip).alert,true);
 });
+
+test("unenrolled repository receipts are successful policy skips without a review verdict",()=>{
+ const receipt={state:"skipped",reason:"repository_not_enabled"};
+ const result=receiptOutcome(receipt,null);
+ assert.equal(result.kind,"skipped");assert.equal(result.commitStatus,"success");assert.equal(result.alert,false);
+ assert.equal(result.reason,"repository_not_enabled");
+ assert.equal(receiptOutcome(receipt,{state:"complete",progress:{complete:true},result:{blocking:1}}).kind,"blocked");
+});

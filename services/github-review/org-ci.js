@@ -7,7 +7,7 @@ const fs = require("node:fs");
 const crypto = require("node:crypto");
 const { fail, resolveOptions } = require("./options.js");
 const { dispatchAgent } = require("./agent-dispatch.js");
-const { jobOutcome, receiptOutcome, receiptTerminal: terminal } = require("./outcome.js");
+const { jobOutcome, receiptOutcome, receiptTerminal: terminal, isRepositorySkip } = require("./outcome.js");
 const keys = ["base_ref", "base_sha", "head_sha", "pull_number", "repository"];
 function requestId(value) {
   const ordered = Object.fromEntries(keys.map(k => [k, value[k]]));
@@ -52,7 +52,7 @@ class OrgCI {
   view(r) {
     return { ...identity(r), outcome: receiptOutcome(r, this.s.state.data.jobs.find((j) => j.id === r.jobId)).kind, state: r.state, durable: true, task_id: r.request_id,
       acceptance: "accepted", scheduler: "backend", contract_version: 2, status_published: !!r.published, commit_status: r.published?.state || null,
-      job_id: r.jobId || null, reason: r.reason || null, terminal: terminal.has(r.state) && !!r.published && r.published.state !== "pending" };
+      job_id: r.jobId || null, reason: r.reason || null, terminal: isRepositorySkip(r) || terminal.has(r.state) && !!r.published && r.published.state !== "pending" };
   }
   async current(r) {
     const { data } = await this.s.github.rest.pulls.get({ ...this.s.coordinates(r.repository), pull_number: r.pull_number });
@@ -83,12 +83,23 @@ class OrgCI {
     if (this.config.enabled !== true) fail("Organization CI is staged and not enabled", 503);
     const normalized = identity(input);
     if (!["direct", "agent"].includes(route)) fail("Invalid n8n route");
+    if (!this.s.repo(normalized.repository)) return this.lock(normalized.request_id, () => {
+      const existing = this.receipts[normalized.request_id];
+      if (existing?.jobId || existing && isRepositorySkip(existing)) {
+        this.s.state.save(); return this.view(existing);
+      }
+      const r = this.createReceipt(normalized, route, existing);
+      r.state = "skipped"; r.reason = "repository_not_enabled"; r.finishedAt = Date.now();
+      this.s.state.save();
+      this.s.log("ci_repository_skipped", { repository: r.repository, number: r.pull_number, request_id: r.request_id });
+      return this.view(r);
+    });
     const existing = this.receipts[normalized.request_id];
     const reopening = existing?.state === "superseded" && ["pr_closed", "pr_changed_or_closed"].includes(existing.reason);
     const retrying = existing?.state === "failed" && !existing.jobId && !this.dispatching.has(existing.request_id) &&
       typeof input.retry_key === "string" && /^[0-9]+:[0-9]+$/.test(input.retry_key) &&
       Number(input.retry_key.split(":")[1]) >= 2 && !(existing.retryKeys || []).includes(input.retry_key);
-    if (existing && !retrying && !reopening) {
+    if (existing && !isRepositorySkip(existing) && !retrying && !reopening) {
       // An existing durable receipt can be acknowledged while the watchdog is awaiting GitHub.
       await this.retrySubmission(existing, input.retry_key);
       this.s.state.save();
@@ -96,20 +107,27 @@ class OrgCI {
     }
     return this.lock(normalized.request_id, async () => {
       let r = this.receipts[normalized.request_id];
-      if (r) { await this.retrySubmission(r, input.retry_key); await this.reopen(r); this.s.state.save(); return this.view(r); }
+      if (r && !isRepositorySkip(r)) { await this.retrySubmission(r, input.retry_key); await this.reopen(r); this.s.state.save(); return this.view(r); }
       await this.current(normalized);
-      if (Object.keys(this.receipts).length >= 25000) fail("CI receipt capacity reached", 503);
+      if (!r && Object.keys(this.receipts).length >= 25000) fail("CI receipt capacity reached", 503);
       for (const old of Object.values(this.receipts)) {
         if (old.repository === normalized.repository && old.pull_number === normalized.pull_number && !terminal.has(old.state)) this.stop(old, "superseded", "new_snapshot");
       }
-      r = this.receipts[normalized.request_id] = { ...normalized, route, state: "accepted", sequence: ++this.s.state.data.sequence,
-        createdAt: Date.now(), heartbeatAt: Date.now(), dispatchAttempts: 0, nextDispatchAt: 0 };
+      r = this.createReceipt(normalized, route, r);
       if (input.retry_key !== undefined) await this.retrySubmission(r, input.retry_key);
       this.s.state.save();
       // Admission ends at durable storage; GitHub publication belongs to the watchdog.
       this.adoptExisting(r);
       return this.view(r);
     });
+  }
+  createReceipt(normalized, route, previous) {
+    if (!previous && Object.keys(this.receipts).length >= 25000) fail("CI receipt capacity reached", 503);
+    const r = { ...normalized, route, state: "accepted", sequence: ++this.s.state.data.sequence,
+      createdAt: Date.now(), heartbeatAt: Date.now(), dispatchAttempts: 0, nextDispatchAt: 0 };
+    if (previous) r.admissionHistory = [...(previous.admissionHistory || []), {
+      state: previous.state, reason: previous.reason, createdAt: previous.createdAt, finishedAt: previous.finishedAt }];
+    return this.receipts[normalized.request_id] = r;
   }
   async retrySubmission(r, retryKey) {
     if (retryKey === undefined) return;
@@ -124,7 +142,11 @@ class OrgCI {
     for (const key of ["reason", "finishedAt", "finalStatus", "published", "lastDispatchError"]) delete r[key];
     this.s.state.save();
   }
-  async status(input) { const r = this.lookup(input); await this.lock(r.request_id, () => this.refresh(r)); return this.view(r); }
+  async status(input) {
+    return this.lock(identity(input).request_id, async () => {
+      const r = this.lookup(input); await this.refresh(r); return this.view(r);
+    });
+  }
   async reopen(r) {
     if (r.state !== "superseded" || !["pr_closed", "pr_changed_or_closed"].includes(r.reason)) return;
     await this.current(r);
@@ -239,10 +261,12 @@ class OrgCI {
     await this.refresh(r, false);
   }
   async tick(input) {
-    const r = this.lookup(input); r.heartbeatAt = Date.now(); this.s.state.save();
-    await this.lock(r.request_id, () => this.refresh(r));
-    // Compatibility endpoint: the backend scheduler owns admission and recovery.
-    return this.view(r);
+    return this.lock(identity(input).request_id, async () => {
+      const r = this.lookup(input); r.heartbeatAt = Date.now(); this.s.state.save();
+      await this.refresh(r);
+      // Compatibility endpoint: the backend scheduler owns admission and recovery.
+      return this.view(r);
+    });
   }
   async publishJobStatus(job, state, description, target) {
     const r = this.receipts[job.ciRequestId];
@@ -275,6 +299,7 @@ class OrgCI {
     this.s.state.save();
   }
   async refresh(r, publishStatus = true) {
+    if (isRepositorySkip(r)) { this.s.state.save(); return; }
     await this.reconcileLegacy(r);
     if (!terminal.has(r.state) && !r.jobId) this.adoptExisting(r);
     const now = Date.now(), j = this.s.state.data.jobs.find((job) => job.id === r.jobId);
@@ -312,6 +337,7 @@ class OrgCI {
     this.watching = true;
     try {
       for (const r of Object.values(this.receipts)) {
+        if (isRepositorySkip(r)) continue;
         if (terminal.has(r.state) && r.published?.state && r.published.state !== "pending" && !this.repairable(r)) continue;
         try { await this.lock(r.request_id, () => this.refresh(r)); }
         catch (error) { this.s.log("ci_watchdog_retry", { id: r.request_id, error: error.message }); if (error.persistence) throw error; }

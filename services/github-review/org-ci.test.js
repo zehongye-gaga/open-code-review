@@ -102,6 +102,106 @@ test("staged gateway cannot receive live tasks", async (t) => {
   await assert.rejects(ci.submit(p, "direct"), /staged/); assert.equal(s.state.data.jobs.length, 0);
 });
 
+test("unenrolled CI snapshots persist successful skips without GitHub or review work", async (t) => {
+  const { ci, s, p, statuses } = fixture(t); s.repo = () => null;
+  s.github.rest.pulls.get = async () => { throw Error("Skipped admission must not read GitHub"); };
+  const ack = await ci.submit(p, "agent");
+  assert.equal(ack.state, "skipped"); assert.equal(ack.outcome, "skipped");
+  assert.equal(ack.reason, "repository_not_enabled"); assert.equal(ack.terminal, true);
+  assert.equal(ack.durable, true); assert.equal(ack.acceptance, "accepted");
+  assert.equal(ack.contract_version, 2); assert.equal(ack.job_id, null);
+  assert.equal(ack.status_published, false); assert.equal(ack.commit_status, null);
+  const sequence = ci.receipts[p.request_id].sequence;
+  s.state = new State(path.dirname(s.state.file)); const restored = new OrgCI(s);
+  assert.equal((await restored.submit(p, "direct")).state, "skipped");
+  assert.equal(restored.receipts[p.request_id].sequence, sequence);
+  assert.equal((await restored.status(p)).state, "skipped");
+  assert.equal((await restored.tick(p)).state, "skipped");
+  await restored.dispatch(restored.receipts[p.request_id]); await restored.watchdog();
+  assert.equal(s.state.data.jobs.length, 0); assert.equal(statuses.length, 0);
+  assert.equal(Object.keys(restored.receipts).length, 1);
+  await assert.rejects(restored.submitReview({ ...p, request_id: "github:" + p.request_id }, { id: "agent" }), /terminal/);
+});
+
+test("enrolling a skipped repository admits the same snapshot once and retains skip history", async (t) => {
+  const { ci, s, p } = fixture(t), repo = s.repo;
+  s.repo = () => null; await ci.submit(p, "agent"); s.repo = repo;
+  await Promise.all([ci.submit(p, "direct"), ci.submit(p, "direct")]);
+  const r = ci.receipts[p.request_id];
+  assert.equal(r.state, "accepted"); assert.equal(r.reason, undefined);
+  assert.equal(r.admissionHistory.length, 1);
+  assert.equal(r.admissionHistory[0].reason, "repository_not_enabled");
+  await ci.dispatch(r);
+  assert.equal(s.state.data.jobs.length, 1); assert.equal(r.jobId, s.state.data.jobs[0].id);
+});
+
+test("removing enrollment preserves existing job evidence and skip ACK requires persistence", async (t) => {
+  const { ci, s, p } = fixture(t); await ci.submit(p, "direct"); await ci.dispatch(ci.receipts[p.request_id]);
+  const jobId = ci.receipts[p.request_id].jobId; s.repo = () => null;
+  assert.equal((await ci.submit(p, "agent")).job_id, jobId);
+  assert.equal(s.state.data.jobs.length, 1);
+  const next = input({ head_sha: "c".repeat(40) });
+  s.state.save = () => { throw Object.assign(Error("Disk unavailable"), { persistence: true }); };
+  await assert.rejects(ci.submit(next, "direct"), /Disk unavailable/);
+  await assert.rejects(ci.submit(next, "direct"), /Disk unavailable/);
+  await assert.rejects(ci.status(next), /Disk unavailable/);
+  await assert.rejects(ci.tick(next), /Disk unavailable/);
+});
+
+test("status and heartbeat queries observe completed enrollment promotion under the receipt lock", async (t) => {
+  const { ci, s, p, pr } = fixture(t), repo = s.repo;
+  s.repo = () => null; await ci.submit(p, "direct"); s.repo = repo;
+  let release, entered;
+  const reading = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  let first = true;
+  s.github.rest.pulls.get = async () => {
+    if (first) { first = false; entered(); await gate; }
+    return { data: pr };
+  };
+  const promotion = ci.submit(p, "direct"); await reading;
+  const status = ci.status(p), heartbeat = ci.tick(p);
+  release();
+  for (const result of await Promise.all([promotion, status, heartbeat])) assert.equal(result.state, "accepted");
+  assert.equal(ci.receipts[p.request_id].state, "accepted");
+  assert.equal(ci.receipts[p.request_id].admissionHistory.length, 1);
+});
+
+test("HTTP skip ACK retains both credentials, client scope and direct-review authorization", async (t) => {
+  const { s, p } = fixture(t), { createServer } = require("./server.js");
+  const dir = path.dirname(s.state.file), file = name => path.join(dir, name);
+  for (const name of ["ci", "dispatcher", "scoped", "agent"]) fs.writeFileSync(file(name), name);
+  const service = new ReviewService({ config: { ...s.config, stateDirectory: dir,
+    repositories: [{ name: p.repository, baseBranches: ["main"] }],
+    infrastructure: { ...s.config.infrastructure, enabled: true, externalDispatch: true, dispatchEnabled: true,
+      orgCI: { enabled: true, tokenFile: file("ci") }, clients: [
+        { id: "dispatcher", role: "dispatcher", tokenFile: file("dispatcher"), repositories: ["lexmount/*"] },
+        { id: "scoped", role: "dispatcher", tokenFile: file("scoped"), repositories: [p.repository] },
+        { id: "agent", role: "agent", tokenFile: file("agent"), repositories: ["lexmount/*"] },
+      ] } }, github: s.github, state: s.state, log() {} });
+  service.github.rest.pulls.get = async () => { throw Error("Skip must not fetch PR"); };
+  const server = createServer(service);
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const body = input({ repository: "lexmount/not-enabled" });
+  const send = (endpoint, value, authorization = "dispatcher", ciToken = "ci") => fetch(`http://127.0.0.1:${server.address().port}/v2/${endpoint}`, {
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${authorization}`,
+      "x-ocr-ci-token": `Bearer ${ciToken}` }, body: JSON.stringify(value) });
+  assert.equal((await send("ci_submit", { ...body, route: "agent" }, "wrong")).status, 401);
+  assert.equal((await send("ci_submit", { ...body, route: "agent" }, "dispatcher", "wrong")).status, 401);
+  assert.equal((await send("ci_submit", { ...body, route: "agent" }, "scoped")).status, 403);
+  assert.equal((await send("ci_submit", { ...body, request_id: "wrong", route: "agent" })).status, 409);
+  const response = await send("ci_submit", { ...body, route: "agent" });
+  assert.equal(response.status, 202); assert.equal((await response.json()).state, "skipped");
+  assert.equal((await send("ci_status", body)).status, 200);
+  assert.equal((await send("ci_tick", body)).status, 200);
+  assert.equal((await send("submit_review", { repository: body.repository, pull_number: body.pull_number,
+    head_sha: body.head_sha, base_sha: body.base_sha }, "agent")).status, 403);
+  await service.orgCI.watchdog(); await service.githubEvents.tick();
+  assert.equal(service.state.data.jobs.length, 0);
+  assert.equal(Object.keys(service.state.data.ciReceipts).length, 1);
+});
+
 test("crash between enqueue and receipt update recovers the same job", async (t) => {
   const { ci, s, p } = fixture(t); await ci.submit(p, "direct"); await ci.dispatch(ci.receipts[p.request_id]);
   delete ci.receipts[p.request_id].jobId; s.state.save();
