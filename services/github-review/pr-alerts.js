@@ -6,6 +6,7 @@ const copy=require("./pr-alerts.zh-CN.json");
 const values=v=>Array.isArray(v)?v:Object.values(v||{});
 const clean=v=>String(v||"unknown").replace(/(?:github_pat_|gh[pousr]_|goclaw_)[A-Za-z0-9_.-]+/g,"[REDACTED]").replace(/Bearer\s+[^\s]+/gi,"Bearer [REDACTED]").replace(/https:\/\/open\.feishu\.cn\/open-apis\/bot\/v2\/hook\/[^\s]+/g,"[WEBHOOK REDACTED]").slice(0,1200);
 const { jobOutcome, receiptOutcome } = require("./outcome.js");
+const { sameRepository } = require("./repositories.js");
 function events(state, notifyBlocking=false) {
  const rows=[],covered=new Set(),jobs=new Map(values(state.jobs).map(j=>[String(j.id),j]));
  for(const j of jobs.values()) {
@@ -54,7 +55,7 @@ class Alerts {
  }
  async collect(source,now=Date.now()){
   const policy=this.config.repositoryPolicyFile?JSON.parse(fs.readFileSync(this.config.repositoryPolicyFile,"utf8")):null;
-  const eligible=e=>!policy || (policy.repositories||[]).some(r=>r.name?.toLowerCase()===e.repository.toLowerCase()) ||
+  const eligible=e=>!policy || (policy.repositories||[]).some(r=>sameRepository({config:policy},r.name,e.repository)) ||
     (policy.infrastructure?.organizations||[]).some(o=>o.name?.toLowerCase()===e.repository.split("/")[0].toLowerCase());
   const current=events(source,this.config.notifyBlocking===true).filter(eligible),map=new Map(current.map(e=>[e.key,e]));
   if(!this.state){this.state={initializedAt:now,seen:Object.fromEntries(current.map(e=>[e.key,{baseline:true,at:now}])),pending:{}};this.save();return {baseline:current.length,sent:0};}

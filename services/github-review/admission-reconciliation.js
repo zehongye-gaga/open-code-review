@@ -3,6 +3,8 @@
 "use strict";
 const { identity, requestId } = require("./org-ci.js");
 const { dispatchFailure } = require("./dispatch-control.js");
+const { isRepositorySkip } = require("./outcome.js");
+const { sameRepository, sameSnapshot, closedReceipt, receiptOwner } = require("./repositories.js");
 const defaults = { enabled: false, mode: "observe", intervalSeconds: 900, graceSeconds: 300, maxAdmissionsPerScan: 10 };
 function settings(config) { return { ...defaults, ...config.admissionReconciliation }; }
 function validateConfiguration(config) {
@@ -40,11 +42,16 @@ class AdmissionReconciliation {
   }
   owner(p) {
     const d = this.s.state.data;
-    const receipt = d.ciReceipts?.[p.request_id];
-    if (receipt) return !receipt.pendingAdmission && receipt.state === "superseded" && ["pr_closed", "pr_changed_or_closed"].includes(receipt.reason) ? null : "receipt";
-    if (d.jobs.some(j => j.repository === p.repository && j.number === p.pull_number && j.head === p.head_sha &&
+    const closed = r => !r.pendingAdmission && closedReceipt(r);
+    let receipt = receiptOwner(this.s, d.ciReceipts?.[p.request_id]);
+    if ((!receipt || isRepositorySkip(receipt) || closed(receipt)) && this.s.repo(p.repository)?.githubName) {
+      receipt = Object.values(d.ciReceipts || {}).map(r => receiptOwner(this.s, r)).find(r => r.repository !== p.repository &&
+        !isRepositorySkip(r) && !closed(r) && sameSnapshot(this.s, r, p)) || receipt;
+    }
+    if (receipt && !isRepositorySkip(receipt)) return closed(receipt) ? null : "receipt";
+    if (d.jobs.some(j => sameRepository(this.s, j.repository, p.repository) && j.number === p.pull_number && j.head === p.head_sha &&
         j.base === p.base_sha && j.baseRef === p.base_ref && !j.settings?.preview && !["cancelled", "superseded"].includes(j.state))) return "job";
-    if ((d.deliveries || []).some(e => e.repository === p.repository && e.number === p.pull_number &&
+    if ((d.deliveries || []).some(e => sameRepository(this.s, e.repository, p.repository) && e.number === p.pull_number &&
         e.head === p.head_sha && e.base === p.base_sha && ["pending", "failed"].includes(e.state) && e.admitted)) return "delivery";
     return null;
   }

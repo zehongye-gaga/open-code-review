@@ -8,6 +8,7 @@ const crypto = require("node:crypto");
 const { fail, resolveOptions } = require("./options.js");
 const { dispatchAgent } = require("./agent-dispatch.js");
 const { jobOutcome, receiptOutcome, receiptTerminal: terminal, isRepositorySkip } = require("./outcome.js");
+const { repositoryKey, sameRepository, sameSnapshot, hasNewerReceipt } = require("./repositories.js");
 const keys = ["base_ref", "base_sha", "head_sha", "pull_number", "repository"];
 function requestId(value) {
   const ordered = Object.fromEntries(keys.map(k => [k, value[k]]));
@@ -58,7 +59,7 @@ class OrgCI {
       admission_retry_at: r.pendingAdmission?.nextAt || null,
       terminal: !pending && (isRepositorySkip(r) || terminal.has(r.state) && !!r.published && r.published.state !== "pending") };
   }
-  owns(r, generation) { return this.receipts[r.request_id] === r && r.admissionGeneration === generation && !r.pendingAdmission; }
+  owns(r, generation) { return this.receipts[r.request_id] === r && r.admissionGeneration === generation && !r.pendingAdmission && !r.successorReceipt; }
   async current(r) {
     const { data } = await this.s.github.rest.pulls.get({ ...this.s.coordinates(r.repository), pull_number: r.pull_number });
     if (!this.s.eligible(r.repository, data, { ciRequestId: r.request_id }) ||
@@ -69,25 +70,27 @@ class OrgCI {
     return data;
   }
   stop(r, state, reason) {
+    if (r.successorReceipt) return;
     if (r.pendingAdmission) {
       r.lastAdmission = { ...r.pendingAdmission, state, reason, finishedAt: Date.now() };
       delete r.pendingAdmission;
     }
     r.state = state; r.reason = reason; r.finishedAt = Date.now();
     const job = this.s.state.data.jobs.find((j) => j.id === r.jobId);
-    if (job && ["queued", "running"].includes(job.state)) job.state = "cancelled";
-    for (const worker of this.s.workers.values()) if (worker.job.id === r.jobId) worker.controller.abort();
+    const ownsJob = job && (!job.ciRequestId || job.ciRequestId === r.request_id);
+    if (ownsJob && ["queued", "running"].includes(job.state)) job.state = "cancelled";
+    for (const worker of this.s.workers.values()) if (ownsJob && worker.job.id === r.jobId) worker.controller.abort();
     this.s.state.save();
   }
   async publish(r, state, description, target) {
     const generation = r.admissionGeneration;
-    return this.lock(`${r.repository}:${r.head_sha}`, async () => {
+    return this.lock(`${repositoryKey(this.s, r.repository)}:${r.head_sha}`, async () => {
       if (!this.owns(r, generation)) return;
-      const newer = Object.values(this.receipts).some((other) => other !== r && other.repository === r.repository && other.head_sha === r.head_sha &&
+      const newer = Object.values(this.receipts).some((other) => other !== r && sameRepository(this.s, other.repository, r.repository) && other.head_sha === r.head_sha &&
         other.admissionVerified !== false && (other.sequence > r.sequence || r.admissionVerified === false));
       const executionOwner = r.admissionVerified === false && (
-        this.s.state.data.jobs.some(job => job.repository === r.repository && job.head === r.head_sha && !job.settings?.preview) ||
-        (this.s.state.data.deliveries || []).some(event => event.repository === r.repository && event.head === r.head_sha &&
+        this.s.state.data.jobs.some(job => sameRepository(this.s, job.repository, r.repository) && job.head === r.head_sha && !job.settings?.preview) ||
+        (this.s.state.data.deliveries || []).some(event => sameRepository(this.s, event.repository, r.repository) && event.head === r.head_sha &&
           event.admitted && !["ignored", "superseded"].includes(event.state)));
       if (newer || executionOwner) { r.published = { state: "failure", suppressed: true }; this.s.state.save(); return; }
       if (r.published?.state === state && r.published?.description === description) return;
@@ -120,14 +123,18 @@ class OrgCI {
   reopen(r, sequence) {
     const retry = r.state === "failed" && r.lastAdmission?.state === "failed" && r.lastAdmission.kind === "reopen";
     if (!retry && (r.state !== "superseded" || !["pr_closed", "pr_changed_or_closed"].includes(r.reason))) fail("Previous review is no longer reopenable", 409, "REOPEN_UNAVAILABLE");
-    const newer = Object.values(this.receipts).some((other) => other.repository === r.repository &&
-      other.pull_number === r.pull_number && other.sequence > r.sequence && other.admissionVerified !== false);
+    const newer = hasNewerReceipt(this.s, r);
     if (newer) fail("A newer verified snapshot owns this PR", 409, "PR_SNAPSHOT_CHANGED");
     const job = this.s.state.data.jobs.find((j) => j.id === r.jobId);
-    if (this.dispatching.has(r.request_id) || [...this.s.workers.values()].some((w) => w.job.id === r.jobId)) {
+    const owner = job && this.receipts[job.ciRequestId];
+    const activeAlias = r.predecessorReceipt && owner && owner !== r && !owner.pendingAdmission &&
+      !owner.successorReceipt && owner.admissionVerified !== false && !terminal.has(owner.state) &&
+      sameSnapshot(this.s, owner, r) && ["queued", "running"].includes(job.state);
+    if (!activeAlias && (this.dispatching.has(r.request_id) || [...this.s.workers.values()].some((w) => w.job.id === r.jobId))) {
       fail("Previous PR dispatch is still stopping; retry acceptance", 503);
     }
-    if (r.jobId && !job || job && (job.replacement || !["cancelled", "complete"].includes(job.state))) fail("Previous review job cannot be resumed", 409, "REOPEN_UNAVAILABLE");
+    if (r.jobId && !job || job && (job.replacement || !activeAlias && !["cancelled", "complete"].includes(job.state))) fail("Previous review job cannot be resumed", 409, "REOPEN_UNAVAILABLE");
+    if (job && r.predecessorReceipt && !require("./review-policy.js").currentPolicy(this.s, job)) fail("Renamed review policy is no longer compatible", 409, "REOPEN_UNAVAILABLE");
     const now = Date.now();
     r.reopenHistory ||= [];
     r.reopenHistory.push({ at: now, previousState: r.state, previousReason: r.reason,
@@ -136,11 +143,12 @@ class OrgCI {
     r.sequence = sequence;
     for (const key of ["reason", "finishedAt", "finalStatus", "published", "lastWorkerStatus", "fallbackAt", "fallbackReason", "dispatchMethod"]) delete r[key];
     if (job) {
+      this.claimJob(r, job);
       if (job.state === "cancelled") {
         job.state = "queued"; job.nextAt = 0; job.pendingSent = false;
         delete job.error;
       }
-      r.state = "queued";
+      r.state = job.state === "running" ? "running" : "queued";
     }
   }
   async submitReview(args, actor) {
@@ -152,7 +160,8 @@ class OrgCI {
       const generation = r.admissionGeneration;
       if (r.pendingAdmission) fail("CI admission is awaiting verification", 409);
       if (terminal.has(r.state)) fail("CI receipt is already terminal", 409);
-      for (const key of ["repository", "pull_number", "head_sha", "base_sha"]) if (args[key] !== r[key]) fail("CI submission snapshot mismatch", 409);
+      if (!sameRepository(this.s, args.repository, r.repository)) fail("CI submission snapshot mismatch", 409);
+      for (const key of ["pull_number", "head_sha", "base_sha"]) if (args[key] !== r[key]) fail("CI submission snapshot mismatch", 409);
       const recovered = this.s.state.data.jobs.find((j) => j.ciRequestId === id);
       if (recovered) { r.jobId = recovered.id; this.s.state.save(); }
       if (r.jobId) return { job_id: r.jobId, state: r.state, deduplicated: true };
@@ -174,16 +183,33 @@ class OrgCI {
     await this.current(r);
     return this.adoptExisting(r);
   }
+  claimJob(r, job) {
+    const previous = this.receipts[job.ciRequestId];
+    if (previous && previous !== r) {
+      if (!sameSnapshot(this.s, previous, r)) fail("Cannot transfer a different PR snapshot", 409);
+      if (previous.pendingAdmission) {
+        previous.lastAdmission = { ...previous.pendingAdmission, state: "superseded", reason: "repository_renamed", finishedAt: Date.now() };
+        delete previous.pendingAdmission;
+      }
+      previous.admissionGeneration = (previous.admissionGeneration || 0) + 1;
+      previous.state = "superseded"; previous.reason = "repository_renamed";
+      previous.successorReceipt = r.request_id; previous.finishedAt = Date.now();
+      previous.published = { state: "failure", suppressed: true };
+      r.predecessorReceipt = previous.request_id;
+    }
+    job.ciRequestId = r.request_id; r.jobId = job.id;
+  }
   adoptExisting(r) {
     if (r.pendingAdmission || r.admissionVerified === false) return false;
     if (terminal.has(r.state) || r.jobId) return !!r.jobId;
-    const job = this.s.state.data.jobs.findLast((j) => j.repository === r.repository &&
+    const job = this.s.state.data.jobs.findLast((j) => sameRepository(this.s, j.repository, r.repository) &&
       j.number === r.pull_number && j.head === r.head_sha && j.base === r.base_sha &&
       j.baseRef === r.base_ref && !j.settings?.preview && require("./review-policy.js").currentPolicy(this.s, j) &&
-      (!j.ciRequestId || j.ciRequestId === r.request_id) &&
+      (!j.ciRequestId || j.ciRequestId === r.request_id ||
+        this.receipts[j.ciRequestId]?.repository !== r.repository && sameSnapshot(this.s, this.receipts[j.ciRequestId], r)) &&
       ["queued", "running", "complete", "failed", "checkpointed"].includes(j.state));
     if (!job) return false;
-    job.ciRequestId = r.request_id; r.jobId = job.id;
+    this.claimJob(r, job);
     r.dispatchMethod = "reused_existing"; r.state = job.state;
     // refresh owns terminal receipt state and final result publication.
     if (["complete", "failed", "checkpointed"].includes(job.state)) r.state = "queued";
@@ -192,7 +218,7 @@ class OrgCI {
   }
   adoptPending(job) {
     for (const r of Object.values(this.receipts)) {
-      if (r.repository === job.repository && r.pull_number === job.number && !r.jobId && !terminal.has(r.state)) this.adoptExisting(r);
+      if (sameRepository(this.s, r.repository, job.repository) && r.pull_number === job.number && !r.jobId && !terminal.has(r.state)) this.adoptExisting(r);
     }
   }
   async dispatch(r) {

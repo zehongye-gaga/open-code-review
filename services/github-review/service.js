@@ -10,6 +10,7 @@ const { jobOutcome } = require("./outcome.js");
 const { retireAgentFeedback } = require("./agent-session.js");
 const { prepareReview, runReview, publishReview } = require("./review.js");
 const { planReview, readProgress, checkpointFor } = require("./progress.js");
+const { repositoryKey, sameRepository } = require("./repositories.js");
 
 const { executionOptions, validateInfrastructure, resolveOptions } = require("./options.js");
 
@@ -27,13 +28,19 @@ function configuration(input) {
   if (!Array.isArray(config.repositories) || !config.repositories.length) throw new Error("Configure at least one repository");
   const seen = new Set();
   for (const repo of config.repositories) {
-    if (!REPOSITORY.test(repo.name) || seen.has(repo.name.toLowerCase()) ||
+    if (typeof repo.name !== "string" || !REPOSITORY.test(repo.name) ||
+        repo.githubName !== undefined && (config.gitea || typeof repo.githubName !== "string" ||
+          !REPOSITORY.test(repo.githubName) || repo.githubName.split("/")[0].toLowerCase() !== repo.name.split("/")[0].toLowerCase()) ||
         !Array.isArray(repo.baseBranches) || !repo.baseBranches.length ||
         repo.baseBranches.some((branch) => typeof branch !== "string" || !branch)) {
-      throw new Error("Repositories require a unique owner/repo and baseBranches");
+      throw new Error("Repositories require a unique owner/repo, optional same-owner githubName, and baseBranches");
     }
     repo.name = repo.name.toLowerCase();
-    seen.add(repo.name.toLowerCase());
+    if (repo.githubName !== undefined) repo.githubName = repo.githubName.toLowerCase();
+    for (const name of new Set([repo.name, ...(repo.githubName ? [repo.githubName] : [])])) {
+      if (seen.has(name)) throw new Error("Repositories require unique names and githubName aliases");
+      seen.add(name);
+    }
   }
   for (const key of ["pollSeconds", "timeoutSeconds", "fetchTimeoutSeconds", "maxAttempts", "publicationMaxAttempts", "retrySeconds", "retentionDays", "prConcurrency", "dispatchConcurrency"]) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 1) throw new Error(`${key} must be a positive integer`);
@@ -63,7 +70,7 @@ class ReviewService {
 
   repo(name) {
     if (typeof name !== "string" || !REPOSITORY.test(name)) return null;
-    const explicit = this.config.repositories.find((repo) => repo.name === name.toLowerCase());
+    const explicit = this.config.repositories.find((repo) => repo.name === name.toLowerCase() || repo.githubName === name.toLowerCase());
     if (explicit) return explicit;
     const org = this.config.infrastructure?.organizations?.find((item) => item.name.toLowerCase() === name.split("/")[0].toLowerCase());
     return org ? { ...org, name: name.toLowerCase(), baseBranches: org.baseBranches || ["*"], discovered: true } : null;
@@ -78,11 +85,11 @@ class ReviewService {
     return this.accept(job.repository, pr);
   }
   get active() { return this.workers.values().next().value || null; }
-  coordinates(name) { const [owner, repo] = name.split("/"); return { owner, repo }; }
+  coordinates(name) { const [owner, repo] = (this.repo(name)?.githubName || name).split("/"); return { owner, repo }; }
   eligible(repository, pr, job = {}) {
     const repo = this.repo(repository);
     return repo && pr.state === "open" && (job.ciRequestId || !pr.draft) && (job.ciRequestId || repo.baseBranches.includes("*") || repo.baseBranches.includes(pr.base?.ref)) &&
-      pr.base?.repo?.full_name?.toLowerCase() === repo.name && SHA.test(pr.head?.sha) && SHA.test(pr.base?.sha);
+      sameRepository(this, pr.base?.repo?.full_name, repo.name) && SHA.test(pr.head?.sha) && SHA.test(pr.base?.sha);
   }
 
   async observe(repository, number, options = {}) {
@@ -185,7 +192,7 @@ class ReviewService {
   }
 
   async writeCommitStatus(repository, head, state, description, target, guard = () => true) {
-    const key = `${repository}:${head}:${this.config.statusContext}`;
+    const key = `${repositoryKey(this, repository)}:${head}:${this.config.statusContext}`;
     const previous = this.commitStatusWrites.get(key) || Promise.resolve();
     const write = previous.catch(() => {}).then(async () => {
       if (!guard()) return false;
