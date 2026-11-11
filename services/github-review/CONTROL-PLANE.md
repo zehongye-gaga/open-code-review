@@ -16,7 +16,9 @@ Production uses `budgetRetry.mode: unlimited` with explicit `allowUnlimitedBudge
 
 Compatible native sessions always resume. When a session is missing/incompatible or native OCR explicitly rejects loading it, one automatic full-review recovery is allowed for the still-current snapshot. Recovery is recorded durably before starting a fresh native run. A second full-review recovery requires operator action. Transient model/network errors do not themselves authorize a fresh run. Changed PR snapshots are superseded, not restarted.
 
-`resumeFallbacks` records the cause, old session, immutable coordinates, requested/effective budget, new session report usage, elapsed time and report directories. `extraTokens` sums observed native report totals once per new session; missing usage remains null. These are reported token counts, not a billing estimate. The Agent feedback outbox and review-result API expose the recovery records for subsequent budget-policy analysis.
+`resumeFallbacks` records the cause, old session, immutable coordinates, requested/effective budget, new session report usage, elapsed time and report directories. `extraTokens` sums observed native report totals once per new session; missing usage remains null. These are reported token counts, not a billing estimate. The review-result API exposes the recovery records for subsequent budget-policy analysis.
+
+The backend publishes review comments and statuses directly to GitHub. Review outcomes and budget retries do not generate messages back to the dispatch Agent. Startup marks historical pending feedback as `disabled` with `disabledReason: result_feedback_removed`, retaining its payload, attempts and errors. There is no feedback sender or retry timer. Dispatch session initialization, task acknowledgements and native review resumption remain independent.
 
 ## Historical reconciliation and alerts
 

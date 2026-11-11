@@ -1,6 +1,6 @@
 # Review outcome contract
 
-`outcome.js` is the shared interpretation of a persisted job. The executor, organization-CI receipt, alert collector, Agent feedback, infrastructure API and dashboard data adapter consume it. Queue lifecycle (`job.state`) remains compatible with stored tasks; `outcome.kind` describes the actual result.
+`outcome.js` is the shared interpretation of a persisted job. The executor, organization-CI receipt, alert collector, infrastructure API and dashboard data adapter consume it. Queue lifecycle (`job.state`) remains compatible with stored tasks; `outcome.kind` describes the actual result.
 
 | Outcome | GitHub status | Execution alert | Recovery |
 | --- | --- | --- | --- |

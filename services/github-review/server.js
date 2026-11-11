@@ -8,7 +8,6 @@ const http = require("node:http");
 const crypto = require("node:crypto");
 const { createGitHub } = require("./github.js");
 const { ReviewService } = require("./service.js");
-const { feedbackTick } = require("./agent-session.js");
 
 function equal(a, b) {
   const left = Buffer.from(a || ""), right = Buffer.from(b || "");
@@ -120,11 +119,10 @@ async function main() {
   const poller = setInterval(safe(() => service.poll()), service.config.pollSeconds * 1000);
   const worker = setInterval(safe(() => service.tick()), 1000);
   const deliveries = setInterval(safe(() => service.githubEvents?.tick()), 1000);
-  const feedback = setInterval(safe(() => feedbackTick(service)), 1000);
   const ciWatchdog = setInterval(safe(() => service.orgCI?.watchdog()), 30000);
   const cleaner = setInterval(safe(() => service.cleanup()), 3600000);
   const stop = () => {
-    service.stop(); clearInterval(poller); clearInterval(worker); clearInterval(cleaner); clearInterval(deliveries); clearInterval(feedback); clearInterval(ciWatchdog);
+    service.stop(); clearInterval(poller); clearInterval(worker); clearInterval(cleaner); clearInterval(deliveries); clearInterval(ciWatchdog);
     server.close(); server.closeIdleConnections();
     infrastructureServer?.close(); infrastructureServer?.closeIdleConnections();
   };

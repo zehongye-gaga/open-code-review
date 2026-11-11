@@ -2,6 +2,7 @@
 // Copyright 2026 alibaba/open-code-review Contributors
 
 "use strict";
+const { writeState } = require("./state-test-helpers.js");
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -23,7 +24,7 @@ function fixture(t) {
     githubTokenFile: path.join(root, "github-token"), prConcurrency: 4, budget: 0, model: "test-model", blockSeverity: "low" };
   write(path.join(root, "config.json"), config);
   fs.writeFileSync(config.githubTokenFile, "private-github-token");
-  write(path.join(root, "state.json"), { version: 1, jobs: [] });
+  writeState(root, { version: 1, jobs: [] });
   write(path.join(root, "cr", "state.json"), { version: 1, reviews: {} });
   write(path.join(root, "cr", "current-open-pr-snapshot.json"), { captured_at: at });
   const options = { ocrConfig: path.join(root, "config.json"), cragent: { concurrency: 4,
@@ -62,7 +63,7 @@ test("collects four worker slots, checkpoints, retry queues and report usage wit
   jobs.push({ id: 7, repository: "org/repo", number: 7, head: "z", state: "checkpointed", updatedAt: at,
     directory: path.join(f.root, "runs", "seven"), range: { mode: "checkpoint" } });
   for (const job of jobs.slice(-2)) write(path.join(job.directory, "result.json"), { summary: { total_tokens: 120, input_tokens: 100, output_tokens: 20, cache_read_tokens: 50 }, comments: [{ content: "private code" }] });
-  write(path.join(f.root, "state.json"), { version: 1, jobs });
+  writeState(f.root, { version: 1, jobs });
   write(path.join(f.root, "cr", "state.json"), { reviews: { first: { pr: { number: 9, head: { sha: "cr-head" } }, status: "publishing", updated_at: at, last_error: "secret-error" },
     second: { pr: { number: 10, head: { sha: "cr-head" } }, status: "error_publish_pending", updated_at: at } } });
   const monitor = new Monitor(f.options, f.dependencies); await monitor.collect(); await monitor.refreshGitHub();
@@ -81,9 +82,9 @@ test("collects four worker slots, checkpoints, retry queues and report usage wit
 
 test("unreadable state retains previous rows and visibly degrades rather than clearing the queue", async (t) => {
   const f = fixture(t);
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [{ id: 1, state: "running", number: 1, repository: "org/repo", head: "x", startedAt: at }] });
+  writeState(f.root, { version: 1, jobs: [{ id: 1, state: "running", number: 1, repository: "org/repo", head: "x", startedAt: at }] });
   const monitor = new Monitor(f.options, f.dependencies); await monitor.collect();
-  fs.writeFileSync(path.join(f.root, "state.json"), "{broken"); await monitor.collect();
+  fs.writeFileSync(path.join(f.root, "state.db"), "{broken"); await monitor.collect();
   assert.equal(monitor.snapshot().services.ocr.sourceError, true);
   assert.equal(monitor.snapshot().services.ocr.healthy, false);
   assert.equal(monitor.snapshot().work.length, 1);
@@ -95,7 +96,7 @@ test("mixed-case configuration matches canonical persisted repository names", as
   const f = fixture(t);
   f.config.repositories[0].name = "Org/Repo";
   write(f.options.ocrConfig, f.config);
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [{ id: 1, repository: "org/repo", number: 1, head: "new-head", state: "queued", attempt: 2 }] });
+  writeState(f.root, { version: 1, jobs: [{ id: 1, repository: "org/repo", number: 1, head: "new-head", state: "queued", attempt: 2 }] });
   f.dependencies.github = async (config) => { assert.equal(config.repositories[0].name, "org/repo"); return { pulls: [pull(1)] }; };
   const monitor = new Monitor(f.options, f.dependencies); await monitor.collect(); await monitor.refreshGitHub();
   assert.equal(monitor.snapshot().pulls[0].ocr.jobState, "queued");
@@ -178,7 +179,7 @@ test("report cache rejects traversal and symlinks, updates replaced reports, and
   assert.equal(cache.get({ directory: path.join(f.root, "outside") }), null);
   fs.symlinkSync(path.join(f.root, "outside"), path.join(f.root, "runs", "link"));
   assert.equal(cache.get({ directory: path.join(f.root, "runs", "link") }), null);
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [{ id: 1, state: "complete", updatedAt: at, directory: path.join(f.root, "missing") }] });
+  writeState(f.root, { version: 1, jobs: [{ id: 1, state: "complete", updatedAt: at, directory: path.join(f.root, "missing") }] });
   const monitor = new Monitor(f.options, f.dependencies); await monitor.collect();
   assert.equal(monitor.snapshot().usage.expectedReports, 1); assert.equal(monitor.snapshot().usage.reports, 0);
 });
@@ -198,7 +199,7 @@ test("GraphQL follows pagination and rejects partial responses", async (t) => {
 test("overlapping collection is coalesced and overdue jobs are visible", async (t) => {
   const f = fixture(t); let release, calls = 0;
   f.dependencies.health = async () => { calls++; await new Promise((resolve) => { release = resolve; }); return { ok: true, reachable: true, lastPoll: at }; };
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [{ id: 1, state: "running", number: 1, startedAt: "2026-10-15T09:00:00Z" }] });
+  writeState(f.root, { version: 1, jobs: [{ id: 1, state: "running", number: 1, startedAt: "2026-10-15T09:00:00Z" }] });
   const monitor = new Monitor(f.options, f.dependencies), pending = monitor.collect();
   await monitor.collect(); assert.equal(calls, 1); release(); await pending;
   assert.equal(monitor.snapshot().work[0].overdue, true);
@@ -291,7 +292,7 @@ test("published analytics preserve scoped summaries and details without the inge
 
 test("trusted review state above the artifact limit is collected with explicit source freshness", async (t) => {
   const f = fixture(t), monitor = new Monitor(f.options, f.dependencies);
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [], padding: "x".repeat(17 * 1024 * 1024) });
+  writeState(f.root, { version: 1, jobs: [], padding: "x".repeat(17 * 1024 * 1024) });
   await monitor.collect();
   const value = monitor.snapshot();
   assert.equal(value.services.ocr.sourceError, false); assert.equal(value.dataSourceError, false);
@@ -300,18 +301,19 @@ test("trusted review state above the artifact limit is collected with explicit s
 
 test("oversize or malformed state retains previous rows and source timestamp, degrades health, then recovers", async (t) => {
   const f = fixture(t); f.options.stateMaxBytes = 2048;
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [{ id: 1, repository: "org/repo", number: 1, state: "running", createdAt: at }] });
+  writeState(f.root, { version: 1, jobs: [{ id: 1, repository: "org/repo", number: 1, state: "running", createdAt: at }] });
   const monitor = new Monitor(f.options, f.dependencies); await monitor.collect();
   f.advance(10000);
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [], padding: "x".repeat(3000) });
+  writeState(f.root, { version: 1, jobs: [], padding: "x".repeat(3000) });
   await monitor.collect(); let value = monitor.snapshot();
   assert.equal(value.reviewSource.code, "STATE_TOO_LARGE"); assert.equal(value.reviewSource.collectedAt, at);
   assert.equal(value.work.length, 1); assert.equal(value.stale, false); assert.equal(value.dataSourceError, true);
   assert.equal(connectionState(value, false, Date.parse(at) + 10000), "collectionFailed");
   const url = await serve(t, monitor); assert.equal((await fetch(url + "/healthz")).status, 503);
-  fs.writeFileSync(path.join(f.root, "state.json"), "{"); await monitor.collect();
+  fs.writeFileSync(path.join(f.root, "state.db"), "{"); await monitor.collect();
   assert.equal(monitor.snapshot().reviewSource.code, "STATE_UNAVAILABLE");
-  write(path.join(f.root, "state.json"), { version: 1, jobs: [] }); await monitor.collect(); value = monitor.snapshot();
+  fs.rmSync(path.join(f.root, "state.db"));
+  writeState(f.root, { version: 1, jobs: [] }); await monitor.collect(); value = monitor.snapshot();
   assert.equal(value.dataSourceError, false); assert.equal(value.work.length, 0);
   assert.equal(value.reviewSource.collectedAt, "2026-10-15T10:00:10.000Z");
   assert.equal((await fetch(url + "/healthz")).status, 200);

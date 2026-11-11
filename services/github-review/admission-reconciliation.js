@@ -53,8 +53,9 @@ class AdmissionReconciliation {
     if (!c.enabled || this.running || this.s.stopping || !this.s.orgCI || now < (this.s.state.data.admissionReconciliation?.nextScanAt || 0)) return;
     this.running = true;
     const data = this.s.state.data;
-    const meta = data.admissionReconciliation ||= {};
-    const snapshots = data.admissionSnapshots ||= {};
+    data.admissionReconciliation ||= {};
+    data.admissionSnapshots ||= {};
+    const meta = data.admissionReconciliation, snapshots = data.admissionSnapshots;
     const summary = { observed: 0, missing: 0, admitted: 0, errors: 0, mode: c.mode };
     try {
       meta.startedAt = now; meta.nextScanAt = now + c.intervalSeconds * 1000;
@@ -83,7 +84,7 @@ class AdmissionReconciliation {
             const p = snapshot(repository, pr), key = `${repository}#${pr.number}`;
             seen.add(key); summary.observed++;
             let row = snapshots[key];
-            if (row?.request_id !== p.request_id) row = snapshots[key] = { ...p, firstSeenAt: now };
+            if (row?.request_id !== p.request_id) { snapshots[key] = { ...p, firstSeenAt: now }; row = snapshots[key]; }
             row.lastSeenAt = now; row.owner = this.owner(p); delete row.error;
             if (row.owner) { row.status = "owned"; delete row.missingSinceAt; continue; }
             if (this.initialBaseline.has(p.request_id)) {

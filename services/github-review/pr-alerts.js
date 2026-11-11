@@ -71,5 +71,8 @@ class Alerts {
 }
 module.exports={Alerts,events,message};
 if(require.main===module){const config=JSON.parse(fs.readFileSync(process.argv[2]));const a=new Alerts(config);
- (process.argv.includes("--test")?a.send(copy.test).then(()=>({test:"delivered"})):a.collect(JSON.parse(fs.readFileSync(config.stateFile))))
+ (process.argv.includes("--test")?a.send(copy.test).then(()=>({test:"delivered"})):Promise.resolve().then(()=>{
+  const {readState,stateDatabase}=require("./state-sqlite.js");
+  return a.collect(readState(stateDatabase(config),{kinds:["jobs","ciReceipts","deliveries"]}).data);
+ }))
  .then(result=>console.log(JSON.stringify(result))).catch(()=>{console.error("PR notification collection failed");process.exitCode=1;});}

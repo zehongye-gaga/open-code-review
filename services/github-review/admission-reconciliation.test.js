@@ -9,7 +9,7 @@ const { OrgCI } = require("./org-ci.js");
 const { AdmissionReconciliation, snapshot } = require("./admission-reconciliation.js");
 function fixture(t, extra = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ocr-reconcile-"));
-  const state = new State(dir, { sqlite: true });
+  const state = new State(dir);
   t.after(() => { state.database.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   const repository = "lexmount/example", logs = [], calls = [];
   const pr = { number: 1, state: "open", draft: true, head: { sha: "a".repeat(40) },

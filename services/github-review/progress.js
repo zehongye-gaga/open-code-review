@@ -38,7 +38,7 @@ async function fingerprint({ config, metadata, cwd, env = process.env, forCheckp
   const hash = crypto.createHash("sha256");
   for await (const chunk of fs.createReadStream(config.binary)) hash.update(chunk);
   const home = env.HOME || os.homedir();
-  const settings = structuredClone(config.reviewSettings || null);
+  const settings = JSON.parse(JSON.stringify(config.reviewSettings || null));
   if (forCheckpoint && settings) {
     for (const key of ["budget", "background", "fullReview"]) delete settings.options?.[key];
   }

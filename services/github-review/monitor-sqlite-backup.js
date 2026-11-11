@@ -39,7 +39,8 @@ if (require.main === module) {
   const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   backupMonitor(config.sqlite.database, config.sqlite.backupDirectory || path.join(path.dirname(config.sqlite.database), "backups"))
     .then(async () => {
-      if (config.sqlite.stateSource) await backupMonitor(config.sqlite.stateSource, config.sqlite.backupDirectory || path.join(path.dirname(config.sqlite.database), "backups"), new Date(), true);
+      const stateSource = config.sqlite.stateSource || require("./state-sqlite.js").stateDatabase(JSON.parse(fs.readFileSync(config.ocrConfig, "utf8")));
+      await backupMonitor(stateSource, config.sqlite.backupDirectory || path.join(path.dirname(config.sqlite.database), "backups"), new Date(), true);
       console.log("SQLite backup verified");
     }).catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

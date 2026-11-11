@@ -113,7 +113,10 @@ module.exports = { FeedbackCollector, observation, overlaps };
 if (require.main === module) {
   const config = JSON.parse(fs.readFileSync(process.argv[2]));
   const collector = new FeedbackCollector(config, process.argv[3]);
-  collector.collect(JSON.parse(fs.readFileSync(path.join(config.stateDirectory, "state.json"))).jobs)
+  Promise.resolve().then(() => {
+    const { readState, stateDatabase } = require("./state-sqlite.js");
+    return collector.collect(readState(stateDatabase(config), { kinds: ["jobs"] }).data.jobs);
+  })
     .then((s) => console.log(JSON.stringify({ checked: Object.keys(s.pulls).length, requests: s.requests, errors: Object.values(s.pulls).filter((p) => p.error).length })))
     .catch(() => { console.error("Benchmark collection failed"); process.exitCode = 1; });
 }

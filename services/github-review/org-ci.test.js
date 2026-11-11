@@ -37,7 +37,7 @@ test("canonical identity includes Unicode base ref and rejects mismatches", () =
 test("receipt persists before pending publication; duplicates retain route", async (t) => {
   const { ci, s, p, statuses } = fixture(t);
   const original = s.github.rest.repos.createCommitStatus;
-  s.github.rest.repos.createCommitStatus = async (args) => { assert.ok(JSON.parse(fs.readFileSync(s.state.file)).ciReceipts[p.request_id]); await original(args); };
+  s.github.rest.repos.createCommitStatus = async (args) => { assert.ok(require("./state-sqlite.js").readState(path.join(path.dirname(s.state.file), "state.db")).data.ciReceipts[p.request_id]); await original(args); };
   const r = await ci.submit(p, "direct"); assert.equal(r.durable, true); assert.equal(r.commit_status, null);
   assert.equal(statuses.length, 0); await ci.watchdog();
   await ci.submit(p, "agent"); assert.equal(ci.receipts[p.request_id].route, "direct"); assert.equal(statuses.length, 1);
@@ -282,17 +282,18 @@ test("receipt cannot adopt a different base, preview, or cancelled task", async 
     const ack = await ci.submit(p, "agent"); assert.equal(ack.job_id, null);
   }
 });
-test("feedback cleanup removes only sent entries older than retention", async (t) => {
+test("feedback cleanup retains disabled history and removes only expired sent entries", async (t) => {
   const { s } = fixture(t); const { ReviewService } = require("./service.js");
   s.config.stateDirectory = path.dirname(s.state.file); s.config.retentionDays = 7;
   fs.mkdirSync(path.join(s.config.stateDirectory, "runs"));
   const old = new Date(Date.now() - 8 * 86400000).toISOString(), recent = new Date().toISOString();
   s.state.data.agentFeedback = [
     { id: "expired", state: "sent", sentAt: old }, { id: "recent", state: "sent", sentAt: recent },
-    { id: "pending", state: "pending", createdAt: old }, { id: "failed", state: "failed", createdAt: old }];
+    { id: "pending", state: "pending", createdAt: old }, { id: "failed", state: "failed", createdAt: old },
+    { id: "disabled", state: "disabled", createdAt: old, disabledReason: "result_feedback_removed" }];
   ReviewService.prototype.cleanup.call(s);
-  assert.deepEqual(s.state.data.agentFeedback.map((x) => x.id), ["recent", "pending", "failed"]);
-  assert.equal(JSON.parse(fs.readFileSync(s.state.file)).agentFeedback.length, 3);
+  assert.deepEqual(s.state.data.agentFeedback.map((x) => x.id), ["recent", "pending", "failed", "disabled"]);
+  assert.equal(require("./state-sqlite.js").readState(path.join(path.dirname(s.state.file), "state.db")).data.agentFeedback.length, 4);
 });
 test("reopened closed PR reaccepts the same receipt and dispatches only once", async (t) => {
   const { ci, s, p, pr, statuses } = fixture(t);

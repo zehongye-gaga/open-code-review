@@ -2,6 +2,7 @@
 // Copyright 2026 alibaba/open-code-review Contributors
 
 "use strict";
+const { writeState } = require("./state-test-helpers.js");
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -211,7 +212,7 @@ test("reloads a durable ledger larger than the untrusted artifact size limit", (
 test("monitor retains analytics and flags failure when the durable ledger cannot be written", async (t) => {
   const f = fixture(t); invocation(f, { id: "monitor" });
   const configFile = path.join(f.root, "config.json"); write(configFile, f.config);
-  write(path.join(f.root, "state.json"), { version: 1, jobs: f.jobs });
+  writeState(f.root, { version: 1, jobs: f.jobs });
   const monitor = new Monitor({ ocrConfig: configFile, analytics: f.options }, {
     now: () => now, unit: async () => ({ state: "active" }), health: async () => ({ ok: true }), resources: () => ({}),
   });

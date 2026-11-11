@@ -127,16 +127,19 @@ class OrgCI {
       createdAt: Date.now(), heartbeatAt: Date.now(), dispatchAttempts: 0, nextDispatchAt: 0 };
     if (previous) r.admissionHistory = [...(previous.admissionHistory || []), {
       state: previous.state, reason: previous.reason, createdAt: previous.createdAt, finishedAt: previous.finishedAt }];
-    return this.receipts[normalized.request_id] = r;
+    this.receipts[normalized.request_id] = r;
+    return this.receipts[normalized.request_id];
   }
   async retrySubmission(r, retryKey) {
     if (retryKey === undefined) return;
     if (typeof retryKey !== "string" || !/^[0-9]+:[0-9]+$/.test(retryKey) || retryKey.length > 80) fail("Invalid retry key");
     if (Number(retryKey.split(":")[1]) < 2 || (r.retryKeys || []).includes(retryKey)) return;
-    (r.retryKeys ||= []).push(retryKey); this.s.state.save();
+    r.retryKeys ||= [];
+    r.retryKeys.push(retryKey); this.s.state.save();
     if (r.state !== "failed" || r.jobId || this.dispatching.has(r.request_id)) return;
     await this.current(r);
-    (r.retryHistory ||= []).push({ state: r.state, reason: r.reason, finishedAt: r.finishedAt, dispatchAttempts: r.dispatchAttempts });
+    r.retryHistory ||= [];
+    r.retryHistory.push({ state: r.state, reason: r.reason, finishedAt: r.finishedAt, dispatchAttempts: r.dispatchAttempts });
     r.state = "accepted"; r.createdAt = Date.now(); r.nextDispatchAt = 0; r.dispatchAttempts = 0;
     r.sequence = ++this.s.state.data.sequence;
     for (const key of ["reason", "finishedAt", "finalStatus", "published", "lastDispatchError"]) delete r[key];
@@ -160,7 +163,8 @@ class OrgCI {
     if (r.jobId && !job) return;
     if (job && (job.replacement || !["cancelled", "complete"].includes(job.state))) return;
     const now = Date.now();
-    (r.reopenHistory ||= []).push({ at: now, previousState: r.state, previousReason: r.reason,
+    r.reopenHistory ||= [];
+    r.reopenHistory.push({ at: now, previousState: r.state, previousReason: r.reason,
       createdAt: r.createdAt, finishedAt: r.finishedAt, jobId: r.jobId || null, dispatchAttempts: r.dispatchAttempts });
     r.state = "accepted"; r.createdAt = now; r.heartbeatAt = now; r.nextDispatchAt = 0; r.dispatchAttempts = 0;
     r.sequence = ++this.s.state.data.sequence;

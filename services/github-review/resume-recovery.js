@@ -10,9 +10,10 @@ function recordResumeFallback(service, job, reason) {
     previousDirectory: job.progress?.directory || null, head: job.head, base: job.base,
     requestedBy: job.requestedBy || "default", requestedBudget: job.settings?.options?.budget ?? null,
     effectiveBudget: job.retryBudget ?? job.settings?.options?.budget ?? null, usageBySession: {}, extraTokens: null };
-  (job.resumeFallbacks ||= []).push(entry); service.state.save();
+  job.resumeFallbacks ||= [];
+  job.resumeFallbacks.push(entry); service.state.save();
   service.log("resume_full_review_recovery", { id: job.id, reason, previousSessionId: entry.previousSessionId });
-  return entry;
+  return job.resumeFallbacks.at(-1);
 }
 function captureRecovery(job, directory) {
   const entry = job.resumeFallbacks?.at(-1);

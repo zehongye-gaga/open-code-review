@@ -34,4 +34,4 @@ Enable `infrastructure.orgCI.enabled` only after configuring its `tokenFile`. En
 
 Before a server switch, drain work, back up configuration and state, retain the previous release, and merge task identities before enabling both entrances. Rollback must preserve post-cutover task identities; restoring a stale snapshot can cause duplicate reviews. A legacy MCP address can remain as a compatibility proxy to the new executor.
 
-Completed Agent feedback is pruned using the existing `retentionDays` policy. Pending and failed feedback remains available for reconciliation.
+The backend does not send review-result feedback to the dispatch Agent. Historical pending feedback is durably marked `disabled` at startup and retained for audit, along with failed feedback. Already-sent history follows the existing `retentionDays` policy. Agent dispatch sessions and task acceptance responses are unaffected.

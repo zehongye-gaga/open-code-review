@@ -70,3 +70,12 @@ test("legacy failure and blocking notification identities migrate without anothe
     assert.equal(alerts.state.seen[events({ jobs: [record] }, true)[0].key].migratedFrom, legacyKey);
   }
 });
+
+test("alert CLI reads SQLite through the legacy config path without reading obsolete JSON", t => {
+ const config=setup(t),stateFile=path.join(config.directory,"state.json"),file=path.join(config.directory,"config.json");
+ require("./state-test-helpers.js").writeState(config.directory,{version:1,jobs:[job],ciReceipts:{},deliveries:[]});
+ fs.writeFileSync(stateFile,"broken obsolete JSON");fs.writeFileSync(file,JSON.stringify({...config,stateFile}));
+ const result=require("node:child_process").spawnSync(process.execPath,[path.join(__dirname,"pr-alerts.js"),file],{encoding:"utf8",timeout:5000});
+ assert.equal(result.status,0,result.stderr);assert.deepEqual(JSON.parse(result.stdout),{baseline:1,sent:0});
+ assert.equal(fs.readFileSync(stateFile,"utf8"),"broken obsolete JSON");
+});

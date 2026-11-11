@@ -408,7 +408,7 @@ test("a failed PR releases its dispatch slot without failing other PRs", async (
 test("admission publishes pending after durable acceptance and before Agent dispatch", async (t) => {
   const h = fixture(t), statuses = [];
   h.s.github.rest.repos.createCommitStatus = async (status) => {
-    assert.equal(JSON.parse(fs.readFileSync(path.join(h.dir, "state.json"))).deliveries.length, 1);
+    assert.equal(require("./state-sqlite.js").readState(path.join(h.dir, "state.db")).data.deliveries.length, 1);
     assert.equal(h.s.state.data.jobs.length, 0);
     statuses.push(status);
   };
