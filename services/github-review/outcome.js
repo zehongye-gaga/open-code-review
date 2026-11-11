@@ -40,8 +40,12 @@ function receiptOutcome(receipt, job) {
     return outcome("dispatch_failed", receipt.reason, `OCR failed: ${receipt.reason}`);
   }
   if (result && !(receipt.state === "failed" && ["cancelled", "superseded"].includes(result.kind))) return result;
+  if (isRepositorySkip(receipt)) return outcome("skipped", receipt.reason, "OCR dispatch skipped: repository is not enabled");
   if (receipt.state === "failed") return outcome("dispatch_failed", receipt.reason || receipt.error || receipt.lastError,
     `OCR failed: ${receipt.reason || receipt.error || receipt.lastError || "dispatch_failed"}`);
   return outcome("accepted", null, "OCR accepted; waiting for background dispatch");
 }
-module.exports = { jobOutcome, receiptOutcome, receiptTerminal };
+function isRepositorySkip(receipt) {
+  return receipt.state === "skipped" && receipt.reason === "repository_not_enabled" && !receipt.jobId;
+}
+module.exports = { jobOutcome, receiptOutcome, receiptTerminal, isRepositorySkip };
