@@ -43,10 +43,27 @@ function optionsFromFile(file) {
     !path.isAbsolute(config.stateDirectory || "") ||
     !Array.isArray(config.repositories) ||
     config.repositories.some(
-      (r) => !r || !/^[\w.-]+\/[\w.-]+$/.test(r.name || "")
+      (r) =>
+        !r ||
+        !/^[\w.-]+\/[\w.-]+$/.test(r.name || "") ||
+        (r.githubName !== undefined &&
+          (!/^[\w.-]+\/[\w.-]+$/.test(r.githubName || "") ||
+            r.githubName.split("/")[0].toLowerCase() !==
+              r.name.split("/")[0].toLowerCase()))
     )
   )
     throw Error("Invalid backend configuration");
+  const names = new Set();
+  for (const repository of config.repositories)
+    for (const name of new Set(
+      [repository.name, repository.githubName]
+        .filter(Boolean)
+        .map((v) => v.toLowerCase())
+    )) {
+      if (names.has(name))
+        throw Error("Duplicate configured repository alias");
+      names.add(name);
+    }
   if (
     !options.analytics ||
     !path.isAbsolute(options.analytics.sessionDirectory || "")
@@ -235,6 +252,9 @@ async function collect({
   ])
     for (const [key, value] of Object.entries(values))
       next.set(prefix + key, value);
+  // Hidden repositories still need their stable IDs if they are enrolled again.
+  for (const [key, value] of records)
+    if (key.startsWith("repository:")) next.set(key, value);
   for (const repository of batch.repositories)
     next.set("repository:" + repository.id, repository);
   const { sessions: agentSessions, ...agentMeta } = agent.value;
