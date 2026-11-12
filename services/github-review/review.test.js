@@ -213,7 +213,7 @@ test("native resume uses the pinned checkpoint range and falls back once only on
   const file = path.join(directory, "metadata.json");
   const metadata = JSON.parse(fs.readFileSync(file));
   metadata.range = { mode: "checkpoint", from: "c".repeat(40), to: head };
-  metadata.incrementalExclude = ["already-reviewed.go"];
+  metadata.incrementalExclude = ["already-reviewed.go", "patches/@deepseek-ai+dsh+0.2.2-alpha.2.patch", "comma,name.go", "literal[1].go"];
   fs.writeFileSync(file, JSON.stringify(metadata));
   const binary = path.join(directory, "ocr");
   fs.writeFileSync(binary, `#!${process.execPath}
@@ -224,13 +224,16 @@ if (args.includes('--resume')) {
   process.stderr.write('Error: load resume session: missing session\\n'); process.exitCode = 1;
 } else process.stdout.write('{}');
 `, { mode: 0o700 });
-  await runReview({ ...h, directory, binary, cwd: directory, resume });
+  await runReview({ ...h, directory, binary, cwd: directory, resume, options: { exclude: "already-reviewed.go,*.lock" } });
   const calls = fs.readFileSync(path.join(directory, "calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
   assert.equal(calls.length, 2);
   assert.equal(calls[0][calls[0].indexOf("--resume") + 1], resume);
   assert.equal(calls[0][calls[0].indexOf("--from") + 1], metadata.range.from);
   assert.equal(calls[1].includes("--resume"), false);
-  for (const call of calls) assert.equal(call[call.indexOf("--exclude") + 1], "already-reviewed.go");
+  for (const call of calls) {
+    assert.equal(call[call.indexOf("--exclude") + 1], "already-reviewed.go,*.lock");
+    assert.deepEqual(JSON.parse(fs.readFileSync(call[call.indexOf("--exclude-paths-file") + 1], "utf8")), metadata.incrementalExclude);
+  }
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "exit-code.json"))), 0);
   assert.match(fs.readFileSync(path.join(directory, "resume-rejected-stderr.log"), "utf8"), /missing session/);
   fs.writeFileSync(binary, `#!${process.execPath}\nprocess.stderr.write('Error: review failed: server_is_overloaded'); process.exitCode = 1;\n`);

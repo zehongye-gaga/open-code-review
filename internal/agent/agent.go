@@ -1067,6 +1067,14 @@ func (a *Agent) ruleConfigSHA256() string {
 		for _, exc := range f.Exclude {
 			fields = append(fields, "exclude", exc)
 		}
+		paths := make([]string, 0, len(f.ExcludePaths))
+		for path := range f.ExcludePaths {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			fields = append(fields, "exclude_path", path)
+		}
 	}
 	return hashFields(fields...)
 }

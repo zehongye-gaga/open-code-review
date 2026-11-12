@@ -84,6 +84,29 @@ func TestRuleConfigSHA256_NilResolverAndFilter(t *testing.T) {
 	}
 }
 
+func TestRuleConfigSHA256_LiteralExclusions(t *testing.T) {
+	identity := func(paths ...string) string {
+		filter := &rules.FileFilter{ExcludePaths: map[string]struct{}{}}
+		for _, path := range paths {
+			filter.ExcludePaths[path] = struct{}{}
+		}
+		return New(Args{FileFilter: filter}).ruleConfigSHA256()
+	}
+	if identity() != emptySHA256() {
+		t.Fatal("an empty literal filter changed existing rule identities")
+	}
+	first := identity("a,b.go", "literal[1].go")
+	if first != identity("literal[1].go", "a,b.go", "a,b.go") {
+		t.Fatal("order or duplicates changed the exclusion identity")
+	}
+	for _, other := range []string{identity("a,b.go"), identity("A,B.go", "literal[1].go"),
+		New(Args{FileFilter: &rules.FileFilter{Exclude: []string{"a,b.go", "literal[1].go"}}}).ruleConfigSHA256()} {
+		if first == other {
+			t.Fatal("different exclusion semantics must invalidate resume compatibility")
+		}
+	}
+}
+
 func TestSourceArtifactSHA256_DedupsByItemID(t *testing.T) {
 	// Two diffs that normalize to the same (mode, old, new) share one item_id, so
 	// RegisterSelected seals a single selected item. The artifact digest must use
