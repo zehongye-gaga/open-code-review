@@ -90,7 +90,15 @@ async function collectActions({
   ordered.push(...ordered.splice(0, offset % Math.max(1, ordered.length)));
   let visited = 0;
   for (const repo of ordered) {
-    if (!available(Math.ceil(options.maxRequestsPerCycle / 2))) break;
+    const ready = [...records].some(
+      ([key, r]) =>
+        key.startsWith("run:") &&
+        !r.done &&
+        r.nextAt <= now &&
+        repos.has(r.row.repositoryId)
+    );
+    if (!available(Math.max(Math.ceil(options.maxRequestsPerCycle / 2), ready ? 5 : 1)))
+      break;
     visited++;
     const current = coverage.find((r) => r.id === repo.id);
     let scan = records.get("scan:" + repo.id);
@@ -272,6 +280,10 @@ async function collectActions({
     const scan = records.get("scan:" + row.id);
     if (row.status === "syncing" && scan?.through && !scan.windows.length)
       row.status = "ready";
+    const pending = [...records].some(
+      ([key, r]) => key.startsWith("run:") && !r.done && r.row.repositoryId === row.id
+    );
+    if (row.status === "ready" && pending) row.status = "syncing";
     const incomplete = attempts().some(
       (a) => a.repositoryId === row.id && a.coverage !== "complete"
     );

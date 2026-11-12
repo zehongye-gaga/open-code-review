@@ -276,6 +276,28 @@ test("paged scans resume with a strict request budget and do not claim completen
   );
   assert.equal(second.attempts.length, 0);
 });
+test("minimum request budgets eventually fetch logs and never report pending attempts as complete coverage", async () => {
+  const http = fakeHTTP();
+  const base = {
+    config: {},
+    options: { enabled: true, maxRequestsPerCycle: 4 },
+    repositories: [repo],
+    http,
+    now
+  };
+  const first = await collectActions(base);
+  assert.equal(first.attempts[0].outcome, "pending");
+  assert.equal(first.coverage[0].status, "syncing");
+  const calls = http.calls.length;
+  const second = await collectActions({
+    ...base,
+    previous: first.records,
+    now: now + 300000
+  });
+  assert.equal(second.attempts[0].outcome, "accepted");
+  assert.equal(second.coverage[0].status, "ready");
+  assert.ok(http.calls.length - calls <= 4);
+});
 test("cancelled and absent structured logs remain unknown, permissions fail separately", async () => {
   const http = fakeHTTP();
   http.state.conclusion = "cancelled";
