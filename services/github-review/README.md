@@ -104,6 +104,12 @@ migration to record existing heads without reviewing the backlog; later pushes,
 new PRs and explicit API requests are still reviewed. This baseline is durable
 and is not repeated on restart.
 
+Target-branch eligibility is shared by webhooks, CI dispatch and reconciliation.
+Ordinary PRs match `base.ref` against `baseBranches`; GitHub native stacked PRs
+match the official `stack.base.ref`. Branch chains and PR body text do not
+establish stack membership. Reviews still compare with the direct parent branch.
+See [organization CI admission](ORG-CI.md) for draft and policy-skip behavior.
+
 Optional `POST /webhooks/github` accepts GitHub `pull_request` events with
 `X-Hub-Signature-256`. Configure `webhookSecretFile` (or `OCR_WEBHOOK_SECRET`)
 and a reverse proxy with HTTPS for delivery. Webhooks accelerate the same queue;

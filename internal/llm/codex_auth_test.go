@@ -70,6 +70,34 @@ func TestCodexCredentialsReuseWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestCodexRefreshCanReplaceCredentialsWhileReaderIsOpen(t *testing.T) {
+	raw := codexAuthFixture("old", "old-refresh")
+	path := writeCodexFixture(t, raw)
+	reader, err := openCodexAuth(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	doc, err := readCodexAuth(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.save(path, codexCredentials{AccessToken: "new", RefreshToken: "new-refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := io.ReadAll(reader)
+	if err != nil || string(before) != raw {
+		t.Fatalf("open reader lost its original snapshot: %v", err)
+	}
+	after, err := readCodexAuth(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.credentials.AccessToken != "new" || after.credentials.RefreshToken != "new-refresh" {
+		t.Fatal("new readers did not observe the refreshed credentials")
+	}
+}
+
 func TestCodexConcurrentRefreshPreservesCredentialDocument(t *testing.T) {
 	old := codexTestJWT(time.Now().Add(-time.Hour), "acct-test")
 	fresh := codexTestJWT(time.Now().Add(time.Hour), "acct-test")

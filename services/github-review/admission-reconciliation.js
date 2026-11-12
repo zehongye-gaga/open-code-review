@@ -3,7 +3,7 @@
 "use strict";
 const { identity, requestId } = require("./org-ci.js");
 const { dispatchFailure } = require("./dispatch-control.js");
-const { isRepositorySkip } = require("./outcome.js");
+const { isRepositorySkip, isBranchSkip } = require("./outcome.js");
 const { sameRepository, sameSnapshot, closedReceipt, receiptOwner } = require("./repositories.js");
 const defaults = { enabled: false, mode: "observe", intervalSeconds: 900, graceSeconds: 300, maxAdmissionsPerScan: 10 };
 function settings(config) { return { ...defaults, ...config.admissionReconciliation }; }
@@ -44,9 +44,13 @@ class AdmissionReconciliation {
     const d = this.s.state.data;
     const closed = r => !r.pendingAdmission && closedReceipt(r);
     let receipt = receiptOwner(this.s, d.ciReceipts?.[p.request_id]);
-    if ((!receipt || isRepositorySkip(receipt) || closed(receipt)) && this.s.repo(p.repository)?.githubName) {
+    if ((!receipt || isRepositorySkip(receipt) || isBranchSkip(receipt) || closed(receipt)) && this.s.repo(p.repository)?.githubName) {
       receipt = Object.values(d.ciReceipts || {}).map(r => receiptOwner(this.s, r)).find(r => r.repository !== p.repository &&
-        !isRepositorySkip(r) && !closed(r) && sameSnapshot(this.s, r, p)) || receipt;
+        !isRepositorySkip(r) && !isBranchSkip(r) && !closed(r) && sameSnapshot(this.s, r, p)) || receipt;
+    }
+    if (isBranchSkip(receipt)) {
+      const job = d.jobs.find(j => j.id === receipt.jobId);
+      return receipt.jobId && (!job || job.replacement || !["cancelled", "complete"].includes(job.state)) ? "receipt" : null;
     }
     if (receipt && !isRepositorySkip(receipt)) return closed(receipt) ? null : "receipt";
     if (d.jobs.some(j => sameRepository(this.s, j.repository, p.repository) && j.number === p.pull_number && j.head === p.head_sha &&
@@ -77,7 +81,7 @@ class AdmissionReconciliation {
           for (let page = 1; ; page++) {
             const { data: items } = await this.s.github.rest.pulls.list({ ...this.s.coordinates(repository), page, per_page: 100 });
             if (!Array.isArray(items)) throw Error("Invalid PR list response");
-            pulls.push(...items.map(pr => ({ number: pr.number, state: pr.state, draft: pr.draft,
+            pulls.push(...items.map(pr => ({ number: pr.number, state: pr.state, draft: pr.draft, stack: pr.stack,
               head: { sha: pr.head?.sha }, base: { sha: pr.base?.sha, ref: pr.base?.ref,
                 repo: { full_name: pr.base?.repo?.full_name } } })));
             if (items.length < 100) break;
@@ -86,7 +90,7 @@ class AdmissionReconciliation {
           const seen = new Set();
           for (const pr of pulls) {
             if (this.s.stopping) break;
-            // Match Policy CI eligibility, including draft and stacked PRs.
+            // CI draft handling does not override the shared target-branch policy.
             if (!this.s.eligible(repository, pr, { ciRequestId: "reconciliation" })) continue;
             const p = snapshot(repository, pr), key = `${repository}#${pr.number}`;
             seen.add(key); summary.observed++;
@@ -106,7 +110,7 @@ class AdmissionReconciliation {
             try {
               const ack = await this.s.orgCI.submit(p, "agent");
               const receipt = this.s.orgCI.receipts[p.request_id];
-              if (receipt.state === "superseded" && !receipt.pendingAdmission) {
+              if ((receipt.state === "superseded" || isBranchSkip(receipt)) && !receipt.pendingAdmission) {
                 row.status = "reopen_blocked"; row.taskId = ack.task_id;
                 this.s.state.save(); continue;
               }

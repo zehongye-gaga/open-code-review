@@ -8,6 +8,7 @@ const http = require("node:http");
 const crypto = require("node:crypto");
 const { createGitHub } = require("./github.js");
 const { ReviewService } = require("./service.js");
+const { pullRequestActions } = require("./events.js");
 
 function equal(a, b) {
   const left = Buffer.from(a || ""), right = Buffer.from(b || "");
@@ -60,7 +61,7 @@ function createServer(service, { apiToken, webhookSecret } = {}) {
       if (webhook) {
         if (req.headers["x-github-event"] === "ping") return send(200, { ok: true });
         if (req.headers["x-github-event"] !== "pull_request" ||
-            !["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft", "closed", "edited"].includes(payload.action)) {
+            !pullRequestActions.has(payload.action)) {
           return send(202, { ignored: true });
         }
         if (!service.repo(payload.repository?.full_name)) return send(202, { ignored: true });

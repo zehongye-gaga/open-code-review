@@ -13,6 +13,7 @@ function fixture(t, extra = {}) {
   t.after(() => { state.database.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   const repository = "lexmount/example", logs = [], calls = [];
   const pr = { number: 1, state: "open", draft: true, head: { sha: "a".repeat(40) },
+    stack: { id: 2891204, number: 18, base: { ref: "main" }, size: 2, position: 2 },
     base: { sha: "b".repeat(40), ref: "feature/stack", repo: { full_name: repository } } };
   const current = { pr, pulls: [pr], now: 1000000 };
   const github = { rest: { pulls: {
@@ -53,6 +54,50 @@ test("missing draft and stacked PR receives a durable normal Agent receipt after
   await s.orgCI.dispatch(receipt); assert.equal(s.state.data.jobs.length, 1);
   await s.orgCI.submit(p, "agent"); advance(); await scan.tick();
   assert.equal(s.state.data.jobs.length, 1); assert.equal(Object.keys(s.orgCI.receipts).length, 1);
+});
+test("reconciliation excludes ordinary branch chains and stacks targeting disabled branches", async t => {
+  for (const native of [false, true]) {
+    const { s, scan, pr, advance } = fixture(t);
+    pr.draft = false; pr.body = "Stacked on #9";
+    if (native) pr.stack.base.ref = "release";
+    else delete pr.stack;
+    await scan.tick(); advance(); const result = await scan.tick();
+    assert.equal(result.observed, 0); assert.equal(result.admitted, 0);
+    assert.equal(Object.keys(s.orgCI.receipts).length, 0); assert.equal(s.state.data.jobs.length, 0);
+    assert.equal(Object.keys(s.state.data.admissionSnapshots).length, 0);
+  }
+});
+test("ordinary main PRs still recover without stack metadata", async t => {
+  const { s, scan, pr, advance } = fixture(t);
+  delete pr.stack; pr.base.ref = "main";
+  await scan.tick(); advance(); assert.equal((await scan.tick()).admitted, 1);
+  await s.orgCI.dispatch(Object.values(s.orgCI.receipts)[0]);
+  assert.equal(s.state.data.jobs.length, 1);
+});
+test("stale list membership is rejected by current PR verification and can later recover", async t => {
+  const { s, scan, current, pr, advance } = fixture(t);
+  current.pr = { ...pr, stack: null };
+  await scan.tick(); advance(); await scan.tick();
+  const r = Object.values(s.orgCI.receipts)[0]; await s.orgCI.dispatch(r);
+  assert.equal(r.state, "skipped"); assert.equal(r.reason, "target_branch_not_allowed");
+  assert.equal(s.state.data.jobs.length, 0);
+  current.pr = pr;
+  advance(); assert.equal((await scan.tick()).admitted, 1);
+  await s.orgCI.dispatch(r);
+  assert.equal(s.state.data.jobs.length, 1); assert.equal(r.reopenHistory.length, 1);
+});
+test("reconciliation restores the completed verdict after a branch skip without rerunning review", async t => {
+  const { s, scan, pr, advance } = fixture(t), p = snapshot("lexmount/example", pr);
+  await s.orgCI.submit(p, "direct"); const r = s.orgCI.receipts[p.request_id]; await s.orgCI.dispatch(r);
+  const job = s.state.data.jobs[0];
+  job.state = "complete"; job.progress = { complete: true }; job.result = { blocking: 2, findings: 2 };
+  const stack = pr.stack; delete pr.stack;
+  await s.orgCI.watchdog(); assert.equal(r.state, "skipped");
+  pr.stack = stack;
+  await scan.tick(); advance(); assert.equal((await scan.tick()).admitted, 1);
+  await s.orgCI.dispatch(r); await s.orgCI.watchdog();
+  assert.equal(s.state.data.jobs.length, 1); assert.equal(r.jobId, job.id);
+  assert.equal(s.orgCI.view(r).outcome, "blocked"); assert.equal(r.published.state, "failure");
 });
 test("observe mode reports gaps without submitting or changing existing jobs", async t => {
   const { s, scan, advance } = fixture(t, { mode: "observe" });

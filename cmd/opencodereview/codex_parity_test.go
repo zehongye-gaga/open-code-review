@@ -290,7 +290,7 @@ func TestCodexReviewAndScanMatchNativeAPIHarness(t *testing.T) {
 						expectedStages = append([]string(nil), fake.stages...)
 						expectedResults = append([]string(nil), fake.results...)
 					} else {
-						if !reflect.DeepEqual(expectedStages, fake.stages) || !reflect.DeepEqual(expectedResults, fake.results) {
+						if !reflect.DeepEqual(normalizedParityStages(expectedStages), normalizedParityStages(fake.stages)) || !reflect.DeepEqual(expectedResults, fake.results) {
 							t.Fatalf("harness diverged\nAPI: %v\nCodex: %v", expectedStages, fake.stages)
 						}
 						if !reflect.DeepEqual(baseline.Comments, result.Comments) || baseline.Summary.TotalTokens != result.Summary.TotalTokens || !reflect.DeepEqual(baseline.ToolCalls, result.ToolCalls) {
@@ -327,4 +327,38 @@ func containsStage(stages []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func normalizedParityStages(stages []string) []string {
+	// Relocation runs asynchronously with the tool loop; its relative position
+	// can differ between protocols while tool ordering and call counts agree.
+	ordered := make([]string, 0, len(stages))
+	relocations := 0
+	for _, stage := range stages {
+		if stage == "relocation" {
+			relocations++
+		} else {
+			ordered = append(ordered, stage)
+		}
+	}
+	for range relocations {
+		ordered = append(ordered, "relocation")
+	}
+	return ordered
+}
+
+func TestParityStagesAllowOnlyAsyncRelocationOrdering(t *testing.T) {
+	want := normalizedParityStages([]string{"plan", "read", "comment", "relocation", "done"})
+	if got := normalizedParityStages([]string{"plan", "read", "comment", "done", "relocation"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("asynchronous relocation changed the trace: %v", got)
+	}
+	for _, stages := range [][]string{
+		{"plan", "read", "comment", "done"},
+		{"plan", "read", "comment", "relocation", "done", "relocation"},
+		{"plan", "comment", "read", "relocation", "done"},
+	} {
+		if reflect.DeepEqual(normalizedParityStages(stages), want) {
+			t.Fatalf("missing/duplicate calls or reordered tools must still fail: %v", stages)
+		}
+	}
 }

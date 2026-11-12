@@ -86,8 +86,18 @@ func codexAuthPath() (string, error) {
 	return resolved, nil
 }
 
+func openCodexAuth(path string) (*os.File, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	// Root.Open permits an atomic credential replacement while readers are open.
+	return root.Open(filepath.Base(path))
+}
+
 func readCodexAuth(path string) (*codexAuthDocument, error) {
-	f, err := os.Open(path)
+	f, err := openCodexAuth(path)
 	if err != nil {
 		return nil, fmt.Errorf("read Codex credentials: %w", err)
 	}
@@ -297,5 +307,11 @@ func (d *codexAuthDocument) save(path string, credentials codexCredentials) erro
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	// Root.Rename uses POSIX replacement semantics on Windows as well as Unix.
+	return root.Rename(filepath.Base(f.Name()), filepath.Base(path))
 }

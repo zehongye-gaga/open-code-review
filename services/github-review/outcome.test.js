@@ -47,3 +47,11 @@ test("pending admission and failed verification are distinct from an older job r
  delete receipt.pendingAdmission;receipt.lastAdmission={state:"failed",generation:2};
  assert.equal(receiptOutcome(receipt,skip).kind,"dispatch_failed");assert.equal(receiptOutcome(receipt,skip).alert,true);
 });
+test("branch policy skips stay non-alerting successes after cancelling an existing job", () => {
+ const r={state:"skipped",reason:"target_branch_not_allowed",jobId:1};
+ for(const job of [undefined,{state:"cancelled"},{state:"complete",progress:{complete:true},result:{blocking:2}}]){
+  const result=receiptOutcome(r,job);
+  assert.equal(result.kind,"skipped");assert.equal(result.commitStatus,"success");assert.equal(result.alert,false);
+  assert.match(result.description,/target branch/);
+ }
+});

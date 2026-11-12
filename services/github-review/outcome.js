@@ -34,6 +34,7 @@ function jobOutcome(job) {
 }
 function receiptOutcome(receipt, job) {
   if (receipt.pendingAdmission) return outcome("accepted", null, "OCR accepted; waiting for snapshot verification");
+  if (isBranchSkip(receipt)) return outcome("skipped", receipt.reason, "OCR review skipped: target branch is not enabled");
   // A linked backend job owns execution truth; ingress is only its transport.
   if (["cancelled", "superseded"].includes(receipt.state)) return outcome(receipt.state, receipt.reason, `OCR ${receipt.state}: ${receipt.reason || receipt.state}`);
   const result = jobOutcome(job);
@@ -49,4 +50,7 @@ function receiptOutcome(receipt, job) {
 function isRepositorySkip(receipt) {
   return receipt.state === "skipped" && receipt.reason === "repository_not_enabled" && !receipt.jobId;
 }
-module.exports = { jobOutcome, receiptOutcome, receiptTerminal, isRepositorySkip };
+function isBranchSkip(receipt) {
+  return receipt?.state === "skipped" && receipt.reason === "target_branch_not_allowed";
+}
+module.exports = { jobOutcome, receiptOutcome, receiptTerminal, isRepositorySkip, isBranchSkip };

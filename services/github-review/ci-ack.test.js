@@ -62,6 +62,134 @@ test("CI HTTP ACK commits pending verification and never waits for the GitHub lo
   } finally { blocked.resolve(); await work; }
 });
 
+for (const route of ["direct", "agent"]) {
+  for (const native of [false, true]) {
+    test(`CI ${route} ACK respects target branches with native stack = ${native}`, async t => {
+      const f = await fixture(t);
+      f.pr.base.ref = "feature/parent"; f.pr.body = "Stacked on #9";
+      if (native) f.pr.stack = { id: 2891204, base: { ref: "main" }, position: 2, size: 2 };
+      f.ci.config.agentReady = true;
+      let agents = 0;
+      f.ci.agentDispatch = async (_service, event) => {
+        agents++;
+        const r = f.ci.receipts[event.ciRequestId];
+        return f.ci.submitReview({ ...r, request_id: `github:${r.request_id}` }, { id: "org-ci-dispatcher" });
+      };
+      const input = { ...f.snapshot(), route };
+      const ack = await f.post(input);
+      assert.equal(ack.status, 202); assert.equal(ack.body.durable, true);
+      assert.equal(f.calls.length, 0); assert.equal(f.statuses.length, 0);
+      const receipt = f.ci.receipts[input.request_id];
+      await f.ci.dispatch(receipt); await f.ci.watchdog();
+      assert.equal(f.read().jobs.length, native ? 1 : 0);
+      assert.equal(agents, native && route === "agent" ? 1 : 0);
+      if (native) {
+        assert.equal(f.read().jobs[0].baseRef, "feature/parent");
+        assert.equal(receipt.state, "queued");
+      } else {
+        assert.equal(receipt.state, "skipped"); assert.equal(receipt.reason, "target_branch_not_allowed");
+        assert.equal(f.ci.view(receipt).outcome, "skipped");
+        assert.equal(f.statuses.at(-1).state, "success");
+        assert.match(f.statuses.at(-1).description, /skipped/);
+      }
+    });
+  }
+}
+test("a branch skip can join a native stack and later resume the same cancelled job", async t => {
+  const f = await fixture(t); f.pr.base.ref = "feature/parent";
+  const input = f.snapshot(); await f.post(input);
+  const r = f.ci.receipts[input.request_id]; await f.ci.dispatch(r);
+  assert.equal(r.state, "skipped");
+  f.pr.stack = { id: 2891204, base: { ref: "main" } };
+  assert.equal((await f.post(input)).body.admission_pending, true);
+  await f.ci.dispatch(r);
+  const job = f.service.state.data.jobs[0]; assert.equal(job.state, "queued");
+  delete f.pr.stack;
+  await f.ci.publishJobStatus(job, "success", "old result"); await f.ci.watchdog();
+  assert.equal(r.state, "skipped"); assert.equal(job.state, "cancelled");
+  assert.equal(f.statuses.at(-1).state, "success");
+  assert.match(f.statuses.at(-1).description, /skipped/);
+  f.pr.stack = { id: 2891204, base: { ref: "main" } };
+  await f.post(input); await f.ci.dispatch(r);
+  assert.equal(f.service.state.data.jobs.length, 1); assert.equal(job.state, "queued");
+  assert.equal(r.jobId, job.id); assert.equal(r.reopenHistory.length, 2);
+});
+test("watchdog skips a CI job whose native stack now targets an excluded branch", async t => {
+  const f = await fixture(t); f.pr.base.ref = "feature/parent";
+  f.pr.stack = { id: 2891204, base: { ref: "main" } };
+  const input = f.snapshot(); await f.post(input);
+  const r = f.ci.receipts[input.request_id]; await f.ci.dispatch(r);
+  f.pr.stack.base.ref = "release";
+  await f.ci.watchdog();
+  assert.equal(r.reason, "target_branch_not_allowed");
+  assert.equal(f.service.state.data.jobs[0].state, "cancelled");
+  assert.equal(f.statuses.at(-1).state, "success");
+});
+test("legacy receipt repair cannot restore a review verdict for an excluded stack", async t => {
+  const f = await fixture(t); f.pr.base.ref = "feature/parent";
+  f.pr.stack = { id: 2891204, base: { ref: "main" } };
+  const input = f.snapshot(); await f.post(input);
+  const r = f.ci.receipts[input.request_id]; await f.ci.dispatch(r);
+  const job = f.service.state.data.jobs[0];
+  job.state = "complete"; job.progress = { complete: true }; job.result = { blocking: 1 };
+  r.state = "failed"; r.reason = "n8n_tracking_stalled"; r.finalStatus = "failure";
+  delete f.pr.stack;
+  await f.ci.watchdog();
+  assert.equal(r.reconciliation.result, "skipped");
+  assert.equal(r.reason, "target_branch_not_allowed");
+  assert.equal(f.statuses.at(-1).state, "success");
+  assert.match(f.statuses.at(-1).description, /skipped/);
+});
+test("a verified branch skip owns status over the previous target on the same head", async t => {
+  const f = await fixture(t), old = f.snapshot();
+  await f.post(old); await f.ci.dispatch(f.ci.receipts[old.request_id]);
+  f.pr.base.ref = "feature/parent";
+  const input = f.snapshot(); await f.post(input);
+  const r = f.ci.receipts[input.request_id]; await f.ci.dispatch(r); await f.ci.watchdog();
+  assert.equal(r.admissionVerified, true); assert.equal(r.reason, "target_branch_not_allowed");
+  assert.equal(f.service.state.data.jobs.length, 1);
+  assert.equal(f.service.state.data.jobs[0].state, "cancelled");
+  assert.equal(f.statuses.at(-1).state, "success");
+  assert.match(f.statuses.at(-1).description, /skipped/);
+  const writes = f.statuses.length;
+  await f.ci.publish(f.ci.receipts[old.request_id], "failure", "stale target");
+  assert.equal(f.statuses.length, writes);
+});
+for (const change of ["closed", "head", "access"]) {
+  test(`failed re-verification of a branch skip cannot retain success: ${change}`, async t => {
+    const f = await fixture(t); f.pr.base.ref = "feature/parent";
+    const input = f.snapshot(); await f.post(input);
+    const r = f.ci.receipts[input.request_id]; await f.ci.dispatch(r); await f.ci.watchdog();
+    r.finalStatus = "success";
+    await f.post(input);
+    if (change === "closed") f.pr.state = "closed";
+    else if (change === "head") f.pr.head.sha = "c".repeat(40);
+    else f.github.rest.pulls.get = async () => { throw Object.assign(Error("forbidden"), { status: 403 }); };
+    await f.ci.watchdog();
+    assert.equal(r.state, change === "access" ? "failed" : "superseded");
+    assert.equal(f.statuses.at(-1).state, "failure");
+    assert.equal(f.service.state.data.jobs.length, 0);
+  });
+}
+for (const change of ["model", "executor"]) {
+  test(`joining a stack cannot reuse incompatible completed work: ${change}`, async t => {
+    const f = await fixture(t); f.pr.base.ref = "feature/parent";
+    f.pr.stack = { id: 2891204, base: { ref: "main" } };
+    const input = f.snapshot(); await f.post(input);
+    const r = f.ci.receipts[input.request_id]; await f.ci.dispatch(r);
+    const job = f.service.state.data.jobs[0];
+    job.state = "complete"; job.progress = { complete: true }; job.result = { blocking: 0 };
+    delete f.pr.stack; await f.ci.watchdog(); assert.equal(r.state, "skipped");
+    if (change === "model") f.service.config.model = "changed-model";
+    else fs.appendFileSync(f.service.config.binary, "new-executor");
+    f.pr.stack = { id: 2891204, base: { ref: "main" } };
+    await f.post(input); await f.ci.watchdog();
+    assert.equal(r.state, "failed"); assert.equal(r.lastAdmission.lastError.code, "REOPEN_UNAVAILABLE");
+    assert.equal(f.statuses.at(-1).state, "failure");
+    assert.equal(f.service.state.data.jobs.length, 1); assert.equal(job.state, "complete");
+  });
+}
+
 test("CI HTTP ingress rejects bad credentials, coordinates and failed commits without upstream calls", async t => {
   const f = await fixture(t), input = f.snapshot();
   assert.equal((await f.post(input, { "x-ocr-ci-token": "Bearer wrong" })).status, 401);

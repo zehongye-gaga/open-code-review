@@ -17,6 +17,7 @@ function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "org-ci-")); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const statuses = [], p = input();
   const pr = { number: 12, state: "open", draft: true, head: { sha: p.head_sha }, base: { sha: p.base_sha, ref: p.base_ref, repo: { full_name: p.repository } } };
+  pr.stack = { id: 2891204, number: 18, base: { ref: "main" }, size: 2, position: 2 };
   const s = { state: new State(dir), workers: new Map(), commitStatusWrites: new Map(),
     writeCommitStatus: ReviewService.prototype.writeCommitStatus, log() {},
     config: { binary: __filename, provider: "test", model: "test", timeoutSeconds: 30, fetchTimeoutSeconds: 30, blockSeverity: "high", statusContext: "ocr-review",
