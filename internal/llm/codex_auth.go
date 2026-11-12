@@ -87,7 +87,7 @@ func codexAuthPath() (string, error) {
 }
 
 func readCodexAuth(path string) (*codexAuthDocument, error) {
-	f, err := os.Open(path)
+	f, err := openCodexAuth(path)
 	if err != nil {
 		return nil, fmt.Errorf("read Codex credentials: %w", err)
 	}

@@ -51,7 +51,9 @@ test("source rotation and oversized incomplete lines do not reset or duplicate a
   const f = fixture(t); fs.appendFileSync(f.file, event() + "\n"); await f.store.ingestSession(f.file);
   fs.writeFileSync(f.file, ""); await assert.rejects(f.store.ingestSession(f.file), /truncated/);
   assert.equal(f.store.runs("org/repo", 1)[0].usage.totalTokens, 110);
-  fs.unlinkSync(f.file); fs.writeFileSync(f.file, event() + "\n"); await assert.rejects(f.store.ingestSession(f.file), /replaced/);
+  // Keep the old inode allocated so rotation cannot immediately reuse it.
+  fs.renameSync(f.file, f.file + ".old"); fs.writeFileSync(f.file, event() + "\n");
+  await assert.rejects(f.store.ingestSession(f.file), /replaced/);
   const g = fixture(t); fs.appendFileSync(g.file, event() + "\n");
   await assert.rejects(g.store.ingestSession(g.file, 16), /batch/);
   assert.equal(g.store.runs("org/repo", 1)[0].usage.totalTokens, 0);
