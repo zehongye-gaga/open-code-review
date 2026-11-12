@@ -9,7 +9,7 @@ const { Infrastructure } = require("./infrastructure.js");
 const { fail, validate } = require("./options.js");
 const { dispatchAgent } = require("./agent-dispatch.js");
 const { fallbackActor, deliveryJob } = require("./delivery.js");
-const actions = new Set(["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft", "closed", "edited"]);
+const actions = new Set(["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft", "closed", "edited", "stacked"]);
 const input = { type: "object", additionalProperties: false, required: ["raw_body", "signature", "delivery_id", "event", "route"], properties: {
   raw_body: { type: "string", minLength: 1, maxLength: 900000 },
   signature: { type: "string", pattern: "^(sha256=[a-f0-9]{64})?$" },
@@ -239,4 +239,4 @@ class GitHubEvents {
     }
   }
 }
-module.exports = { GitHubEvents, input };
+module.exports = { GitHubEvents, input, pullRequestActions: actions };

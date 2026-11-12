@@ -2,7 +2,7 @@
 // Copyright 2026 alibaba/open-code-review Contributors
 "use strict";
 const { fail } = require("./options.js");
-const { receiptTerminal, isRepositorySkip } = require("./outcome.js");
+const { receiptTerminal, isRepositorySkip, isBranchSkip } = require("./outcome.js");
 const { dispatchFailure, dispatchRetry } = require("./dispatch-control.js");
 const { sameRepository, sameSnapshot, closedReceipt, receiptOwner, hasNewerReceipt } = require("./repositories.js");
 
@@ -44,6 +44,7 @@ function queueAdmission(ci, normalized, route, retryKey) {
   if (!r.pendingAdmission && !kind) {
     if (failedReopen && reusable && newKey) kind = "reopen";
     else if (r.state === "failed" && !r.jobId && newKey) kind = "retry";
+    else if (isBranchSkip(r) && reusable && !hasNewerReceipt(ci.s, r)) kind = "reopen";
     else if (r.state === "superseded" && reusable && ["pr_closed", "pr_changed_or_closed"].includes(r.reason) &&
         !hasNewerReceipt(ci.s, r)) kind = "reopen";
   }
@@ -101,6 +102,8 @@ async function verifyAdmission(ci, r) {
   } catch (error) {
     if (error.persistence) throw error;
     if (!current()) return;
+    // A policy skip still owns a verified snapshot, including its status writes.
+    if (error.code === "PR_TARGET_BRANCH_NOT_ALLOWED") r.admissionVerified = true;
     const failure = dispatchFailure(error), nextAt = dispatchRetry(failure, pending.attempts);
     pending.lastError = { status: error.status || null, code: error.code || null, message: error.message, at: Date.now() };
     if (nextAt === null) ci.stop(r, failure.state, failure.retryable ? "admission_retries_exhausted" :

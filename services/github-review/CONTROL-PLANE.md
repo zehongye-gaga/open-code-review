@@ -80,6 +80,6 @@ suppression and prevent duplicate writes after ambiguous network failures.
 
 ### CI task lifecycle and explicit recovery
 
-An accepted organization-CI task retains its admission policy when later webhook events arrive. An open draft or a target outside the ordinary webhook branch allowlist does not cancel that task while its head, base SHA, and target branch remain unchanged. Ordinary webhook events still cannot create draft tasks; closed or changed snapshots do not inherit that exception.
+An accepted organization-CI task retains its draft admission policy when later webhook events arrive, while its head, base SHA and target branch remain unchanged. All entrances enforce `baseBranches`: ordinary PRs use their direct target, and native GitHub stacks use GitHub's `stack.base.ref`. Losing eligible stack membership or changing to an excluded stack target cancels active work and records a policy skip on the CI receipt. Ordinary webhook events still cannot create draft tasks; closed or changed snapshots do not inherit the draft exception.
 
 `retry_review` checks the original task admission and snapshot, resets the linked CI receipt with an audit entry, and preserves immutable review options. Set `resume_only: true` to require the compatible saved session. Missing or rejected sessions fail explicitly without authorizing a fresh review; the restriction persists across restarts and retries unless an operator explicitly sends `resume_only: false`.

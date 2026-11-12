@@ -615,6 +615,49 @@ test("CI draft tasks survive edits but ordinary draft events cannot dispatch", a
   job.state = 'complete'; job.progress = { complete: true }; job.result = { blocking: 0, findings: 0 };
   assert.equal((await h.s.orgCI.status(request)).commit_status, 'success');
 });
+test("branch eligibility recognizes only GitHub stack metadata and preserves repository scope", t => {
+  const h = fixture(t);
+  h.pull.base.ref = "feature/parent"; h.pull.body = "Stacked on #9";
+  assert.equal(h.s.eligible("org/repo", h.pull, { ciRequestId: "ci" }), false);
+  h.pull.stack = { id: 2891204, number: 18, base: { ref: "main" }, size: 2, position: 2 };
+  assert.equal(h.s.eligible("org/repo", h.pull), true);
+  h.pull.base.ref = "main"; h.pull.stack.base.ref = "release";
+  assert.equal(h.s.eligible("org/repo", h.pull, { ciRequestId: "ci" }), false);
+  h.pull.base.ref = "feature/parent"; h.pull.stack.base.ref = "main";
+  h.s.config.gitea = {};
+  assert.equal(h.s.eligible("org/repo", h.pull, { ciRequestId: "ci" }), false);
+  delete h.s.config.gitea;
+  delete h.pull.stack;
+  h.s.repo("org/repo").baseBranches = ["*"];
+  assert.equal(h.s.eligible("org/repo", h.pull), true);
+  h.pull.base.repo.full_name = "other/repo";
+  assert.equal(h.s.eligible("org/repo", h.pull), false);
+});
+for (const action of ["opened", "synchronize", "ready_for_review", "stacked"]) {
+  test(`native stack ${action} dispatches against the direct parent snapshot`, async t => {
+    const h = fixture(t);
+    h.pull.base.ref = "feature/parent";
+    h.pull.stack = { id: 2891204, number: 18, base: { ref: "main" }, size: 2, position: 2 };
+    const ack = await h.events.accept(h.envelope(action), h.actor);
+    assert.equal(ack.accepted, true); assert.equal(h.calls(), 0);
+    await h.events.tick();
+    assert.equal(h.s.state.data.jobs.length, 1);
+    assert.equal(h.s.state.data.jobs[0].baseRef, "feature/parent");
+    assert.equal(h.s.state.data.jobs[0].base, h.pull.base.sha);
+    delete h.pull.stack;
+    await h.events.accept(h.envelope("edited", "removed"), h.actor); await h.events.tick();
+    assert.equal(h.s.state.data.jobs[0].state, "cancelled");
+  });
+}
+test("stale stacked payload cannot override the current GitHub PR membership", async t => {
+  const h = fixture(t);
+  h.pull.base.ref = "feature/parent";
+  h.pull.stack = { id: 2891204, base: { ref: "main" } };
+  const args = h.envelope("stacked"); delete h.pull.stack;
+  await h.events.accept(args, h.actor); await h.events.tick();
+  assert.equal(h.s.state.data.jobs.length, 0);
+  assert.equal(h.s.state.data.deliveries[0].state, "ignored");
+});
 for (const change of ['draft', 'branch', 'head', 'base', 'baseRef']) {
   test(`events preserve only authorized unchanged CI tasks: ${change}`, async (t) => {
     const h = fixture(t); await h.events.accept(h.envelope(), h.actor); await h.events.tick();
@@ -625,7 +668,7 @@ for (const change of ['draft', 'branch', 'head', 'base', 'baseRef']) {
     if (change === 'head') h.pull.head.sha = 'c'.repeat(40);
     if (change === 'base') h.pull.base.sha = 'c'.repeat(40);
     await h.events.accept(h.envelope('edited', 'changed'), h.actor); await h.events.tick();
-    assert.equal(job.state, change === 'branch' ? 'queued' : 'cancelled');
+    assert.equal(job.state, 'cancelled');
   });
 }
 

@@ -7,7 +7,7 @@ const fs = require("node:fs");
 const crypto = require("node:crypto");
 const { fail, resolveOptions } = require("./options.js");
 const { dispatchAgent } = require("./agent-dispatch.js");
-const { jobOutcome, receiptOutcome, receiptTerminal: terminal, isRepositorySkip } = require("./outcome.js");
+const { jobOutcome, receiptOutcome, receiptTerminal: terminal, isRepositorySkip, isBranchSkip } = require("./outcome.js");
 const { repositoryKey, sameRepository, sameSnapshot, hasNewerReceipt } = require("./repositories.js");
 const keys = ["base_ref", "base_sha", "head_sha", "pull_number", "repository"];
 function requestId(value) {
@@ -62,10 +62,13 @@ class OrgCI {
   owns(r, generation) { return this.receipts[r.request_id] === r && r.admissionGeneration === generation && !r.pendingAdmission && !r.successorReceipt; }
   async current(r) {
     const { data } = await this.s.github.rest.pulls.get({ ...this.s.coordinates(r.repository), pull_number: r.pull_number });
-    if (!this.s.eligible(r.repository, data, { ciRequestId: r.request_id }) ||
-        data.head.sha !== r.head_sha || data.base.sha !== r.base_sha || data.base.ref !== r.base_ref) {
+    if (data.state !== "open" || !this.s.repo(r.repository) || !sameRepository(this.s, data.base?.repo?.full_name, r.repository) ||
+        data.head?.sha !== r.head_sha || data.base?.sha !== r.base_sha || data.base?.ref !== r.base_ref) {
       const error = new Error("PR snapshot is no longer current");
       error.status = 409; error.code = "PR_SNAPSHOT_CHANGED"; error.prClosed = data.state !== "open"; throw error;
+    }
+    if (!this.s.eligible(r.repository, data, { ciRequestId: r.request_id })) {
+      fail("PR target is outside the configured review branches", 409, "PR_TARGET_BRANCH_NOT_ALLOWED");
     }
     return data;
   }
@@ -76,6 +79,7 @@ class OrgCI {
       delete r.pendingAdmission;
     }
     r.state = state; r.reason = reason; r.finishedAt = Date.now();
+    delete r.finalStatus;
     const job = this.s.state.data.jobs.find((j) => j.id === r.jobId);
     const ownsJob = job && (!job.ciRequestId || job.ciRequestId === r.request_id);
     if (ownsJob && ["queued", "running"].includes(job.state)) job.state = "cancelled";
@@ -122,7 +126,7 @@ class OrgCI {
   }
   reopen(r, sequence) {
     const retry = r.state === "failed" && r.lastAdmission?.state === "failed" && r.lastAdmission.kind === "reopen";
-    if (!retry && (r.state !== "superseded" || !["pr_closed", "pr_changed_or_closed"].includes(r.reason))) fail("Previous review is no longer reopenable", 409, "REOPEN_UNAVAILABLE");
+    if (!retry && !isBranchSkip(r) && (r.state !== "superseded" || !["pr_closed", "pr_changed_or_closed"].includes(r.reason))) fail("Previous review is no longer reopenable", 409, "REOPEN_UNAVAILABLE");
     const newer = hasNewerReceipt(this.s, r);
     if (newer) fail("A newer verified snapshot owns this PR", 409, "PR_SNAPSHOT_CHANGED");
     const job = this.s.state.data.jobs.find((j) => j.id === r.jobId);
@@ -134,7 +138,7 @@ class OrgCI {
       fail("Previous PR dispatch is still stopping; retry acceptance", 503);
     }
     if (r.jobId && !job || job && (job.replacement || !activeAlias && !["cancelled", "complete"].includes(job.state))) fail("Previous review job cannot be resumed", 409, "REOPEN_UNAVAILABLE");
-    if (job && r.predecessorReceipt && !require("./review-policy.js").currentPolicy(this.s, job)) fail("Renamed review policy is no longer compatible", 409, "REOPEN_UNAVAILABLE");
+    if (job && !require("./review-policy.js").currentPolicy(this.s, job)) fail("Review policy is no longer compatible", 409, "REOPEN_UNAVAILABLE");
     const now = Date.now();
     r.reopenHistory ||= [];
     r.reopenHistory.push({ at: now, previousState: r.state, previousReason: r.reason,
@@ -281,7 +285,12 @@ class OrgCI {
     const generation = r.admissionGeneration;
     if (r.pendingAdmission || terminal.has(r.state)) return;
     if (state !== "pending") {
-      await this.current(r);
+      try { await this.current(r); }
+      catch (error) {
+        if (error.code !== "PR_TARGET_BRANCH_NOT_ALLOWED") throw error;
+        if (this.owns(r, generation)) this.stop(r, "skipped", "target_branch_not_allowed");
+        return;
+      }
       if (!this.owns(r, generation)) return;
     }
     if (state !== "pending") {
@@ -301,6 +310,10 @@ class OrgCI {
     try { await this.current(r); }
     catch (error) {
       if (!this.owns(r, generation)) return;
+      if (error.code === "PR_TARGET_BRANCH_NOT_ALLOWED") {
+        r.reconciliation = { at: Date.now(), previous, result: "skipped" };
+        this.stop(r, "skipped", "target_branch_not_allowed"); return;
+      }
       if (error.code !== "PR_SNAPSHOT_CHANGED") throw error;
       r.reconciliation = { at: Date.now(), previous, result: "superseded" };
       this.stop(r, "superseded", error.prClosed ? "pr_closed" : "pr_snapshot_changed"); return;
@@ -329,6 +342,7 @@ class OrgCI {
       catch (error) {
         if (!this.owns(r, generation)) return;
         if (error.code === "PR_SNAPSHOT_CHANGED") this.stop(r, "superseded", error.prClosed ? "pr_closed" : "pr_snapshot_changed");
+        else if (error.code === "PR_TARGET_BRANCH_NOT_ALLOWED") this.stop(r, "skipped", "target_branch_not_allowed");
         else if ([401, 403, 404].includes(error.status) && !require("./dispatch-control.js").dispatchFailure(error).retryable) this.stop(r, "failed", "repository_access_failed");
         else throw error;
       }
