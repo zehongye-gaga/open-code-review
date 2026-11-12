@@ -253,3 +253,132 @@ test("schema incompatibility fails closed, invalid normalized input never commit
     1
   );
 });
+
+test("explicit allowlist removal hides all audit rows and preserves renamed identity through restart and re-enrollment", async (t) => {
+  const f = fixture(t),
+    db = await database(t);
+  let store = db.open(),
+    saved = await store.connect();
+  const original = f.config.repositories[0];
+  const cycle = async () => {
+    const result = await collect({
+      ...f,
+      store,
+      saved,
+      resourcesReader: () => null
+    });
+    saved = result.saved;
+    return result;
+  };
+  const first = await cycle(),
+    repositoryId = first.batch.repositories[0].id;
+  const rows = async (table, visible = false) => {
+    const where = visible
+      ? " WHERE EXISTS (SELECT 1 FROM audit_repositories allowed WHERE allowed.source_id=scoped.source_id AND allowed.id=scoped.repository_id AND allowed.in_scope)"
+      : "";
+    return (
+      await db.client.query(
+        `SELECT id,data FROM ${table} scoped${where} ORDER BY id`
+      )
+    ).rows;
+  };
+  const initial = {};
+  for (const table of [
+    "audit_runs",
+    "audit_events",
+    "audit_findings",
+    "audit_usage"
+  ]) {
+    initial[table] = await rows(table);
+    assert.ok(initial[table].length > 0, table);
+  }
+
+  f.config.repositories = [{ ...original, githubName: "company/renamed" }];
+  const renamed = await cycle();
+  assert.equal(renamed.batch.repositories[0].id, repositoryId);
+  assert.equal(renamed.batch.repositories[0].name, "company/renamed");
+  assert.ok(renamed.batch.repositories[0].aliases.includes(original.name));
+  for (const table of Object.keys(initial)) {
+    const current = await rows(table);
+    assert.deepEqual(
+      current.map((r) => r.id),
+      initial[table].map((r) => r.id)
+    );
+    initial[table] = current;
+  }
+
+  f.config.repositories = [{ name: "company/other" }];
+  await db.client.query(
+    "CREATE FUNCTION reject_scope_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected scope failure'; END $$"
+  );
+  await db.client.query(
+    "CREATE TRIGGER reject_scope_change BEFORE UPDATE ON audit_sources FOR EACH ROW EXECUTE FUNCTION reject_scope_change()"
+  );
+  const checkpoint = saved.checkpoint;
+  await assert.rejects(cycle(), /injected scope failure/);
+  assert.equal(
+    (
+      await db.client.query(
+        "SELECT in_scope FROM audit_repositories WHERE id=$1",
+        [repositoryId]
+      )
+    ).rows[0].in_scope,
+    true
+  );
+  assert.deepEqual(
+    (await db.client.query("SELECT checkpoint FROM audit_sources")).rows[0]
+      .checkpoint,
+    checkpoint
+  );
+  await db.client.query(
+    "DROP TRIGGER reject_scope_change ON audit_sources"
+  );
+  await cycle();
+  const hidden = await cycle();
+  assert.deepEqual(
+    hidden.batch.repositories.map((r) => r.name),
+    ["company/other"]
+  );
+  for (const table of Object.keys(initial)) {
+    assert.equal((await rows(table)).length, initial[table].length, table);
+    assert.deepEqual(await rows(table, true), [], table);
+  }
+  assert.equal(
+    (
+      await db.client.query(
+        "SELECT in_scope FROM audit_repositories WHERE id=$1",
+        [repositoryId]
+      )
+    ).rows[0].in_scope,
+    false
+  );
+  assert.ok(saved.records.has("repository:" + repositoryId));
+
+  f.config.repositories = [{ name: "company/renamed" }];
+  await store.close();
+  store = db.open();
+  saved = await store.connect();
+  const restored = await cycle();
+  assert.equal(restored.batch.repositories[0].id, repositoryId);
+  assert.equal(restored.batch.repositories[0].name, "company/renamed");
+  for (const table of Object.keys(initial)) {
+    assert.deepEqual(await rows(table, true), initial[table], table);
+    assert.equal((await rows(table)).length, initial[table].length, table);
+  }
+
+  f.config.repositories = [{ name: "company/other" }];
+  await cycle();
+  f.config.repositories = [{ name: "company/renamed" }];
+  await cycle();
+  for (const table of Object.keys(initial))
+    assert.deepEqual(await rows(table, true), initial[table], table);
+  await cycle();
+  assert.equal(
+    (
+      await db.client.query(
+        "SELECT count(*)::int n FROM audit_repositories WHERE in_scope"
+      )
+    ).rows[0].n,
+    1
+  );
+});

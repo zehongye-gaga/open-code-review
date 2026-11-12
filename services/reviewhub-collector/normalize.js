@@ -37,41 +37,28 @@ const repoName = (name) =>
   typeof name === "string" && /^[\w.-]+\/[\w.-]+$/.test(name)
     ? name.toLowerCase()
     : null;
-function repositories(
-  config,
-  state,
-  ledger,
-  previous,
-  metadata,
-  organizations
-) {
-  const allowed = (name) => name && organizations.includes(name.split("/")[0]);
-  const result = new Map(
-    previous
-      .filter((r) => allowed(repoName(r.name)))
-      .map((r) => [r.id, { ...r }])
-  );
-  const names = new Set([
-    ...config.repositories.map((r) => r.name),
-    ...state.jobs.map((j) => j.repository),
-    ...Object.values(ledger.jobs).map((j) => j.repository)
-  ]);
-  for (const raw of names) {
-    const name = repoName(raw);
-    if (!allowed(name)) continue;
-    const configured = config.repositories.find(
-      (r) => repoName(r.name) === name || repoName(r.githubName) === name
-    );
-    const remote = metadata[name];
-    const currentName =
-      repoName(remote?.name) || repoName(configured?.githubName) || name;
+function repositories(config, previous, metadata, organizations) {
+  const allowed = (name) =>
+    name && organizations.includes(name.split("/")[0]);
+  const result = new Map();
+  for (const configured of config.repositories) {
+    const name = repoName(configured.name),
+      githubName = repoName(configured.githubName);
+    if (!allowed(name) || (githubName && !allowed(githubName))) continue;
+    const remote = metadata[name] || metadata[githubName];
+    const currentName = repoName(remote?.name) || githubName || name;
     if (!allowed(currentName)) continue;
-    const existing = [...result.values()].find(
-      (r) =>
-        r.name === name ||
-        r.aliases.includes(name) ||
-        (remote?.providerId && r.providerId === remote.providerId)
-    );
+    const candidates = [...result.values(), ...previous],
+      names = [name, githubName, currentName].filter(Boolean);
+    const existing =
+      candidates.find(
+        (r) => remote?.providerId && r.providerId === remote.providerId
+      ) ||
+      candidates.find(
+        (r) =>
+          (!remote?.providerId || !r.providerId) &&
+          names.some((n) => r.name === n || r.aliases.includes(n))
+      );
     const id =
       existing?.id ||
       (remote?.providerId
@@ -89,11 +76,15 @@ function repositories(
             ...(existing?.aliases || []),
             existing?.name,
             name,
+            githubName,
             currentName
-          ].filter(Boolean)
+          ]
+            .map(repoName)
+            .filter(allowed)
         )
       ],
-      defaultBranch: remote?.defaultBranch || existing?.defaultBranch || null,
+      defaultBranch:
+        remote?.defaultBranch || existing?.defaultBranch || null,
       targetBranches:
         configured?.baseBranches?.filter((v) => typeof v === "string") ||
         existing?.targetBranches ||
@@ -104,7 +95,9 @@ function repositories(
           : (existing?.archived ?? null),
       access: remote?.access || "unknown",
       enabled:
-        typeof configured?.enabled === "boolean" ? configured.enabled : null,
+        typeof configured?.enabled === "boolean"
+          ? configured.enabled
+          : null,
       sourceUpdatedAt:
         iso(remote?.updatedAt) || existing?.sourceUpdatedAt || null
     });
@@ -128,8 +121,6 @@ function normalize({
   const collectedAt = new Date(now).toISOString();
   const repos = repositories(
     config,
-    state,
-    ledger,
     previousRepositories,
     metadata,
     config.organizations
