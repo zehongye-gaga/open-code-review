@@ -198,12 +198,14 @@ test("cancel and timeout terminate a review child and save its unsuccessful exit
   saveResult(directory);
   const binary = path.join(directory, "ocr");
   fs.writeFileSync(binary, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o700 });
-  await runReview({ ...h, directory, binary, cwd: directory, timeoutMs: 100 });
+  const timed = await runReview({ ...h, directory, binary, cwd: directory, timeoutMs: 100 });
+  assert.equal(timed.termination.reason, "native_execution_timeout");
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "exit-code.json"))), 1);
   const controller = new AbortController();
   const running = runReview({ ...h, directory, binary, cwd: directory, signal: controller.signal });
   controller.abort();
-  await running;
+  const cancelled = await running;
+  assert.equal(cancelled.termination.reason, "cancelled");
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, "exit-code.json"))), 1);
 });
 

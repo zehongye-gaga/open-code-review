@@ -126,7 +126,7 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
   const stderr = fs.openSync(path.join(directory, "stderr.log"), "w", 0o600);
   const env = childEnvironment();
   if (options.requestTimeoutSeconds) env.OCR_LLM_TIMEOUT = String(options.requestTimeoutSeconds);
-  let code = 1, startError;
+  let code = 1, startError, termination;
   try {
     code = await new Promise((resolve, reject) => {
       const child = spawn(binary, ["review", "--repo", cwd, "--from", from,
@@ -136,22 +136,24 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
         ...cliArguments(options), ...(resume && !options.preview ? ["--resume", resume] : [])],
       { cwd, env, stdio: ["ignore", stdout, stderr] });
       let forceTimer, terminating = false;
-      const terminate = () => {
+      const terminate = (reason = "cancelled") => {
         // A second SIGTERM makes native OCR exit before flushing its manifest.
         if (terminating) return;
         terminating = true;
+        termination = { reason, at: new Date().toISOString() };
         child.kill("SIGTERM");
         forceTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
         forceTimer.unref();
       };
-      const timer = setTimeout(terminate, timeoutMs);
-      if (signal?.aborted) terminate();
-      else signal?.addEventListener("abort", terminate, { once: true });
+      const timer = setTimeout(() => terminate("native_execution_timeout"), timeoutMs);
+      const abort = () => terminate("cancelled");
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
       child.once("error", reject);
       child.once("close", (exitCode) => {
         clearTimeout(timer);
         clearTimeout(forceTimer);
-        signal?.removeEventListener("abort", terminate);
+        signal?.removeEventListener("abort", abort);
         if (startError) reject(startError);
         else resolve(exitCode === null ? 1 : exitCode);
       });
@@ -195,6 +197,7 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
     if (metadata.incrementalExclude?.length) options = { ...options, exclude: options.exclude.split(",").filter((p) => !metadata.incrementalExclude.includes(p)).join(",") };
     return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, onResumeFallback, onFreshStart, options });
   }
+  return { termination: termination || null };
 }
 
 async function publishReview({ github, context, core, directory, blockSeverity = "high", post = runPostReviewComments }) {
