@@ -4,9 +4,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 class AgentUsage {
-  constructor(config, directory, request = fetch) {
+  constructor(config, directory, request = fetch, persistence = null) {
     this.config = config; this.request = request; this.file = path.join(directory, "agent-usage.json");
-    try { this.value = JSON.parse(fs.readFileSync(this.file, "utf8")); } catch { this.value = { sessions: {}, collectedAt: null }; }
+    this.persistence = persistence;
+    try { this.value = (persistence ? persistence.load() : JSON.parse(fs.readFileSync(this.file, "utf8"))) || { sessions: {}, collectedAt: null }; } catch { this.value = { sessions: {}, collectedAt: null }; }
     this.busy = false; this.nextAt = 0;
   }
   async collect(bindings, now = Date.now()) {
@@ -66,8 +67,11 @@ class AgentUsage {
       }
       this.value = { sessions: rows, collectedAt: new Date(now).toISOString(), error: false,
         boundSessions: wanted.size, matchedSessions: Object.keys(rows).length, missingSessions: wanted.size - Object.keys(rows).length };
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(this.file + ".tmp", JSON.stringify(this.value), { mode: 0o600 }); fs.renameSync(this.file + ".tmp", this.file);
+      if (this.persistence) this.persistence.save(this.value);
+      else {
+        fs.mkdirSync(path.dirname(this.file), { recursive: true });
+        fs.writeFileSync(this.file + ".tmp", JSON.stringify(this.value), { mode: 0o600 }); fs.renameSync(this.file + ".tmp", this.file);
+      }
     } catch { this.value = { ...this.value, error: true }; }
     finally { this.busy = false; }
   }
