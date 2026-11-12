@@ -12,10 +12,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func openCodexAuth(path string) (*os.File, error) {
-	return os.Open(path)
-}
-
 func tryCodexAuthLock(f *os.File) (bool, error) {
 	err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
