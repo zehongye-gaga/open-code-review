@@ -25,3 +25,7 @@ The collector must project only repositories explicitly listed in the existing O
 The existing `PostgresStore.publish` transaction already handles `in_scope` changes and normalized-cache replacement correctly; it did not need a SQL or schema change. Private `collector_records` entries with the `repository:` prefix now retain identity history even when their repository is absent from the visible batch. This registry is only consulted while resolving a currently configured entry, never as an independent enrollment source.
 
 Production is not changed by this PR. A later rollout should compare the visible repository identity set with the configured entries after a successful collection cycle, rather than hard-coding a repository count.
+
+## Main-branch alignment
+
+After collector PR #28 merged, this branch merged `origin/main` at `83bbb14` without conflicts. The main branch contains the original collector baseline `1d6e15b`; the remaining six-file diff is only this allowlist correction, its tests and documentation. The collector unit suite (12 tests), dedicated PostgreSQL integration suite (4 tests), `make check` and diff checks passed again after alignment. The required OCR review was retried and remains unavailable because no LLM endpoint is configured. No production state or unrelated branch was changed.
