@@ -77,8 +77,15 @@ const records=[];
   assert.equal(view.outcome,expected);
   assert.equal(events(service.state.data).length,['publication-failed','execution-failed'].includes(name)?1:0);
   await ci.submit(input,'direct');assert.equal(service.state.data.jobs.length,1);
-  const {data:status}=await github.rest.repos.getCombinedStatusForRef({...coords,ref:pr.head.sha});
-  const latest=status.statuses.find(s=>s.context===config.statusContext);assert.equal(latest.state,view.commit_status);
+  let latest;
+  // GitHub's combined-status read can briefly lag a successful status write.
+  for(let attempt=0;attempt<6;attempt++){
+   const {data:status}=await github.rest.repos.getCombinedStatusForRef({...coords,ref:pr.head.sha});
+   latest=status.statuses.find(s=>s.context===config.statusContext);
+   if(latest?.state===view.commit_status)break;
+   if(attempt<5)await new Promise(resolve=>setTimeout(resolve,1000));
+  }
+  assert.equal(latest?.state,view.commit_status);
   records.push({case:name,outcome:view.outcome,status:latest.state,description:latest.description,nativeCalls:runs,publicationAttempts:pubs,jobs:service.state.data.jobs.length,alerts:events(service.state.data).length,budgets,resumes,budgetOverrides:job.budgetRetries||[],resumeRecoveries:job.resumeFallbacks||[],reviewURL:job.result?.summaryURL});
   fs.writeFileSync(path.join(output,'results.json'),JSON.stringify({pr:prInfo.url,records},null,2));
   console.log(JSON.stringify(records.at(-1)));
