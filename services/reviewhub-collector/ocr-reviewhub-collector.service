@@ -1,0 +1,23 @@
+[Unit]
+Description=ReviewHub PostgreSQL audit collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ocr-auditor
+EnvironmentFile=/etc/ocr-review/reviewhub-collector.env
+WorkingDirectory=/data/crg/ocr-review/reviewhub-collector-current/services/reviewhub-collector
+ExecStart=/usr/bin/node --max-old-space-size=512 index.js /etc/ocr-review/reviewhub-collector.json
+Restart=on-failure
+RestartSec=300
+TimeoutStopSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+CPUQuota=50%
+MemoryMax=768M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+{
+  "ocrConfig": "/etc/ocr-review/config.json",
+  "stateSource": "/data/crg/ocr-review/state/state.db",
+  "organizations": ["lexmount"],
+  "intervalSeconds": 300,
+  "analytics": {
+    "sessionDirectory": "/data/crg/ocr-review/state/home/.opencodereview/sessions"
+  },
+  "volumes": [{ "label": "Review data", "path": "/data/crg/ocr-review" }]
+}

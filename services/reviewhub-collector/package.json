@@ -1,0 +1,19 @@
+{
+  "name": "@lexmount/reviewhub-collector",
+  "private": true,
+  "version": "0.1.0",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test *.test.js",
+    "test:integration": "node --test integration/*.test.js"
+  },
+  "dependencies": {
+    "pg": "8.23.1",
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1"
+  }
+}

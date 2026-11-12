@@ -22,6 +22,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  collector:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    container:
+      image: node:24.11.0-bookworm
+      options: --cpus=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install audit collector dependencies
+        run: npm ci --prefix services/reviewhub-collector
+      - name: Test direct PG collection and existing source parsers
+        run: |
+          npm test --prefix services/reviewhub-collector
+          node --test services/github-review/*.test.js
+
   test:
     runs-on: self-hosted
     timeout-minutes: 15

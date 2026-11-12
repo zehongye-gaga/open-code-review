@@ -98,7 +98,7 @@ async function ingest(file, row, timeZone, end, { fd } = {}) {
 }
 
 class Analytics {
-  constructor(config, options) {
+  constructor(config, options, persistence = null) {
     this.config = config;
     this.options = { retentionDays: 90, timeZone: "Asia/Shanghai", ...options };
     if (!Number.isSafeInteger(this.options.retentionDays) || this.options.retentionDays < 7 || this.options.retentionDays > 366) {
@@ -108,9 +108,10 @@ class Analytics {
     for (const field of ["directory", "sessionDirectory"]) {
       if (!path.isAbsolute(this.options[field] || "")) throw new Error(`analytics.${field} must be absolute`);
     }
-    fs.mkdirSync(this.options.directory, { recursive: true, mode: 0o700 });
+    this.persistence = persistence;
+    if (!persistence) fs.mkdirSync(this.options.directory, { recursive: true, mode: 0o700 });
     this.file = path.join(this.options.directory, "ledger.json");
-    this.ledger = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, "utf8")) : {
+    this.ledger = (persistence ? persistence.load() : fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, "utf8")) : null) || {
       version: 2, timeZone: this.options.timeZone, sessions: {}, jobs: {}, artifacts: {}, firstCollectedAt: null,
     };
     if (this.ledger.version !== 2 || !this.ledger.sessions || !this.ledger.jobs || !this.ledger.artifacts ||
@@ -265,7 +266,8 @@ class Analytics {
     for (const [key, row] of Object.entries(this.ledger.artifacts)) if (stamp(row.preparedAt) < cutoff) delete this.ledger.artifacts[key];
     this.ledger.firstCollectedAt ||= new Date(now).toISOString();
     this.ledger.collectedAt = new Date(now).toISOString();
-    atomicJSON(this.file, this.ledger);
+    if (this.persistence) this.persistence.save(this.ledger);
+    else atomicJSON(this.file, this.ledger);
     this.value = summarize(this.ledger, this.options, now, { pendingFiles: this.pendingFiles, readErrors: this.readErrors });
     return this.value;
   }
