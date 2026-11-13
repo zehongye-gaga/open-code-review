@@ -11,12 +11,17 @@ const { bootstrapAudit } = require("./database/bootstrap.js");
 const { readState } = require("./database/state-source.js");
 const { normalize } = require("./normalize.js");
 const { collectActions, policyOptions } = require("./actions.js");
+const {
+  operationalSignals,
+  metric,
+  hostMetrics,
+} = require("./observability.js");
 const { backendAdmissions } = require("./backend-admission.js");
 const group = (records, prefix) =>
   Object.fromEntries(
     [...records]
       .filter(([key]) => key.startsWith(prefix))
-      .map(([key, value]) => [key.slice(prefix.length), value])
+      .map(([key, value]) => [key.slice(prefix.length), value]),
   );
 function optionsFromFile(file) {
   const options = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -27,7 +32,7 @@ function optionsFromFile(file) {
     !Array.isArray(options.organizations) ||
     !options.organizations.length ||
     options.organizations.some(
-      (v) => typeof v !== "string" || !/^[a-zA-Z0-9-]{1,100}$/.test(v)
+      (v) => typeof v !== "string" || !/^[a-zA-Z0-9-]{1,100}$/.test(v),
     )
   )
     throw Error("Invalid collector source configuration");
@@ -52,7 +57,7 @@ function optionsFromFile(file) {
         (r.githubName !== undefined &&
           (!/^[\w.-]+\/[\w.-]+$/.test(r.githubName || "") ||
             r.githubName.split("/")[0].toLowerCase() !==
-              r.name.split("/")[0].toLowerCase()))
+              r.name.split("/")[0].toLowerCase())),
     )
   )
     throw Error("Invalid backend configuration");
@@ -61,10 +66,9 @@ function optionsFromFile(file) {
     for (const name of new Set(
       [repository.name, repository.githubName]
         .filter(Boolean)
-        .map((v) => v.toLowerCase())
+        .map((v) => v.toLowerCase()),
     )) {
-      if (names.has(name))
-        throw Error("Duplicate configured repository alias");
+      if (names.has(name)) throw Error("Duplicate configured repository alias");
       names.add(name);
     }
   if (
@@ -74,7 +78,7 @@ function optionsFromFile(file) {
     throw Error("Configure the native session directory");
   config.organizations = options.organizations;
   config.repositories = config.repositories.filter((r) =>
-    options.organizations.includes(r.name.split("/")[0].toLowerCase())
+    options.organizations.includes(r.name.split("/")[0].toLowerCase()),
   );
   return { options, config };
 }
@@ -86,15 +90,18 @@ async function collect({
   now = Date.now(),
   metadataReader = repositoryMetadata,
   resourcesReader = hostResources,
-  actionsReader = collectActions
+  actionsReader = collectActions,
 }) {
+  const cycleStart = performance.now();
   const records = saved.records;
+  const stateStart = performance.now();
   const sourceRows = new Map(Object.entries(group(records, "state:")));
   const input = readState(
     options.stateSource || path.join(config.stateDirectory, "state.db"),
     saved.checkpoint.state,
-    sourceRows
+    sourceRows,
   );
+  const stateMs = performance.now() - stateStart;
   if (input.state.version !== 1 || !Array.isArray(input.state.jobs))
     throw Error("Invalid task state");
   const meta = records.get("ledger:meta");
@@ -103,7 +110,7 @@ async function collect({
         ...meta,
         jobs: group(records, "ledger:job:"),
         sessions: group(records, "ledger:session:"),
-        artifacts: group(records, "ledger:artifact:")
+        artifacts: group(records, "ledger:artifact:"),
       }
     : null;
   let historicalAudits = [];
@@ -126,9 +133,9 @@ async function collect({
       ...options.analytics,
       directory: options.analytics.directory || config.stateDirectory,
       timeZone: "Asia/Shanghai",
-      retentionDays: 90
+      retentionDays: 90,
     },
-    { load: () => ledger, save: () => {} }
+    { load: () => ledger, save: () => {} },
   );
   const warnings = [];
   await analytics.collect(input.state.jobs, now);
@@ -144,8 +151,8 @@ async function collect({
         previousAgent
           ? { ...previousAgent, sessions: group(records, "agent:session:") }
           : null,
-      save: () => {}
-    }
+      save: () => {},
+    },
   );
   await agent.collect(input.state.agentSessions, now);
   if (agent.value.error) warnings.push("AGENT_USAGE_UNAVAILABLE");
@@ -153,7 +160,7 @@ async function collect({
     options.githubMetadata === false
       ? {
           metadata: group(records, "metadata:"),
-          warnings: ["GITHUB_METADATA_DISABLED"]
+          warnings: ["GITHUB_METADATA_DISABLED"],
         }
       : await metadataReader(config, group(records, "metadata:"), now);
   warnings.push(...remote.warnings);
@@ -170,40 +177,49 @@ async function collect({
     now,
     resources,
     warnings,
-    historicalAudits
+    historicalAudits,
   });
   const actionInput = {
     config,
     options: options.policy || undefined,
     repositories: batch.repositories,
     previous: new Map(Object.entries(group(records, "actions:"))),
-    now
+    now,
   };
+  const actionsStart = performance.now();
   let actions;
   try {
     actions = await actionsReader(actionInput);
   } catch {
     // Log discovery must not prevent publication of the independent task source.
-    actions = await collectActions({ ...actionInput, options: { enabled: false } });
+    actions = await collectActions({
+      ...actionInput,
+      options: { enabled: false },
+    });
     actions.coverage = actions.coverage.map((row) => ({
       ...row,
       status: "error",
-      errorCode: "ACTIONS_UNAVAILABLE"
+      errorCode: "ACTIONS_UNAVAILABLE",
     }));
     actions.warnings = ["POLICY_LOGS_UNAVAILABLE"];
   }
+  const actionsMs = performance.now() - actionsStart;
   const backend = backendAdmissions(input.state, batch);
   batch.clientAttempts = actions.attempts.map((row) => ({
     ...row,
-    backend: backend.associate(row)
+    backend: backend.associate(row),
   }));
-  const associations = new Map(batch.clientAttempts.map((row) => [row.id, row.backend]));
+  const associations = new Map(
+    batch.clientAttempts.map((row) => [row.id, row.backend]),
+  );
   for (const entry of actions.records.values())
     if (entry.row)
       entry.row.backend = associations.get(entry.row.id) || entry.row.backend;
   batch.clientCoverage = actions.coverage;
   batch.events.push(...backend.events);
   batch.warnings = [...new Set([...batch.warnings, ...actions.warnings])];
+  batch.signals = operationalSignals(input.state, batch);
+  batch.metrics = hostMetrics(store.sourceId, resources, now);
   const next = new Map();
   for (const [key, value] of actions.records) next.set("actions:" + key, value);
   for (const [key, value] of input.rows) next.set("state:" + key, value);
@@ -213,7 +229,7 @@ async function collect({
     ["ledger:job:", jobs],
     ["ledger:session:", sessions],
     ["ledger:artifact:", artifacts],
-    ["metadata:", remote.metadata]
+    ["metadata:", remote.metadata],
   ])
     for (const [key, value] of Object.entries(values))
       next.set(prefix + key, value);
@@ -229,9 +245,39 @@ async function collect({
   const checkpoint = {
     state: input.checkpoint,
     mode: input.mode,
-    changedRows: input.changedRows
+    changedRows: input.changedRows,
   };
-  await store.publish(batch, checkpoint, next);
+  const write = await store.publish(batch, checkpoint, next);
+  // Keep the committed audit cursor authoritative if auxiliary metric storage fails.
+  const sample = metric(
+    store.sourceId,
+    "collector",
+    "cycle",
+    {
+      cycle_ms: performance.now() - cycleStart,
+      state_read_ms: stateMs,
+      actions_ms: actionsMs,
+      pg_write_ms: write?.ms ?? null,
+      pg_rows_written: write?.rows ?? null,
+      pg_bytes_sent: write?.bytes ?? null,
+      pending_logs: actions.stats?.pending ?? null,
+      oldest_pending_ms: actions.stats?.oldestPendingMs ?? null,
+      actions_requests: actions.stats?.requests ?? null,
+      actions_errors: actions.stats?.errors ?? null,
+      actions_rate_remaining: actions.stats?.rateRemaining ?? null,
+    },
+    Date.now(),
+    now,
+  );
+  if (store.saveMetric)
+    await store.saveMetric(sample).catch(() => {
+      console.error(
+        JSON.stringify({
+          service: "reviewhub-collector",
+          code: "METRIC_WRITE_FAILED",
+        }),
+      );
+    });
   return { batch, saved: { checkpoint, records: next }, policy: actions.stats };
 }
 module.exports = { collect, optionsFromFile, repositoryMetadata };

@@ -1,0 +1,22 @@
+[Unit]
+Description=ReviewHub independent health probe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reviewhub-probe
+EnvironmentFile=/etc/ocr-review/reviewhub-health.env
+ExecStart=/usr/bin/node /opt/reviewhub-collector/health-probe.js /etc/ocr-review/reviewhub-health.json
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryMax=128M
+CPUQuota=10%
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

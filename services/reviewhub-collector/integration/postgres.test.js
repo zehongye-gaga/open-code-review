@@ -13,7 +13,7 @@ const { Client } = require("pg"),
 const { collectActions } = require("../actions.js");
 if (!process.env.TEST_DATABASE_URL || !process.env.REVIEWHUB_MIGRATIONS_DIR)
   throw Error(
-    "Use a dedicated TEST_DATABASE_URL and the matching ReviewHub REVIEWHUB_MIGRATIONS_DIR"
+    "Use a dedicated TEST_DATABASE_URL and the matching ReviewHub REVIEWHUB_MIGRATIONS_DIR",
   );
 async function database(t) {
   const schema = "collector_test_" + randomUUID().replaceAll("-", ""),
@@ -32,7 +32,7 @@ async function database(t) {
     await admin.end();
   });
   await client.query(
-    "CREATE TABLE schema_migrations(version text PRIMARY KEY,checksum text NOT NULL,applied_at timestamptz NOT NULL DEFAULT now())"
+    "CREATE TABLE schema_migrations(version text PRIMARY KEY,checksum text NOT NULL,applied_at timestamptz NOT NULL DEFAULT now())",
   );
   for (const file of fs
     .readdirSync(process.env.REVIEWHUB_MIGRATIONS_DIR)
@@ -40,12 +40,12 @@ async function database(t) {
     .sort()) {
     const sql = fs.readFileSync(
       path.join(process.env.REVIEWHUB_MIGRATIONS_DIR, file),
-      "utf8"
+      "utf8",
     );
     await client.query(sql);
     await client.query(
       "INSERT INTO schema_migrations(version,checksum) VALUES($1,$2)",
-      [file, createHash("sha256").update(sql).digest("hex")]
+      [file, createHash("sha256").update(sql).digest("hex")],
     );
   }
   const open = () => {
@@ -76,12 +76,12 @@ test("telemetry start persists excluded attempts across restart without changing
                 run_attempt: 1,
                 name: "OCR Dispatch",
                 created_at: started,
-                updated_at: started
-              }
+                updated_at: started,
+              },
             ]
-          : []
+          : [],
       };
-    }
+    },
   };
   const cycle = async (options) => {
     const result = await collect({
@@ -90,7 +90,7 @@ test("telemetry start persists excluded attempts across restart without changing
       store,
       saved,
       resourcesReader: () => null,
-      actionsReader: (input) => collectActions({ ...input, http })
+      actionsReader: (input) => collectActions({ ...input, http }),
     });
     saved = result.saved;
     return result;
@@ -103,7 +103,7 @@ test("telemetry start persists excluded attempts across restart without changing
   first = false;
   const options = {
     enabled: true,
-    telemetrySince: new Date(f.now - 60000).toISOString()
+    telemetrySince: new Date(f.now - 60000).toISOString(),
   };
   const updated = await cycle(options);
   assert.equal(updated.policy.beforeTelemetry, 1);
@@ -111,10 +111,10 @@ test("telemetry start persists excluded attempts across restart without changing
   assert.equal(
     (
       await db.client.query(
-        "SELECT data->>'reason' reason FROM audit_client_attempts"
+        "SELECT data->>'reason' reason FROM audit_client_attempts",
       )
     ).rows[0].reason,
-    "before_telemetry_start"
+    "before_telemetry_start",
   );
   await store.close();
   store = db.open();
@@ -123,12 +123,12 @@ test("telemetry start persists excluded attempts across restart without changing
   assert.equal(resumed.batch.clientAttempts.length, 1);
   assert.equal(
     resumed.batch.clientAttempts[0].id,
-    initial.batch.clientAttempts[0].id
+    initial.batch.clientAttempts[0].id,
   );
   assert.equal(resumed.policy.pending, 0);
   assert.deepEqual(
     (await db.client.query("SELECT id,data FROM audit_runs ORDER BY id")).rows,
-    histories
+    histories,
   );
   assert.ok(calls.every((route) => route.includes("/runs?")));
 });
@@ -143,7 +143,7 @@ test("commits SQLite-derived audit data and cursor atomically, replays after res
       now,
       store,
       saved,
-      resourcesReader: () => null
+      resourcesReader: () => null,
     });
     saved = result.saved;
     return result;
@@ -152,23 +152,24 @@ test("commits SQLite-derived audit data and cursor atomically, replays after res
   await cycle();
   assert.equal(
     (await db.client.query("SELECT count(*)::int n FROM audit_runs")).rows[0].n,
-    1
+    1,
   );
   assert.equal(
     (
       await db.client.query(
-        "SELECT sum((data->>'totalTokens')::int)::int n FROM audit_usage"
+        "SELECT sum((data->>'totalTokens')::int)::int n FROM audit_usage",
       )
     ).rows[0].n,
-    110
+    110,
   );
-  const checkpoint = (await db.client.query("SELECT checkpoint FROM audit_sources"))
-    .rows[0].checkpoint;
+  const checkpoint = (
+    await db.client.query("SELECT checkpoint FROM audit_sources")
+  ).rows[0].checkpoint;
   await db.client.query(
-    "CREATE FUNCTION reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected'; END $$"
+    "CREATE FUNCTION reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected'; END $$",
   );
   await db.client.query(
-    "CREATE TRIGGER reject_audit BEFORE UPDATE ON audit_sources FOR EACH ROW EXECUTE FUNCTION reject_audit()"
+    "CREATE TRIGGER reject_audit BEFORE UPDATE ON audit_sources FOR EACH ROW EXECUTE FUNCTION reject_audit()",
   );
   f.value.jobs[0].title = "Changed PR title";
   f.database.save(f.value);
@@ -176,12 +177,12 @@ test("commits SQLite-derived audit data and cursor atomically, replays after res
   assert.deepEqual(
     (await db.client.query("SELECT checkpoint FROM audit_sources")).rows[0]
       .checkpoint,
-    checkpoint
+    checkpoint,
   );
   assert.equal(
-    (await db.client.query("SELECT data->>'title' title FROM audit_runs")).rows[0]
-      .title,
-    null
+    (await db.client.query("SELECT data->>'title' title FROM audit_runs"))
+      .rows[0].title,
+    null,
   );
   await db.client.query("DROP TRIGGER reject_audit ON audit_sources");
   await store.close();
@@ -192,12 +193,12 @@ test("commits SQLite-derived audit data and cursor atomically, replays after res
     ...f,
     store: resumed,
     saved: loaded,
-    resourcesReader: () => null
+    resourcesReader: () => null,
   });
   assert.equal(
-    (await db.client.query("SELECT data->>'title' title FROM audit_runs")).rows[0]
-      .title,
-    "Changed PR title"
+    (await db.client.query("SELECT data->>'title' title FROM audit_runs"))
+      .rows[0].title,
+    "Changed PR title",
   );
   assert.equal(next.batch.runs[0].id, first.batch.runs[0].id);
   f.value.jobs = [];
@@ -209,23 +210,25 @@ test("commits SQLite-derived audit data and cursor atomically, replays after res
     store: resumed,
     saved: next.saved,
     now: f.now + 86400000,
-    resourcesReader: () => null
+    resourcesReader: () => null,
   });
   assert.equal(
     (
       await db.client.query(
-        "SELECT (data->>'current')::boolean current FROM audit_runs"
+        "SELECT (data->>'current')::boolean current FROM audit_runs",
       )
     ).rows[0].current,
-    false
+    false,
   );
   assert.equal(
-    (await db.client.query("SELECT count(*)::int n FROM audit_findings")).rows[0].n,
-    1
+    (await db.client.query("SELECT count(*)::int n FROM audit_findings"))
+      .rows[0].n,
+    1,
   );
   assert.equal(
-    (await db.client.query("SELECT count(*)::int n FROM audit_usage")).rows[0].n,
-    1
+    (await db.client.query("SELECT count(*)::int n FROM audit_usage")).rows[0]
+      .n,
+    1,
   );
 });
 test("one source has one writer; contender cannot mark it failed; rollback rejects duplicate identity", async (t) => {
@@ -238,32 +241,36 @@ test("one source has one writer; contender cannot mark it failed; rollback rejec
   await two.failure("COLLECTION_FAILED");
   assert.equal(
     (await db.client.query("SELECT error FROM audit_sources")).rows[0].error,
-    null
+    null,
   );
   const result = await collect({
     ...f,
     store: one,
     saved,
-    resourcesReader: () => null
+    resourcesReader: () => null,
   });
   const invalid = {
     ...result.batch,
-    runs: [...result.batch.runs, ...result.batch.runs]
+    runs: [...result.batch.runs, ...result.batch.runs],
   };
   await assert.rejects(one.publish(invalid, {}, new Map()), /Duplicate/);
   assert.equal(
     (await db.client.query("SELECT count(*)::int n FROM audit_runs")).rows[0].n,
-    1
+    1,
   );
   await one.failure("COLLECTION_FAILED");
   assert.equal(
     (await db.client.query("SELECT error FROM audit_sources")).rows[0].error,
-    "COLLECTION_FAILED"
+    "COLLECTION_FAILED",
   );
-  await one.publish(result.batch, result.saved.checkpoint, result.saved.records);
+  await one.publish(
+    result.batch,
+    result.saved.checkpoint,
+    result.saved.records,
+  );
   assert.equal(
     (await db.client.query("SELECT error FROM audit_sources")).rows[0].error,
-    null
+    null,
   );
   const empty = {
     ...result.batch,
@@ -272,36 +279,40 @@ test("one source has one writer; contender cannot mark it failed; rollback rejec
     events: [],
     findings: [],
     usage: [],
-    resources: []
+    resources: [],
   };
   await one.publish(empty, result.saved.checkpoint, result.saved.records);
   assert.equal(
     (await db.client.query("SELECT in_scope FROM audit_repositories")).rows[0]
       .in_scope,
-    false
+    false,
   );
   assert.equal(
     (await db.client.query("SELECT count(*)::int n FROM audit_runs")).rows[0].n,
-    1
+    1,
   );
-  await one.publish(result.batch, result.saved.checkpoint, result.saved.records);
+  await one.publish(
+    result.batch,
+    result.saved.checkpoint,
+    result.saved.records,
+  );
   assert.equal(
     (await db.client.query("SELECT in_scope FROM audit_repositories")).rows[0]
       .in_scope,
-    true
+    true,
   );
 });
 test("schema incompatibility fails closed, invalid normalized input never commits", async (t) => {
   const f = fixture(t),
     db = await database(t);
   await db.client.query(
-    "DELETE FROM schema_migrations WHERE version='004_audit.sql'"
+    "DELETE FROM schema_migrations WHERE version='004_audit.sql'",
   );
   const missing = db.open();
   await assert.rejects(missing.connect(), /migration/);
   await missing.close();
   await db.client.query(
-    "INSERT INTO schema_migrations(version,checksum) VALUES('004_audit.sql','test')"
+    "INSERT INTO schema_migrations(version,checksum) VALUES('004_audit.sql','test')",
   );
   const store = db.open(),
     saved = await store.connect();
@@ -309,15 +320,15 @@ test("schema incompatibility fails closed, invalid normalized input never commit
     ...f,
     store,
     saved,
-    resourcesReader: () => null
+    resourcesReader: () => null,
   });
   await assert.rejects(
     store.publish({ ...result.batch, version: 2 }, {}, new Map()),
-    /Invalid normalized/
+    /Invalid normalized/,
   );
   assert.equal(
     (await db.client.query("SELECT count(*)::int n FROM audit_runs")).rows[0].n,
-    1
+    1,
   );
 });
 
@@ -332,7 +343,7 @@ test("explicit allowlist removal hides all audit rows and preserves renamed iden
       ...f,
       store,
       saved,
-      resourcesReader: () => null
+      resourcesReader: () => null,
     });
     saved = result.saved;
     return result;
@@ -345,7 +356,7 @@ test("explicit allowlist removal hides all audit rows and preserves renamed iden
       : "";
     return (
       await db.client.query(
-        `SELECT id,data FROM ${table} scoped${where} ORDER BY id`
+        `SELECT id,data FROM ${table} scoped${where} ORDER BY id`,
       )
     ).rows;
   };
@@ -354,7 +365,7 @@ test("explicit allowlist removal hides all audit rows and preserves renamed iden
     "audit_runs",
     "audit_events",
     "audit_findings",
-    "audit_usage"
+    "audit_usage",
   ]) {
     initial[table] = await rows(table);
     assert.ok(initial[table].length > 0, table);
@@ -369,39 +380,40 @@ test("explicit allowlist removal hides all audit rows and preserves renamed iden
     const current = await rows(table);
     assert.deepEqual(
       current.map((r) => r.id),
-      initial[table].map((r) => r.id)
+      initial[table].map((r) => r.id),
     );
     initial[table] = current;
   }
 
   f.config.repositories = [{ name: "company/other" }];
   await db.client.query(
-    "CREATE FUNCTION reject_scope_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected scope failure'; END $$"
+    "CREATE FUNCTION reject_scope_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected scope failure'; END $$",
   );
   await db.client.query(
-    "CREATE TRIGGER reject_scope_change BEFORE UPDATE ON audit_sources FOR EACH ROW EXECUTE FUNCTION reject_scope_change()"
+    "CREATE TRIGGER reject_scope_change BEFORE UPDATE ON audit_sources FOR EACH ROW EXECUTE FUNCTION reject_scope_change()",
   );
   const checkpoint = saved.checkpoint;
   await assert.rejects(cycle(), /injected scope failure/);
   assert.equal(
     (
-      await db.client.query("SELECT in_scope FROM audit_repositories WHERE id=$1", [
-        repositoryId
-      ])
+      await db.client.query(
+        "SELECT in_scope FROM audit_repositories WHERE id=$1",
+        [repositoryId],
+      )
     ).rows[0].in_scope,
-    true
+    true,
   );
   assert.deepEqual(
     (await db.client.query("SELECT checkpoint FROM audit_sources")).rows[0]
       .checkpoint,
-    checkpoint
+    checkpoint,
   );
   await db.client.query("DROP TRIGGER reject_scope_change ON audit_sources");
   await cycle();
   const hidden = await cycle();
   assert.deepEqual(
     hidden.batch.repositories.map((r) => r.name),
-    ["company/other"]
+    ["company/other"],
   );
   for (const table of Object.keys(initial)) {
     assert.equal((await rows(table)).length, initial[table].length, table);
@@ -409,11 +421,12 @@ test("explicit allowlist removal hides all audit rows and preserves renamed iden
   }
   assert.equal(
     (
-      await db.client.query("SELECT in_scope FROM audit_repositories WHERE id=$1", [
-        repositoryId
-      ])
+      await db.client.query(
+        "SELECT in_scope FROM audit_repositories WHERE id=$1",
+        [repositoryId],
+      )
     ).rows[0].in_scope,
-    false
+    false,
   );
   assert.ok(saved.records.has("repository:" + repositoryId));
 
@@ -439,9 +452,86 @@ test("explicit allowlist removal hides all audit rows and preserves renamed iden
   assert.equal(
     (
       await db.client.query(
-        "SELECT count(*)::int n FROM audit_repositories WHERE in_scope"
+        "SELECT count(*)::int n FROM audit_repositories WHERE in_scope",
       )
     ).rows[0].n,
-    1
+    1,
+  );
+});
+
+test("operational signals and resource metrics are idempotent, retain identity and remove stale presence", async (t) => {
+  const f = fixture(t),
+    db = await database(t),
+    store = db.open();
+  const resourcesReader = () => ({
+    cpu: { busy: 75, iowait: 4 },
+    memoryTotalBytes: 1000,
+    memoryAvailableBytes: 200,
+    volumes: [{ label: "data", totalBytes: 1000, availableBytes: 100 }],
+  });
+  let saved = await store.connect();
+  let result = await collect({ ...f, store, saved, resourcesReader });
+  saved = result.saved;
+  const original = (await db.client.query("SELECT * FROM audit_alert_signals"))
+    .rows[0];
+  assert.equal(original.data.state, "succeeded");
+  assert.equal(original.current, true);
+  const metrics = (
+    await db.client.query(
+      "SELECT data FROM monitor_samples WHERE component='review_host'",
+    )
+  ).rows.map((r) => r.data);
+  assert.equal(
+    metrics.find((r) => r.dimension === "host").values.cpu_percent,
+    75,
+  );
+  assert.equal(
+    metrics.find((r) => r.dimension === "data").values.disk_percent,
+    90,
+  );
+  f.job.state = "failed";
+  f.job.failurePhase = "publication";
+  f.job.error = "publication_failed";
+  f.job.updatedAt = new Date(f.now + 1000).toISOString();
+  f.database.save(f.value);
+  result = await collect({
+    ...f,
+    now: f.now + 1000,
+    store,
+    saved,
+    resourcesReader,
+  });
+  saved = result.saved;
+  const failed = (await db.client.query("SELECT * FROM audit_alert_signals"))
+    .rows;
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].id, original.id);
+  assert.equal(failed[0].data.stage, "publication");
+  const firstWrite = await store.publish(
+    result.batch,
+    result.saved.checkpoint,
+    result.saved.records,
+  );
+  const secondWrite = await store.publish(
+    result.batch,
+    result.saved.checkpoint,
+    result.saved.records,
+  );
+  assert.ok(secondWrite.rows <= firstWrite.rows);
+  assert.ok(secondWrite.ms >= 0);
+  f.value.jobs = [];
+  f.database.save(f.value);
+  await collect({ ...f, now: f.now + 2000, store, saved, resourcesReader });
+  assert.equal(
+    (await db.client.query("SELECT current FROM audit_alert_signals")).rows[0]
+      .current,
+    false,
+  );
+  assert.ok(
+    (
+      await db.client.query(
+        "SELECT count(*)::int n FROM monitor_samples WHERE component='collector'",
+      )
+    ).rows[0].n > 0,
   );
 });
