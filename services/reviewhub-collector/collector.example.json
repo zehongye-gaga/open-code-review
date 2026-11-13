@@ -19,6 +19,8 @@
     "lookbackDays": 90,
     "maxRequestsPerCycle": 80,
     "maxSecondsPerCycle": 60,
+    "telemetrySince": null,
+    "rescanSeconds": 3600,
     "workflowNames": [
       "OCR Dispatch",
       "OCR Code Review"

@@ -10,6 +10,7 @@ const { Client } = require("pg"),
   { PostgresStore } = require("../database/postgres.js"),
   { collect } = require("../collector.js"),
   { fixture } = require("../test-support.js");
+const { collectActions } = require("../actions.js");
 if (!process.env.TEST_DATABASE_URL || !process.env.REVIEWHUB_MIGRATIONS_DIR)
   throw Error(
     "Use a dedicated TEST_DATABASE_URL and the matching ReviewHub REVIEWHUB_MIGRATIONS_DIR"
@@ -54,6 +55,83 @@ async function database(t) {
   };
   return { client, open };
 }
+test("telemetry start persists excluded attempts across restart without changing review history", async (t) => {
+  const f = fixture(t),
+    db = await database(t),
+    calls = [];
+  let store = db.open(),
+    saved = await store.connect(),
+    first = true;
+  const started = new Date(f.now - 120000).toISOString();
+  const http = {
+    json: async (route) => {
+      calls.push(route);
+      assert.ok(route.includes("/runs?"));
+      return {
+        total_count: first ? 1 : 0,
+        workflow_runs: first
+          ? [
+              {
+                id: 100,
+                run_attempt: 1,
+                name: "OCR Dispatch",
+                created_at: started,
+                updated_at: started
+              }
+            ]
+          : []
+      };
+    }
+  };
+  const cycle = async (options) => {
+    const result = await collect({
+      ...f,
+      options: { ...f.options, policy: options },
+      store,
+      saved,
+      resourcesReader: () => null,
+      actionsReader: (input) => collectActions({ ...input, http })
+    });
+    saved = result.saved;
+    return result;
+  };
+  const initial = await cycle({ enabled: true, maxRequestsPerCycle: 4 });
+  assert.equal(initial.batch.clientAttempts[0].outcome, "pending");
+  const histories = (
+    await db.client.query("SELECT id,data FROM audit_runs ORDER BY id")
+  ).rows;
+  first = false;
+  const options = {
+    enabled: true,
+    telemetrySince: new Date(f.now - 60000).toISOString()
+  };
+  const updated = await cycle(options);
+  assert.equal(updated.policy.beforeTelemetry, 1);
+  assert.equal(updated.policy.pending, 0);
+  assert.equal(
+    (
+      await db.client.query(
+        "SELECT data->>'reason' reason FROM audit_client_attempts"
+      )
+    ).rows[0].reason,
+    "before_telemetry_start"
+  );
+  await store.close();
+  store = db.open();
+  saved = await store.connect();
+  const resumed = await cycle(options);
+  assert.equal(resumed.batch.clientAttempts.length, 1);
+  assert.equal(
+    resumed.batch.clientAttempts[0].id,
+    initial.batch.clientAttempts[0].id
+  );
+  assert.equal(resumed.policy.pending, 0);
+  assert.deepEqual(
+    (await db.client.query("SELECT id,data FROM audit_runs ORDER BY id")).rows,
+    histories
+  );
+  assert.ok(calls.every((route) => route.includes("/runs?")));
+});
 test("commits SQLite-derived audit data and cursor atomically, replays after restart, and preserves history", async (t) => {
   const f = fixture(t),
     db = await database(t),
@@ -84,9 +162,8 @@ test("commits SQLite-derived audit data and cursor atomically, replays after res
     ).rows[0].n,
     110
   );
-  const checkpoint = (
-    await db.client.query("SELECT checkpoint FROM audit_sources")
-  ).rows[0].checkpoint;
+  const checkpoint = (await db.client.query("SELECT checkpoint FROM audit_sources"))
+    .rows[0].checkpoint;
   await db.client.query(
     "CREATE FUNCTION reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected'; END $$"
   );
@@ -102,8 +179,8 @@ test("commits SQLite-derived audit data and cursor atomically, replays after res
     checkpoint
   );
   assert.equal(
-    (await db.client.query("SELECT data->>'title' title FROM audit_runs"))
-      .rows[0].title,
+    (await db.client.query("SELECT data->>'title' title FROM audit_runs")).rows[0]
+      .title,
     null
   );
   await db.client.query("DROP TRIGGER reject_audit ON audit_sources");
@@ -118,8 +195,8 @@ test("commits SQLite-derived audit data and cursor atomically, replays after res
     resourcesReader: () => null
   });
   assert.equal(
-    (await db.client.query("SELECT data->>'title' title FROM audit_runs"))
-      .rows[0].title,
+    (await db.client.query("SELECT data->>'title' title FROM audit_runs")).rows[0]
+      .title,
     "Changed PR title"
   );
   assert.equal(next.batch.runs[0].id, first.batch.runs[0].id);
@@ -143,13 +220,11 @@ test("commits SQLite-derived audit data and cursor atomically, replays after res
     false
   );
   assert.equal(
-    (await db.client.query("SELECT count(*)::int n FROM audit_findings"))
-      .rows[0].n,
+    (await db.client.query("SELECT count(*)::int n FROM audit_findings")).rows[0].n,
     1
   );
   assert.equal(
-    (await db.client.query("SELECT count(*)::int n FROM audit_usage")).rows[0]
-      .n,
+    (await db.client.query("SELECT count(*)::int n FROM audit_usage")).rows[0].n,
     1
   );
 });
@@ -185,11 +260,7 @@ test("one source has one writer; contender cannot mark it failed; rollback rejec
     (await db.client.query("SELECT error FROM audit_sources")).rows[0].error,
     "COLLECTION_FAILED"
   );
-  await one.publish(
-    result.batch,
-    result.saved.checkpoint,
-    result.saved.records
-  );
+  await one.publish(result.batch, result.saved.checkpoint, result.saved.records);
   assert.equal(
     (await db.client.query("SELECT error FROM audit_sources")).rows[0].error,
     null
@@ -213,11 +284,7 @@ test("one source has one writer; contender cannot mark it failed; rollback rejec
     (await db.client.query("SELECT count(*)::int n FROM audit_runs")).rows[0].n,
     1
   );
-  await one.publish(
-    result.batch,
-    result.saved.checkpoint,
-    result.saved.records
-  );
+  await one.publish(result.batch, result.saved.checkpoint, result.saved.records);
   assert.equal(
     (await db.client.query("SELECT in_scope FROM audit_repositories")).rows[0]
       .in_scope,
@@ -318,10 +385,9 @@ test("explicit allowlist removal hides all audit rows and preserves renamed iden
   await assert.rejects(cycle(), /injected scope failure/);
   assert.equal(
     (
-      await db.client.query(
-        "SELECT in_scope FROM audit_repositories WHERE id=$1",
-        [repositoryId]
-      )
+      await db.client.query("SELECT in_scope FROM audit_repositories WHERE id=$1", [
+        repositoryId
+      ])
     ).rows[0].in_scope,
     true
   );
@@ -330,9 +396,7 @@ test("explicit allowlist removal hides all audit rows and preserves renamed iden
       .checkpoint,
     checkpoint
   );
-  await db.client.query(
-    "DROP TRIGGER reject_scope_change ON audit_sources"
-  );
+  await db.client.query("DROP TRIGGER reject_scope_change ON audit_sources");
   await cycle();
   const hidden = await cycle();
   assert.deepEqual(
@@ -345,10 +409,9 @@ test("explicit allowlist removal hides all audit rows and preserves renamed iden
   }
   assert.equal(
     (
-      await db.client.query(
-        "SELECT in_scope FROM audit_repositories WHERE id=$1",
-        [repositoryId]
-      )
+      await db.client.query("SELECT in_scope FROM audit_repositories WHERE id=$1", [
+        repositoryId
+      ])
     ).rows[0].in_scope,
     false
   );

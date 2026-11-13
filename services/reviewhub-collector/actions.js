@@ -20,6 +20,8 @@ function policyOptions(value) {
     maxRequestsPerCycle: 80,
     maxSecondsPerCycle: 60,
     workflowNames: ["OCR Dispatch", "OCR Code Review"],
+    telemetrySince: null,
+    rescanSeconds: 3600,
     ...value
   };
   if (
@@ -33,6 +35,10 @@ function policyOptions(value) {
     !Number.isInteger(options.maxSecondsPerCycle) ||
     options.maxSecondsPerCycle < 1 ||
     options.maxSecondsPerCycle > 120 ||
+    (options.telemetrySince !== null && !time(options.telemetrySince)) ||
+    !Number.isInteger(options.rescanSeconds) ||
+    options.rescanSeconds < 300 ||
+    options.rescanSeconds > 86400 ||
     !Array.isArray(options.workflowNames) ||
     !options.workflowNames.length ||
     options.workflowNames.some((v) => typeof v !== "string" || !v || v.length > 200)
@@ -52,6 +58,27 @@ async function collectActions({
   const records = new Map(structuredClone([...previous]));
   const repos = new Map(repositories.map((r) => [r.id, r]));
   const warnings = new Set();
+  const since = options?.telemetrySince ? Date.parse(options.telemetrySince) : 0;
+  const lower = Math.max(now - (options?.lookbackDays || 90) * DAY, since);
+  const exclude = (entry) => {
+    entry.done = true;
+    entry.nextAt = 0;
+    entry.row.outcome = "unknown";
+    entry.row.reason = "before_telemetry_start";
+    entry.row.coverage = "missing";
+    entry.row.checkedAt = iso(now);
+  };
+  if (since)
+    for (const [key, entry] of records) {
+      if (
+        key.startsWith("run:") &&
+        !entry.done &&
+        !entry.verifyStart &&
+        entry.row.providerAttempt === 1 &&
+        Date.parse(entry.row.at) < since
+      )
+        exclude(entry);
+    }
   const attempts = () =>
     [...records]
       .filter(([key, r]) => key.startsWith("run:") && repos.has(r.row.repositoryId))
@@ -62,8 +89,9 @@ async function collectActions({
   const coverage = repositories.map((r) => ({
     id: r.id,
     repositoryId: r.id,
-    from:
-      records.get("scan:" + r.id)?.from || iso(now - (options?.lookbackDays || 90) * DAY),
+    from: iso(
+      Math.max(lower, Date.parse(records.get("scan:" + r.id)?.from || iso(lower)))
+    ),
     through: records.get("scan:" + r.id)?.through || null,
     checkedAt: iso(now),
     status: options?.enabled ? "syncing" : "disabled",
@@ -89,33 +117,37 @@ async function collectActions({
   const offset = records.get("meta")?.offset || 0;
   ordered.push(...ordered.splice(0, offset % Math.max(1, ordered.length)));
   let visited = 0;
-  for (const repo of ordered) {
-    const ready = [...records].some(
-      ([key, r]) =>
-        key.startsWith("run:") &&
-        !r.done &&
-        r.nextAt <= now &&
-        repos.has(r.row.repositoryId)
-    );
-    if (!available(Math.max(Math.ceil(options.maxRequestsPerCycle / 2), ready ? 5 : 1)))
-      break;
-    visited++;
+  async function discover(repo, historical = false) {
     const current = coverage.find((r) => r.id === repo.id);
-    let scan = records.get("scan:" + repo.id);
-    if (!scan?.windows?.length)
+    const key = (historical ? "history:" : "scan:") + repo.id;
+    let scan = records.get(key);
+    if (!historical && scan && since && Date.parse(scan.from) < since) scan = null;
+    if (scan?.nextAt > now) {
+      if (scan.error) {
+        current.status = "error";
+        current.errorCode = scan.error;
+      }
+      return;
+    }
+    if (!scan?.windows?.length) {
+      const from =
+        historical || !since
+          ? iso(now - options.lookbackDays * DAY)
+          : iso(
+              Math.max(
+                lower,
+                scan?.through ? Date.parse(scan.through) - 300000 : lower
+              )
+            );
       scan = {
-        from: iso(now - options.lookbackDays * DAY),
+        from: historical ? from : iso(lower),
         through: scan?.through || null,
         target: iso(now),
-        windows: [{ from: iso(now - options.lookbackDays * DAY), to: iso(now), page: 1 }]
+        windows: [{ from, to: iso(now), page: 1 }]
       };
-    current.from = scan.from;
-    records.set("scan:" + repo.id, scan);
-    if (scan.nextAt > now) {
-      current.status = "error";
-      current.errorCode = scan.error;
-      continue;
     }
+    if (!historical) current.from = scan.from;
+    records.set(key, scan);
     const range = scan.windows[0];
     try {
       const query = new URLSearchParams({
@@ -143,7 +175,10 @@ async function collectActions({
           { from: range.from, to: iso(middle), page: 1 }
         );
       } else {
-        if (body.total_count > (range.page - 1) * 100 && body.workflow_runs.length === 0)
+        if (
+          body.total_count > (range.page - 1) * 100 &&
+          body.workflow_runs.length === 0
+        )
           throw Error("ACTIONS_INCOMPLETE_PAGE");
         for (const run of body.workflow_runs) {
           if (
@@ -155,13 +190,39 @@ async function collectActions({
           )
             throw Error("ACTIONS_INVALID_RUN");
           if (!options.workflowNames.includes(run.name)) continue;
+          if (
+            since &&
+            Date.parse(run.created_at) < since &&
+            Date.parse(run.updated_at) < since
+          )
+            continue;
           for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
             const id = `${repo.id}:${run.id}:${attempt}`;
-            if (records.has("run:" + id)) continue;
+            const existing = records.get("run:" + id);
+            const started =
+              attempt === run.run_attempt && time(run.run_started_at)
+                ? run.run_started_at
+                : run.created_at;
+            if (existing) {
+              if (
+                existing.row.reason === "before_telemetry_start" &&
+                Date.parse(started) >= since
+              ) {
+                existing.done = false;
+                existing.verifyStart = true;
+                existing.row.at = started;
+                existing.row.outcome = "pending";
+                existing.row.reason = "logs_pending";
+                existing.row.coverage = "pending";
+              }
+              continue;
+            }
+            if (since && Date.parse(started) < since && attempt === 1) continue;
             records.set("run:" + id, {
               nextAt: 0,
               done: false,
               failures: 0,
+              verifyStart: Date.parse(run.created_at) < since,
               row: {
                 id,
                 repositoryId: repo.id,
@@ -173,7 +234,7 @@ async function collectActions({
                 headSha: null,
                 baseSha: null,
                 baseRef: null,
-                at: run.created_at,
+                at: started,
                 finishedAt: null,
                 checkedAt: iso(now),
                 outcome: "pending",
@@ -192,10 +253,13 @@ async function collectActions({
         else scan.windows.shift();
         if (!scan.windows.length) scan.through = scan.target;
       }
-      scan.nextAt = 0;
+      scan.nextAt =
+        historical && !scan.windows.length ? now + options.rescanSeconds * 1000 : 0;
       scan.error = null;
-      current.through = scan.through;
-      current.status = scan.windows.length ? "syncing" : "ready";
+      if (!historical) {
+        current.through = scan.through;
+        current.status = scan.windows.length ? "syncing" : "ready";
+      }
     } catch (error) {
       scan.error = /^ACTIONS_[A-Z_0-9]+$/.test(error.message)
         ? error.message
@@ -206,7 +270,26 @@ async function collectActions({
       warnings.add("POLICY_LOGS_UNAVAILABLE");
     }
   }
-  records.set("meta", { offset: (offset + visited) % Math.max(1, ordered.length) });
+  for (const repo of ordered) {
+    const ready = [...records].some(
+      ([key, r]) =>
+        key.startsWith("run:") &&
+        !r.done &&
+        r.nextAt <= now &&
+        repos.has(r.row.repositoryId)
+    );
+    if (
+      !available(Math.max(Math.ceil(options.maxRequestsPerCycle / 2), ready ? 5 : 1))
+    )
+      break;
+    visited++;
+    await discover(repo);
+  }
+  const historyOffset = records.get("meta")?.historyOffset || 0;
+  records.set("meta", {
+    offset: (offset + visited) % Math.max(1, ordered.length),
+    historyOffset
+  });
   const pending = [...records]
     .filter(
       ([key, r]) =>
@@ -217,10 +300,13 @@ async function collectActions({
     )
     .sort(
       (a, b) =>
-        a[1].nextAt - b[1].nextAt || Date.parse(b[1].row.at) - Date.parse(a[1].row.at)
+        a[1].nextAt - b[1].nextAt ||
+        Date.parse(b[1].row.at) - Date.parse(a[1].row.at)
     );
+  let logsProcessed = 0;
+  const historyReserve = since && options.maxRequestsPerCycle >= 16 ? 2 : 0;
   for (const [, entry] of pending) {
-    if (!available(4)) break;
+    if (!available(4 + historyReserve)) break;
     const row = entry.row,
       repo = repos.get(row.repositoryId);
     const route = `/repos/${repo.name}/actions/runs/${row.providerRunId}/attempts/${row.providerAttempt}`;
@@ -234,6 +320,10 @@ async function collectActions({
         throw Error("ACTIONS_INVALID_ATTEMPT");
       row.at = run.run_started_at || run.created_at;
       row.checkedAt = iso(now);
+      if (since && Date.parse(row.at) < since) {
+        exclude(entry);
+        continue;
+      }
       if (run.status !== "completed") {
         entry.nextAt = now + 60000;
         continue;
@@ -253,7 +343,9 @@ async function collectActions({
       if (candidates.length !== 1) throw Error("ACTIONS_CLIENT_JOB_UNRESOLVED");
       row.jobId = String(candidates[0].id);
       budget -= 2;
-      const log = await http.log(`/repos/${repo.name}/actions/jobs/${row.jobId}/logs`);
+      const log = await http.log(
+        `/repos/${repo.name}/actions/jobs/${row.jobId}/logs`
+      );
       Object.assign(
         row,
         parseClientLog(log, {
@@ -267,28 +359,77 @@ async function collectActions({
       );
       entry.done = true;
       entry.failures = 0;
+      logsProcessed++;
     } catch (error) {
       entry.failures++;
       entry.nextAt = now + Math.min(DAY, 60000 * 2 ** Math.min(10, entry.failures));
+      row.outcome = "pending";
+      row.coverage = "pending";
       row.reason = /^ACTIONS_[A-Z_0-9]+$/.test(error.message)
         ? error.message.toLowerCase()
         : "actions_unavailable";
       warnings.add("POLICY_LOGS_UNAVAILABLE");
     }
   }
+  if (since) {
+    const history = [...repositories];
+    history.push(...history.splice(0, historyOffset % Math.max(1, history.length)));
+    let scanned = 0;
+    for (const repo of history) {
+      if (!available()) break;
+      scanned++;
+      await discover(repo, true);
+    }
+    records.get("meta").historyOffset =
+      (historyOffset + scanned) % Math.max(1, history.length);
+  }
   for (const row of coverage) {
     const scan = records.get("scan:" + row.id);
     if (row.status === "syncing" && scan?.through && !scan.windows.length)
       row.status = "ready";
+    if (since) {
+      const historical = records.get("history:" + row.id);
+      row.through =
+        scan?.through && historical?.through
+          ? iso(Math.min(Date.parse(scan.through), Date.parse(historical.through)))
+          : null;
+      if (
+        row.status === "ready" &&
+        (!historical?.through || historical.windows.length)
+      )
+        row.status = "syncing";
+    }
     const pending = [...records].some(
-      ([key, r]) => key.startsWith("run:") && !r.done && r.row.repositoryId === row.id
+      ([key, r]) =>
+        key.startsWith("run:") && !r.done && r.row.repositoryId === row.id
     );
     if (row.status === "ready" && pending) row.status = "syncing";
     const incomplete = attempts().some(
-      (a) => a.repositoryId === row.id && a.coverage !== "complete"
+      (a) =>
+        a.repositoryId === row.id &&
+        a.coverage !== "complete" &&
+        a.reason !== "before_telemetry_start"
     );
     if (incomplete) warnings.add("POLICY_LOGS_PARTIAL");
   }
-  return { records, attempts: attempts(), coverage, warnings: [...warnings] };
+  const rows = attempts();
+  return {
+    records,
+    attempts: rows,
+    coverage,
+    warnings: [...warnings],
+    stats: {
+      requestBudgetUsed: options.maxRequestsPerCycle - budget,
+      logsProcessed,
+      pending: rows.filter((r) => r.outcome === "pending").length,
+      beforeTelemetry: rows.filter((r) => r.reason === "before_telemetry_start")
+        .length,
+      missingResults: rows.filter(
+        (r) => r.outcome === "unknown" && r.reason !== "before_telemetry_start"
+      ).length,
+      budgetExhausted: !available(4),
+      telemetrySince: options.telemetrySince
+    }
+  };
 }
 module.exports = { collectActions, policyOptions };
