@@ -385,6 +385,48 @@ test("HTTP API requires a bearer token and webhook signatures; only allowlisted 
   assert.equal((await again.json()).queued, false);
 });
 
+test("legacy signed webhook uses the same native stacked action and branch policy", async t => {
+  const h = setup(t);
+  h.current.pr.base.ref = "feature/parent";
+  const server = createServer(h.service, { webhookSecret: "webhook-test" });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const body = JSON.stringify({ action: "stacked", repository: { full_name: repository }, pull_request: { number: 1 } });
+  const send = () => fetch(`http://127.0.0.1:${server.address().port}/webhooks/github`, { method: "POST", body,
+    headers: { "x-github-event": "pull_request", "x-hub-signature-256": "sha256=" + crypto.createHmac("sha256", "webhook-test").update(body).digest("hex") } });
+  assert.equal((await (await send()).json()).queued, false);
+  h.current.pr.stack = { id: 2891204, base: { ref: "main" } };
+  assert.equal((await (await send()).json()).queued, true);
+  assert.equal(h.service.state.data.jobs.length, 1);
+  assert.equal(h.service.state.data.jobs[0].baseRef, "feature/parent");
+});
+
+for (const stage of ["before_review", "after_review"]) {
+  test(`worker retains a resumable job when stack membership disappears ${stage}`, async t => {
+    const h = setup(t), s = h.service;
+    s.config.repositories[0].name = "lexmount/example";
+    s.config.infrastructure = { orgCI: { enabled: true } };
+    h.current.pr.base.repo.full_name = "lexmount/example"; h.current.pr.base.ref = "feature/parent";
+    const stack = { id: 2891204, base: { ref: "main" } }; h.current.pr.stack = stack;
+    const { OrgCI } = require("./org-ci.js"), { snapshot } = require("./admission-reconciliation.js");
+    s.orgCI = new OrgCI(s); const p = snapshot("lexmount/example", h.current.pr);
+    await s.orgCI.submit(p, "direct"); const r = s.orgCI.receipts[p.request_id]; await s.orgCI.dispatch(r);
+    const job = s.state.data.jobs[0]; let runs = 0, publications = 0;
+    const publish = s.publish;
+    s.publish = async args => { publications++; return publish(args); };
+    s.run = async ({ directory }) => { runs++; writeReport(directory); delete h.current.pr.stack; };
+    if (stage === "before_review") delete h.current.pr.stack;
+    await s.tick();
+    assert.equal(job.state, "cancelled"); assert.equal(r.state, "skipped");
+    assert.equal(publications, 0); assert.equal(r.reason, "target_branch_not_allowed");
+    h.current.pr.stack = stack;
+    s.run = async ({ directory }) => { runs++; writeReport(directory); };
+    await s.orgCI.submit(p, "direct"); await s.orgCI.dispatch(r); await s.tick();
+    assert.equal(s.state.data.jobs.length, 1); assert.equal(r.jobId, job.id);
+    assert.equal(job.state, "complete"); assert.equal(runs, 1); assert.equal(publications, 1);
+  });
+}
+
 test("GitHub transport has the publisher's wire contract and reloads rotated credentials", async (t) => {
   const h = setup(t), tokenFile = path.join(h.directory, "token");
   fs.writeFileSync(tokenFile, "first");

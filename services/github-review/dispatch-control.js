@@ -41,6 +41,7 @@ async function dispatchTick(service, events = service.githubEvents) {
   if (failed) throw failed.reason;
 }
 function dispatchFailure(error) {
+  if (error.code === "PR_TARGET_BRANCH_NOT_ALLOWED") return { state: "skipped", reason: "target_branch_not_allowed", retryable: false };
   if (error.code === "PR_SNAPSHOT_CHANGED") return { state: "superseded", reason: error.prClosed ? "pr_closed" : "pr_snapshot_changed", retryable: false };
   const status = error.status;
   const headers = error.response?.headers || {};

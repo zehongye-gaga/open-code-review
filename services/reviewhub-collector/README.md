@@ -6,11 +6,11 @@ This collector does not manage any existing service. Starting it does not stop a
 
 ## Run
 
-Requires Node >= 22.18, read access to the source files, and a PostgreSQL connection. The example paths match the existing deployment layout; verify them and the organization allowlist before use.
+Requires Node >= 22.18, read access to the source files, and a PostgreSQL connection. The example paths match the existing deployment layout; verify them, the backend repository allowlist and the collector's organization boundary before use.
 
 1. Deploy the matching ReviewHub change and run its migrations, including `004_audit.sql` and `005_client_audit.sql`.
 2. In this directory run `npm ci --ignore-scripts`.
-3. Copy `collector.example.json` to a deployment-owned file and set `ocrConfig`, `stateSource`, `organizations` and `analytics.sessionDirectory`. Organization matching is case insensitive. Restart the process after changing configuration.
+3. Copy `collector.example.json` to a deployment-owned file and set `ocrConfig`, `stateSource`, `organizations` and `analytics.sessionDirectory`. The existing backend `repositories` array is the repository allowlist; `organizations` restricts it further and does not enroll historical repositories. Organization and repository matching is case insensitive. Restart the process after changing either configuration.
 4. Inject `REVIEWHUB_DATABASE_URL` and a stable `REVIEWHUB_SOURCE_ID` through a protected environment file. Do not put a connection string in the JSON config or commit it. Use TLS with certificate validation for remote PostgreSQL.
 5. Run `node index.js /absolute/path/collector.json --once`, inspect the source status in ReviewHub, then run without `--once` for continuous collection. The first invocation of an empty/uninitialized task SQLite fails rather than publishing an empty successful snapshot.
 
@@ -30,7 +30,7 @@ Default cycle: 300 seconds **after the previous cycle finishes**. There is no ov
 
 ## Data meanings
 
-- Repository metadata comes from configured organization repositories and known historical source names. GitHub fixed ID is attached when verified; otherwise an explicit unmatched local ID is retained. A rename updates aliases on that same record. Access is `unknown` on verification failure and `unavailable` on a confirmed 404. This is audit metadata, not a user permission decision. No OCR enablement is inferred from a default branch or an old run.
+- Repository membership comes only from the backend's explicit `repositories` entries within the collector's organizations. Configured `name` / `githubName`, verified GitHub IDs and saved rename aliases identify their historical records; task history and old snapshots cannot add extra members. GitHub fixed ID is attached when verified; otherwise an explicit unmatched local ID is retained. Removed repositories are hidden through `in_scope`, while their identity registry and retained audit history survive re-enrollment. Access is `unknown` on verification failure and `unavailable` on a confirmed 404. This is audit metadata, not a user permission decision. No OCR enablement is inferred from a default branch or an old run.
 - Backend persisted admission is separate from client ACK, execution, verdict and publication. Historical jobs are not fabricated as ACK receipts. Optional Policy logs provide client ACK outcomes; only explicit stored reasons count as stage timeouts. Unsupported metrics remain null.
 - Native input + output is the known total. Cache counters are separate, not added twice. Retry/resume sessions count once. Only exact report attribution links native usage to a run; unattributed usage remains repository/PR scoped. Finding text comes from retained validated results, never model summaries invented by the collector.
 - Agent session-tree counters are PR-scoped cumulative observations (`timeBasis=observed_total`). ReviewHub labels them as current cumulative values outside date filtering; they are not distributed into daily trends or review rounds. Cache breakdown is unknown. Native day buckets use `Asia/Shanghai`; timestamps are UTC.
@@ -64,20 +64,4 @@ npm run test:integration
 
 The integration suite creates and cleans its own random schema using the actual ReviewHub SQL migrations. It covers transaction failure and retry, restart deduplication, retained history, writer exclusion and schema mismatch. The original collector regression suite remains `node --test services/github-review/*.test.js` from the repository root. Runtime dependencies are scoped to this service: `pg` is the PG writer, `ajv` + `ajv-formats` validate the shared wire contract; the existing task service gains no package dependency.
 
-Production rollout is a separate verification: compare a selected repository/PR and native/Agent totals, exercise connection failure and restart, confirm source freshness, then decide when old consumers can be retired. The initial live deployment is recorded below; it does not authorize retiring existing consumers.
-
-## Live deployment, 2026-11-12
-
-Commit `1d6e15b3facf7b7099492ddc6a05fb52aeb16d8f` was deployed to an independent release directory on the source host, using Node 22.23.1 and locked dependencies. Only the new `ocr-reviewhub-collector.service` was enabled/restarted. The task service, old collector, dashboard, their release links and original configuration were retained.
-
-The host uses a root process with a read-only system filesystem and explicit read-only source paths, an empty capability set, `NoNewPrivileges`, private temporary files/devices, half-core CPU quota, 768 MiB memory limit and idle I/O priority. This avoids expanding the existing audit SSH account's source-file privileges. The first import peaked at 167.9 MiB; the first persistent cycle peaked at 194 MiB. The interval remains 300 seconds after each completed cycle.
-
-The `reviewhub_collector` database role was verified to read/write only the eight audit/recovery tables and read the migration version column. Queries against users, operator sessions and platform settings were rejected; schema creation was denied. The operator explicitly approved the existing private-network PG endpoint without TLS for this rollout, so no database network/authentication configuration or service restart was needed. Credentials are stored in a deployment-owned 0600 environment file and are not included here.
-
-At `2026-11-12T11:41:26.291Z`, the first snapshot published 30 current/historical repositories, 3,398 reviews, 13,017 events, 1,616 findings and 4,554 usage records. The next process resumed incrementally with 18 changed source rows and one real new task, producing 3,399 reviews without duplicate snapshots or missing prior records. Restarting only this Worker resumed with four changes and retained the same review count.
-
-The ReviewHub database query layer and response schemas successfully read repository lists, paginated reviews/findings/usage, PR details and all 30 repository summaries. Global counts and native/Agent token totals matched the sum of the same-window repository queries. For `lexmount/lex-voice#296`, source task `1791879625395`, the retained source's two native sessions totaled 643,017 input + 3,267 output = 646,284 tokens, matching PG.
-
-A separate one-shot process targeting an unreachable loopback PG port failed as expected while the task service health remained healthy with active work. The real PG service was not interrupted. The original three services retained their PIDs and zero restarts throughout these checks.
-
-Three GitHub metadata requests failed with `fetch failed` and remain explicitly unverified; missing native usage remains unknown. This rollout does not establish personal GitHub authorization, configuration application, Policy client ACK metrics, full historical completeness, real database-outage recovery, or backup restoration. Automatic tests continue to use a separate test database, not production credentials.
+Production rollout is a separate verification: compare a selected repository/PR and native/Agent totals, exercise PG interruption and restart, confirm source freshness, then decide when old consumers can be retired. This PR does not claim that production PostgreSQL, source grants or the live comparison have been verified.

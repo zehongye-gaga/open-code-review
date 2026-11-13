@@ -101,6 +101,7 @@ test("renamed CI receipt reuses a running session and suppresses old-name status
 
 test("renaming does not reuse an old review when the PR target changes", async t => {
   const { s, pr } = fixture(t), old = snapshot(previous, pr);
+  s.repo(previous).baseBranches.push("release/new-target");
   await s.orgCI.submit(old, "direct"); await s.orgCI.dispatch(s.orgCI.receipts[old.request_id]);
   const oldJob = s.state.data.jobs[0]; pr.base.ref = "release/new-target";
   const p = snapshot(current, pr); await s.orgCI.submit(p, "direct");

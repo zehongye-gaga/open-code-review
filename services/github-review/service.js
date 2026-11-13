@@ -77,6 +77,14 @@ class ReviewService {
   }
   refresh(job, pr) {
     if (job.state === "cancelled") return null;
+    if (this.repo(job.repository) && pr.state === "open" && sameRepository(this, pr.base?.repo?.full_name, job.repository) &&
+        pr.head?.sha === job.head && pr.base?.sha === job.base && pr.base?.ref === job.baseRef && !this.targetAllowed(job.repository, pr)) {
+      job.state = "cancelled"; job.cancelReason = "target_branch_not_allowed";
+      const receipt = this.orgCI?.receipts[job.ciRequestId];
+      if (receipt?.jobId === job.id && !receipt.pendingAdmission && !receipt.successorReceipt) this.orgCI.stop(receipt, "skipped", "target_branch_not_allowed");
+      this.state.save();
+      return null;
+    }
     if (job.settings || this.config.infrastructure?.externalDispatch) {
       job.state = "superseded";
       this.state.save();
@@ -86,9 +94,14 @@ class ReviewService {
   }
   get active() { return this.workers.values().next().value || null; }
   coordinates(name) { const [owner, repo] = (this.repo(name)?.githubName || name).split("/"); return { owner, repo }; }
+  targetAllowed(repository, pr) {
+    const repo = this.repo(repository);
+    const target = !this.config.gitea && typeof pr.stack?.base?.ref === "string" ? pr.stack.base.ref : pr.base?.ref;
+    return !!repo && (repo.baseBranches.includes("*") || repo.baseBranches.includes(target));
+  }
   eligible(repository, pr, job = {}) {
     const repo = this.repo(repository);
-    return repo && pr.state === "open" && (job.ciRequestId || !pr.draft) && (job.ciRequestId || repo.baseBranches.includes("*") || repo.baseBranches.includes(pr.base?.ref)) &&
+    return repo && pr.state === "open" && (job.ciRequestId || !pr.draft) && this.targetAllowed(repository, pr) &&
       sameRepository(this, pr.base?.repo?.full_name, repo.name) && SHA.test(pr.head?.sha) && SHA.test(pr.base?.sha);
   }
 
