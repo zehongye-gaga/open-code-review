@@ -35,7 +35,8 @@ async function main() {
             runs: result.batch.runs.length,
             warnings: result.batch.warnings,
             mode: saved.checkpoint.mode,
-            changedRows: saved.checkpoint.changedRows
+            changedRows: saved.checkpoint.changedRows,
+            policy: result.policy
           })
         );
         if (process.argv.includes("--once")) return;

@@ -12,7 +12,12 @@ const { fixture } = require("./test-support.js"),
   { collect } = require("./collector.js");
 const now = Date.parse("2026-11-12T12:00:00Z"),
   at = new Date(now - 60000).toISOString();
-const repo = { id: "github:42", name: "company/repo", providerId: "42", aliases: [] };
+const repo = {
+  id: "github:42",
+  name: "company/repo",
+  providerId: "42",
+  aliases: []
+};
 const identity = {
   base_ref: "main",
   base_sha: "b".repeat(40),
@@ -56,7 +61,12 @@ function logs(attempt = 1, outcome = "accepted") {
     .map((r) => at + " " + JSON.stringify(r))
     .join("\n");
 }
-const context = { repository: repo.name, repositoryId: "42", runId: "100", attempt: 1 };
+const context = {
+  repository: repo.name,
+  repositoryId: "42",
+  runId: "100",
+  attempt: 1
+};
 function fakeHTTP() {
   const calls = [],
     state = { attempt: 1, conclusion: "success", log: null, unavailable: false };
@@ -109,9 +119,13 @@ test("client results are independent of HTTP attempts and validated against the 
     { repositoryId: "43" },
     { attempt: 2 }
   ])
-    assert.equal(parseClientLog(logs(), { ...context, ...patch }).outcome, "unknown");
+    assert.equal(
+      parseClientLog(logs(), { ...context, ...patch }).outcome,
+      "unknown"
+    );
   assert.equal(
-    parseClientLog(logs().replaceAll(identity.head_sha, "c".repeat(40)), context).outcome,
+    parseClientLog(logs().replaceAll(identity.head_sha, "c".repeat(40)), context)
+      .outcome,
     "unknown"
   );
 });
@@ -142,7 +156,13 @@ test("missing, contradictory and legacy logs never imply a timeout or successful
 });
 test("discovers client failures without a backend job, deduplicates completed logs and discovers old reruns", async () => {
   const http = fakeHTTP(),
-    base = { config: {}, options: { enabled: true }, repositories: [repo], http, now };
+    base = {
+      config: {},
+      options: { enabled: true },
+      repositories: [repo],
+      http,
+      now
+    };
   http.state.log = logs(1, "timeout");
   const first = await collectActions(base);
   assert.equal(first.attempts[0].outcome, "timeout");
@@ -298,6 +318,166 @@ test("minimum request budgets eventually fetch logs and never report pending att
   assert.equal(second.coverage[0].status, "ready");
   assert.ok(http.calls.length - calls <= 4);
 });
+test("a configured telemetry start retires old pending logs without reading them or deleting their identity", async () => {
+  const http = fakeHTTP();
+  const base = { config: {}, repositories: [repo], http, now };
+  const first = await collectActions({
+    ...base,
+    options: { enabled: true, maxRequestsPerCycle: 4 }
+  });
+  const calls = http.calls.length;
+  const since = new Date(now - 30000).toISOString();
+  const next = await collectActions({
+    ...base,
+    previous: first.records,
+    options: { enabled: true, telemetrySince: since }
+  });
+  assert.equal(next.attempts.length, 1);
+  assert.equal(next.attempts[0].id, first.attempts[0].id);
+  assert.equal(next.attempts[0].reason, "before_telemetry_start");
+  assert.equal(next.stats.pending, 0);
+  assert.equal(next.stats.beforeTelemetry, 1);
+  assert.ok(
+    !http.calls
+      .slice(calls)
+      .some((route) => route.includes("/attempts/") || route.endsWith("/logs"))
+  );
+  assert.equal(first.attempts[0].outcome, "pending");
+  assert.throws(() => policyOptions({ telemetrySince: "yesterday" }));
+});
+test("completed scans continue with an overlapping incremental range and old-run discovery is throttled", async () => {
+  const routes = [],
+    since = new Date(now - 2 * 86400000).toISOString();
+  const http = {
+    json: async (route) => {
+      routes.push(route);
+      return { total_count: 0, workflow_runs: [] };
+    }
+  };
+  const base = {
+    config: {},
+    options: { enabled: true, telemetrySince: since },
+    repositories: [repo],
+    http,
+    now
+  };
+  const first = await collectActions(base);
+  assert.equal(routes.length, 2);
+  await collectActions({ ...base, previous: first.records, now: now + 600000 });
+  assert.equal(routes.length, 3);
+  const range = new URL("https://api.github.com" + routes[2]).searchParams.get(
+    "created"
+  );
+  assert.equal(
+    range,
+    new Date(now - 300000).toISOString() +
+      ".." +
+      new Date(now + 600000).toISOString()
+  );
+});
+test("older runs with new attempts are discovered without downloading pre-telemetry attempts", async () => {
+  const http = fakeHTTP(),
+    original = http.json;
+  const since = new Date(now - 86400000).toISOString();
+  http.state.attempt = 2;
+  http.json = async (route) => {
+    if (!route.includes("/runs?")) return original(route);
+    http.calls.push(route);
+    const range = new URL("https://api.github.com" + route).searchParams.get(
+      "created"
+    );
+    const historical = range.startsWith(new Date(now - 90 * 86400000).toISOString());
+    return {
+      total_count: historical ? 1 : 0,
+      workflow_runs: historical
+        ? [
+            {
+              id: 100,
+              run_attempt: 2,
+              name: "OCR Dispatch",
+              created_at: new Date(now - 2 * 86400000).toISOString(),
+              updated_at: at,
+              run_started_at: at
+            }
+          ]
+        : []
+    };
+  };
+  const base = {
+    config: {},
+    options: { enabled: true, telemetrySince: since },
+    repositories: [repo],
+    http,
+    now
+  };
+  const first = await collectActions(base);
+  const next = await collectActions({
+    ...base,
+    previous: first.records,
+    now: now + 300000
+  });
+  assert.equal(next.attempts.length, 1);
+  assert.equal(next.attempts[0].providerAttempt, 2);
+  assert.equal(next.attempts[0].outcome, "accepted");
+  assert.ok(!http.calls.some((route) => route.includes("/attempts/1")));
+});
+test("temporary log download failures remain pending rather than permanently missing results", async () => {
+  const http = fakeHTTP();
+  http.log = async () => {
+    throw Error("ACTIONS_HTTP_503");
+  };
+  const result = await collectActions({
+    config: {},
+    options: { enabled: true },
+    repositories: [repo],
+    http,
+    now
+  });
+  assert.equal(result.attempts[0].outcome, "pending");
+  assert.equal(result.attempts[0].coverage, "pending");
+  assert.equal(result.attempts[0].reason, "actions_http_503");
+});
+test("recent scanning alone cannot claim coverage before older rerun metadata is scanned", async () => {
+  const since = new Date(now - 86400000).toISOString();
+  const http = {
+    json: async (route) => {
+      const params = new URL("https://api.github.com" + route).searchParams;
+      const historical = params
+        .get("created")
+        .startsWith(new Date(now - 90 * 86400000).toISOString());
+      const page = Number(params.get("page"));
+      return {
+        total_count: historical ? 101 : 0,
+        workflow_runs: historical
+          ? Array.from({ length: page === 1 ? 100 : 1 }, (_, i) => ({
+              id: page * 100 + i,
+              run_attempt: 1,
+              name: "Other CI",
+              created_at: at,
+              updated_at: at
+            }))
+          : []
+      };
+    }
+  };
+  const base = {
+    config: {},
+    options: { enabled: true, telemetrySince: since },
+    repositories: [repo],
+    http,
+    now
+  };
+  const first = await collectActions(base);
+  assert.equal(first.coverage[0].status, "syncing");
+  assert.equal(first.coverage[0].through, null);
+  const next = await collectActions({
+    ...base,
+    previous: first.records,
+    now: now + 300000
+  });
+  assert.equal(next.coverage[0].status, "ready");
+  assert.equal(next.coverage[0].through, new Date(now).toISOString());
+});
 test("cancelled and absent structured logs remain unknown, permissions fail separately", async () => {
   const http = fakeHTTP();
   http.state.conclusion = "cancelled";
@@ -383,7 +563,10 @@ test("backend admission generations, reuse and stage timeout reasons remain dist
     ]
   };
   const result = backendAdmissions(state, batch);
-  assert.equal(result.events.filter((e) => e.state === "generation_accepted").length, 2);
+  assert.equal(
+    result.events.filter((e) => e.state === "generation_accepted").length,
+    2
+  );
   assert.deepEqual(
     result.events.filter((e) => e.state === "timeout").map((e) => e.stage),
     ["admission", "dispatch", "execution"]

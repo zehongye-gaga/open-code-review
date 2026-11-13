@@ -5,7 +5,7 @@ const fs = require("node:fs"),
   path = require("node:path");
 const { Analytics } = require("../github-review/analytics.js");
 const { AgentUsage } = require("../github-review/agent-usage.js");
-const { GitHubAuth } = require("../github-review/github-auth.js");
+const { repositoryMetadata } = require("./repository-metadata.js");
 const { hostResources } = require("../github-review/monitor-data.js");
 const { bootstrapAudit } = require("./database/bootstrap.js");
 const { readState } = require("./database/state-source.js");
@@ -77,75 +77,6 @@ function optionsFromFile(file) {
     options.organizations.includes(r.name.split("/")[0].toLowerCase())
   );
   return { options, config };
-}
-async function repositoryMetadata(config, previous, now, request = fetch) {
-  const auth = new GitHubAuth(config, request, Date.now, false),
-    result = { ...previous },
-    warnings = [];
-  for (const repository of config.repositories) {
-    const name = repository.name.toLowerCase();
-    const previousRow = previous[name];
-    if (previousRow?.checkedAt && now - Date.parse(previousRow.checkedAt) < 3600000) {
-      if (previousRow.access !== "available")
-        warnings.push(
-          previousRow.access === "unavailable"
-            ? "REPOSITORY_ACCESS_UNAVAILABLE"
-            : "GITHUB_METADATA_UNVERIFIED"
-        );
-      continue;
-    }
-    try {
-      const target = repository.githubName || repository.name;
-      const response = await auth.request(
-        "https://api.github.com/repos/" +
-          target.split("/").map(encodeURIComponent).join("/"),
-        {
-          signal: AbortSignal.timeout(15000),
-          headers: {
-            accept: "application/vnd.github+json",
-            "user-agent": "reviewhub-collector",
-            "x-github-api-version": "2022-11-28"
-          }
-        }
-      );
-      if (response.status === 404) {
-        result[name] = {
-          ...previousRow,
-          access: "unavailable",
-          checkedAt: new Date(now).toISOString()
-        };
-        warnings.push("REPOSITORY_ACCESS_UNAVAILABLE");
-        continue;
-      }
-      if (!response.ok) throw Error("Repository metadata unavailable");
-      const body = await response.json();
-      if (
-        !Number.isSafeInteger(body.id) ||
-        body.id < 1 ||
-        typeof body.full_name !== "string" ||
-        typeof body.default_branch !== "string"
-      )
-        throw Error("Invalid repository metadata");
-      result[name] = {
-        providerId: String(body.id),
-        name: body.full_name.toLowerCase(),
-        defaultBranch: body.default_branch,
-        archived: body.archived === true,
-        updatedAt: new Date(now).toISOString(),
-        checkedAt: new Date(now).toISOString(),
-        access: auth.app ? "available" : "unknown"
-      };
-      if (!auth.app) warnings.push("APP_ACCESS_NOT_VERIFIED");
-    } catch {
-      result[name] = {
-        ...previousRow,
-        access: "unknown",
-        checkedAt: new Date(now).toISOString()
-      };
-      warnings.push("GITHUB_METADATA_UNAVAILABLE");
-    }
-  }
-  return { metadata: result, warnings };
 }
 async function collect({
   options,
@@ -301,6 +232,6 @@ async function collect({
     changedRows: input.changedRows
   };
   await store.publish(batch, checkpoint, next);
-  return { batch, saved: { checkpoint, records: next } };
+  return { batch, saved: { checkpoint, records: next }, policy: actions.stats };
 }
 module.exports = { collect, optionsFromFile, repositoryMetadata };
