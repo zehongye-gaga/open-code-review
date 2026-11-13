@@ -34,11 +34,17 @@ function globalRules(home) {
   return identity;
 }
 
+function canonicalSettings(value) {
+  if (Array.isArray(value)) return value.map(canonicalSettings);
+  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalSettings(value[key])]));
+  return value;
+}
+
 async function fingerprint({ config, metadata, cwd, env = process.env, forCheckpoint = false }) {
   const hash = crypto.createHash("sha256");
   for await (const chunk of fs.createReadStream(config.binary)) hash.update(chunk);
   const home = env.HOME || os.homedir();
-  const settings = JSON.parse(JSON.stringify(config.reviewSettings || null));
+  const settings = canonicalSettings(JSON.parse(JSON.stringify(config.reviewSettings || null)));
   if (forCheckpoint && settings) {
     for (const key of ["budget", "background", "fullReview"]) delete settings.options?.[key];
   }
@@ -98,15 +104,10 @@ async function planReview({ config, job, checkpoint, directory, cwd, signal, ide
         { cwd, signal, timeout: config.fetchTimeoutSeconds * 1000, maxBuffer: 8 * 1024 * 1024 })).stdout.split("\0").filter(Boolean);
       try {
         const changed = await diffPaths(range.from), all = await diffPaths(metadata.merge_base);
-        // Native excludes are case-insensitive globs; only encode literal safe paths.
-        const keep = new Set([...changed, ...checkpoint.findingPaths].map((name) => name.toLowerCase()));
-        const excluded = all.filter((name) => !keep.has(name.toLowerCase()));
-        if (excluded.some((name) => !/^[a-zA-Z0-9_./ -]+$/.test(name)) || excluded.join(",").length > 24000) {
-          range = { mode: "full", reason: "unsafe_incremental_paths" };
-        } else {
-          metadata.incrementalExclude = excluded;
-          range = { ...range, mode: "incremental_files", reason: "changes_and_previous_findings", changedSince: range.from, excludedFiles: excluded.length, revalidateFiles: checkpoint.findingPaths.length };
-        }
+        const keep = new Set([...changed, ...checkpoint.findingPaths]);
+        const excluded = all.filter((name) => !keep.has(name));
+        metadata.incrementalExclude = excluded;
+        range = { ...range, mode: "incremental_files", reason: "changes_and_previous_findings", changedSince: range.from, excludedFiles: excluded.length, revalidateFiles: checkpoint.findingPaths.length };
       } catch (error) {
         if (signal?.aborted) throw error;
         range = { mode: "full", reason: "incremental_paths_unavailable" };

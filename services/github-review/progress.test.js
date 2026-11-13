@@ -182,6 +182,20 @@ test("checkpoint policy tolerates per-commit context and budget but not review r
   assert.notEqual(await fingerprint({ ...h, config: changed, env, forCheckpoint: true }), original);
 });
 
+test("configuration key order does not invalidate checkpoints or resume sessions", async (t) => {
+  const h = fixture(t), env = { HOME: h.directory };
+  const first = { profile: "deep", options: { effort: "high", concurrency: 2 }, resources: { rules: ["first", "second"] },
+    executorVersion: "same-version", preview: false };
+  const reordered = { preview: false, executorVersion: "same-version", resources: { rules: ["first", "second"] },
+    options: { concurrency: 2, effort: "high" }, profile: "deep" };
+  for (const forCheckpoint of [false, true]) {
+    const identify = (settings) => fingerprint({ ...h, config: { ...h.config, reviewSettings: settings }, env, forCheckpoint });
+    assert.equal(await identify(first), await identify(reordered));
+    assert.notEqual(await identify(first), await identify({ ...first, options: { ...first.options, effort: "low" } }));
+    assert.notEqual(await identify(first), await identify({ ...first, resources: { rules: ["second", "first"] } }));
+  }
+});
+
 test("incremental finding revalidation includes changed and previously flagged files only", async (t) => {
   const h = fixture(t);
   const git = (...args) => execFileSync("git", args, { cwd: h.cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -206,6 +220,38 @@ test("incremental finding revalidation includes changed and previously flagged f
   const retry = await planReview({ ...h, checkpoint, job: { progress } });
   assert.equal(retry.resume, sessionId);
   assert.deepEqual(retry.metadata.incrementalExclude, ["settled.go"]);
+});
+
+test("incremental revalidation accepts literal paths and exclusion lists larger than CLI limits", async (t) => {
+  const h = fixture(t);
+  const git = (...args) => execFileSync("git", args, { cwd: h.cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
+  const excluded = ["patches/@deepseek-ai+dsh+0.2.2-alpha.2.patch", "settled,a.go", "settled[1].go", "settled{a,b}.go",
+    "settled*.go", "settled?.go", "settled\\name.go", "settled\nname.go", "\u4e2d\u6587.go", "space name.go",
+    ...Array.from({ length: 300 }, (_, i) => `settled/${String(i).padStart(3, "0")}-${"x".repeat(85)}.go`)];
+  const kept = ["changed.go", "flagged[1].go", "settled1.go"];
+  for (const file of [...excluded, ...kept]) {
+    fs.mkdirSync(path.dirname(path.join(h.cwd, file)), { recursive: true });
+    fs.writeFileSync(path.join(h.cwd, file), "base\n");
+  }
+  git("add", "."); git("commit", "-m", "Base"); const baseline = git("rev-parse", "HEAD");
+  for (const file of [...excluded, ...kept]) fs.appendFileSync(path.join(h.cwd, file), "PR change\n");
+  git("add", "."); git("commit", "-m", "Reviewed"); const reviewed = git("rev-parse", "HEAD");
+  for (const file of ["changed.go", "settled1.go"]) fs.appendFileSync(path.join(h.cwd, file), "new commit\n");
+  git("add", "."); git("commit", "-m", "New change"); const current = git("rev-parse", "HEAD");
+  fs.writeFileSync(path.join(h.directory, "metadata.json"), JSON.stringify({ ...h.metadata, base: baseline, merge_base: baseline, head: current }));
+  const checkpoint = { ...h.checkpoint, findings: 1, findingPaths: ["flagged[1].go"],
+    payload: { ...h.checkpoint.payload, head: reviewed, merge_base: baseline } };
+  const plan = await planReview({ ...h, checkpoint, isAncestor: undefined });
+  assert.equal(plan.metadata.range.mode, "incremental_files");
+  assert.equal(plan.metadata.range.reason, "changes_and_previous_findings");
+  assert.ok(plan.metadata.incrementalExclude.join(",").length > 24000);
+  assert.deepEqual(new Set(plan.metadata.incrementalExclude), new Set(excluded));
+  const progress = { fingerprint: identity, head: current, base: baseline, range: plan.metadata.range,
+    workspace: h.cwd, selected: kept.length, sessionId };
+  const retry = await planReview({ ...h, checkpoint, job: { progress } });
+  assert.equal(retry.resume, sessionId);
+  assert.deepEqual(retry.metadata.incrementalExclude, plan.metadata.incrementalExclude);
 });
 
 test("authorized unlimited retries resume settled work while semantic changes still invalidate it", async (t) => {

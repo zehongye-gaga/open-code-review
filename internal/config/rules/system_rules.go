@@ -221,6 +221,8 @@ type ProjectRule struct {
 type FileFilter struct {
 	Include []string
 	Exclude []string
+	// ExcludePaths contains literal Git paths, preserving case and punctuation.
+	ExcludePaths map[string]struct{}
 }
 
 // HasInclude reports whether any include patterns are configured.
@@ -228,9 +230,11 @@ func (f *FileFilter) HasInclude() bool {
 	return len(f.Include) > 0
 }
 
-// IsUserExcluded reports whether the given path matches any user exclude pattern.
-// The check is case-insensitive: both path and pattern are lowercased.
+// IsUserExcluded checks exact paths before case-insensitive exclude patterns.
 func (f *FileFilter) IsUserExcluded(path string) bool {
+	if _, ok := f.ExcludePaths[path]; ok {
+		return true
+	}
 	lowerPath := strings.ToLower(path)
 	for _, pattern := range f.Exclude {
 		expanded := expandBraces(pattern)

@@ -315,6 +315,14 @@ it counts only final reports and therefore has a different scope.
 
 ## Development
 
+Incremental finding revalidation passes settled Git paths to the native CLI using
+`--exclude-paths-file`, a JSON array matched literally and case-sensitively. This
+keeps punctuation, Unicode, commas and long lists out of the glob/argv protocol.
+Changed paths and paths with previous findings remain in scope; user `--exclude`
+patterns remain independent. The saved list is reused during budget recovery.
+Deploy the service with a native CLI built from the same revision that supports
+this flag. An older binary rejects the flag; it must not silently run a full review.
+
 ```sh
 node --test services/github-review/*.test.js
 npm run test:github-actions

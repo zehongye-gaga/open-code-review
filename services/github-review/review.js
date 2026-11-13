@@ -114,8 +114,11 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
   if (!/^(0|[1-9][0-9]*)$/.test(String(budget)) || !Number.isSafeInteger(Number(budget))) {
     throw new Error("OCR_MAX_TOKENS_BUDGET must be a non-negative integer");
   }
+  const incrementalArgs = [];
   if (metadata.incrementalExclude?.length) {
-    options = { ...options, exclude: [options.exclude, ...metadata.incrementalExclude].filter(Boolean).join(",") };
+    const file = path.join(directory, "incremental-exclude.json");
+    fs.writeFileSync(file, JSON.stringify(metadata.incrementalExclude), { mode: 0o600 });
+    incrementalArgs.push("--exclude-paths-file", file);
   }
   if (metadata.documentationFallback && !options.rule) {
     const rule = path.join(directory, "documentation-rule.json");
@@ -133,7 +136,7 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
         "--to", metadata.head, "--provider", provider, "--model", model,
         "--audience", "agent", "--format", "json", "--concurrency", String(options.concurrency || 2), "--timeout", String(options.timeout || 15),
         "--max-tokens-budget", String(budget), "--background", metadata.background,
-        ...cliArguments(options), ...(resume && !options.preview ? ["--resume", resume] : [])],
+        ...cliArguments(options), ...incrementalArgs, ...(resume && !options.preview ? ["--resume", resume] : [])],
       { cwd, env, stdio: ["ignore", stdout, stderr] });
       let forceTimer, terminating = false;
       const terminate = (reason = "cancelled") => {
@@ -194,7 +197,6 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
       fs.renameSync(path.join(directory, name), path.join(directory, `resume-rejected-${name}`));
     }
     core.notice("The saved session could not be resumed; starting this snapshot afresh");
-    if (metadata.incrementalExclude?.length) options = { ...options, exclude: options.exclude.split(",").filter((p) => !metadata.incrementalExclude.includes(p)).join(",") };
     return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, onResumeFallback, onFreshStart, options });
   }
   return { termination: termination || null };
