@@ -13,6 +13,22 @@ async function boundedText(response, limit = 8 * 1024 * 1024) {
   return Buffer.concat(chunks).toString("utf8");
 }
 function actionsHTTP(config, request = fetch) {
+  const rawRequest = request;
+  const stats = { requests: 0, errors: 0, rateRemaining: null };
+  request = async (...args) => {
+    stats.requests++;
+    try {
+      const response = await rawRequest(...args);
+      if (!response.ok && response.status !== 302) stats.errors++;
+      const remaining = response.headers.get("x-ratelimit-remaining");
+      if (remaining !== null && /^\d+$/.test(remaining))
+        stats.rateRemaining = Number(remaining);
+      return response;
+    } catch (error) {
+      stats.errors++;
+      throw error;
+    }
+  };
   const auth = new GitHubAuth(config, request, Date.now, false);
   async function api(route) {
     if (!/^\/repos\/[\w.-]+\/[\w.-]+\/actions\//.test(route))
@@ -24,8 +40,8 @@ function actionsHTTP(config, request = fetch) {
         authorization: "Bearer " + (await auth.getToken()),
         accept: "application/vnd.github+json",
         "user-agent": "reviewhub-collector",
-        "x-github-api-version": "2022-11-28"
-      }
+        "x-github-api-version": "2022-11-28",
+      },
     });
     if (response.status === 401) auth.cached = null;
     if (![200, 302].includes(response.status)) {
@@ -33,12 +49,13 @@ function actionsHTTP(config, request = fetch) {
       throw Error(
         [403, 429].includes(response.status)
           ? "ACTIONS_ACCESS_OR_RATE_LIMIT"
-          : "ACTIONS_HTTP_" + response.status
+          : "ACTIONS_HTTP_" + response.status,
       );
     }
     return response;
   }
   return {
+    stats,
     async json(route) {
       const response = await api(route);
       if (response.status !== 200) throw Error("ACTIONS_UNEXPECTED_REDIRECT");
@@ -57,20 +74,20 @@ function actionsHTTP(config, request = fetch) {
         ![
           ".blob.core.windows.net",
           ".actions.githubusercontent.com",
-          ".githubusercontent.com"
+          ".githubusercontent.com",
         ].some((s) => location.hostname.endsWith(s))
       )
         throw Error("ACTIONS_LOG_DESTINATION_REJECTED");
       const download = await request(location.href, {
         redirect: "error",
-        signal: AbortSignal.timeout(15000)
+        signal: AbortSignal.timeout(15000),
       });
       if (!download.ok) {
         await download.body?.cancel();
         throw Error("ACTIONS_LOG_DOWNLOAD_FAILED");
       }
       return boundedText(download);
-    }
+    },
   };
 }
 module.exports = { actionsHTTP, boundedText };

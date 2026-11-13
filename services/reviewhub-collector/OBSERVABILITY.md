@@ -1,0 +1,13 @@
+# Isolated alert observability
+
+The collector now requires ReviewHub migration `006_observability.sql` in addition to the audit migrations. Its interval, Actions request budget, SQLite read-only transaction and primary audit checkpoint remain unchanged. The new neutral `signals` projection supplies snapshot/stage identities for ReviewHub rules. Repeated unchanged signals are not rewritten; disappearance clears presence without deleting history. Only enumerated machine reason codes leave the source adapter; raw errors and credentials do not.
+
+Host metrics and cycle timings use the existing process and connection. The post-commit timing sample records actual affected rows, parameter bytes and write duration; a failed auxiliary metric write does not invalidate a committed audit checkpoint. Parameter bytes are not WAL size. PG counters are measured separately by the health probe.
+
+`health-probe.js` is an independent optional process. Configure `REVIEWHUB_MONITOR_DATABASE_URL` with a dedicated role and a JSON file containing `mode` (`shadow` or `active`), `apiHealthUrl`, `targetRole`, and a `webhookFile` only for active sending. The example service uses a restricted service user; adjust Node and release paths. It opens one bounded connection, uses aggregate PG health, checks the alert heartbeat and collector freshness, and closes the connection in `finally`. It does not read task SQLite, mutate review configuration or restart any service. The ReviewHub repository owns the aggregate function and minimum grants.
+
+The probe confirms failures and recovery over two samples and uses an in-memory cooldown. It can report PG failure without writing PG. Restarting the probe loses its notification history and can repeat a message; a failed Feishu channel needs a separate fallback destination to notify through that outage.
+
+The existing PR timer remains separate from the review execution service. During cutover, disable its timer, allow its current oneshot to finish, import the final `seen`/`pending` notification keys into ReviewHub, and enable only the reviewed replacement rules. Retain the old program/configuration/state for rollback. Do not reset the deduplication history. The existing host resource bot is not retired by this PR.
+
+Validation: collector unit tests, isolated PostgreSQL integration, the existing review Node suite, `make check`, `make test`, both Policy client suites, and ReviewHub's cross-repository SQLite-to-alert recovery fixture. The optional model review requires separately configured development LLM credentials; production credentials are not used for tests.

@@ -6,6 +6,371 @@
       "type": "number",
       "const": 1
     },
+    "metrics": {
+      "maxItems": 500,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "sourceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "component": {
+            "type": "string",
+            "enum": [
+              "collector",
+              "api",
+              "postgres",
+              "review_host",
+              "postgres_host",
+              "notifications"
+            ]
+          },
+          "dimension": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "instanceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+          },
+          "values": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "enum": [
+                "cycle_ms",
+                "state_read_ms",
+                "actions_ms",
+                "pg_write_ms",
+                "pg_connect_ms",
+                "pg_rows_written",
+                "pg_bytes_sent",
+                "pending_logs",
+                "oldest_pending_ms",
+                "actions_requests",
+                "actions_errors",
+                "actions_rate_remaining",
+                "source_gap",
+                "pool_total",
+                "pool_idle",
+                "pool_waiting",
+                "pool_errors",
+                "connections",
+                "connection_limit",
+                "role_connections",
+                "role_connection_limit",
+                "active_connections",
+                "waiting_locks",
+                "long_transactions",
+                "deadlocks",
+                "database_bytes",
+                "temp_bytes",
+                "wal_bytes",
+                "statistics_reset_ms",
+                "wal_reset_ms",
+                "sample_ms",
+                "cpu_percent",
+                "memory_percent",
+                "disk_percent",
+                "io_wait_percent",
+                "running",
+                "queued",
+                "notification_pending",
+                "notification_oldest_ms",
+                "probe_failures"
+              ]
+            },
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "histograms": {
+            "maxItems": 5,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "enum": [
+                    "request_ms",
+                    "database_roundtrip_ms",
+                    "pool_acquire_ms",
+                    "github_request_ms"
+                  ]
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "sum": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "max": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "buckets": {
+                  "minItems": 12,
+                  "maxItems": 12,
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "errors": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": ["name", "count", "sum", "max", "buckets", "errors"],
+              "additionalProperties": false
+            }
+          },
+          "completeness": {
+            "type": "string",
+            "enum": ["complete", "partial", "unknown"]
+          }
+        },
+        "required": [
+          "id",
+          "sourceId",
+          "component",
+          "dimension",
+          "instanceId",
+          "from",
+          "at",
+          "values",
+          "histograms",
+          "completeness"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "signals": {
+      "maxItems": 100000,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "repositoryId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "entityId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "previousNotificationId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["review", "admission", "dispatch"]
+          },
+          "runId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requestId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "generation": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prNumber": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "headSha": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "baseSha": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "baseRef": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 240
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stage": {
+            "type": "string",
+            "enum": ["admission", "dispatch", "queue", "execution", "publication"]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "failed",
+              "succeeded",
+              "cancelled",
+              "superseded",
+              "unknown"
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.-]{1,100}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "changedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "repositoryId",
+          "entityId",
+          "kind",
+          "runId",
+          "requestId",
+          "generation",
+          "prNumber",
+          "headSha",
+          "baseSha",
+          "baseRef",
+          "stage",
+          "state",
+          "reason",
+          "changedAt",
+          "startedAt",
+          "current"
+        ],
+        "additionalProperties": false
+      }
+    },
     "sourceId": {
       "type": "string",
       "pattern": "^[a-zA-Z0-9_-]{1,80}$"
