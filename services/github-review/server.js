@@ -24,6 +24,7 @@ function createServer(service, { apiToken, webhookSecret } = {}) {
       res.end(JSON.stringify(data));
     };
     try {
+      if (service.dynamicConfiguration && await service.dynamicConfiguration.handle(req, res)) return;
       if (await giteaWebhook(req, res)) return;
       if (await infrastructure(req, res)) return;
       if (req.url === "/healthz" && req.method === "GET") {
@@ -90,6 +91,7 @@ async function main() {
   const github = config.gitea ? require("./gitea.js").createGitea(config.gitea) : createGitHub({ githubAuth: config.githubAuth, tokenFile: config.githubTokenFile, token: process.env.OCR_GITHUB_TOKEN });
   await github.getToken();
   const service = new ReviewService({ config, github });
+  if (service.dynamicConfiguration) await service.dynamicConfiguration.refresh().catch(() => service.log("configuration_load_failed"));
   const secret = (file, value) => file ? fs.readFileSync(file, "utf8").trim() : value;
   const server = createServer(service, {
     apiToken: secret(config.apiTokenFile, process.env.OCR_SERVICE_API_TOKEN),
@@ -122,7 +124,9 @@ async function main() {
   const deliveries = setInterval(safe(() => service.githubEvents?.tick()), 1000);
   const ciWatchdog = setInterval(safe(() => service.orgCI?.watchdog()), 30000);
   const cleaner = setInterval(safe(() => service.cleanup()), 3600000);
+  const configurationPoller = service.dynamicConfiguration ? setInterval(safe(() => service.dynamicConfiguration.refresh()), 30000) : null;
   const stop = () => {
+    if (configurationPoller) clearInterval(configurationPoller);
     service.stop(); clearInterval(poller); clearInterval(worker); clearInterval(cleaner); clearInterval(deliveries); clearInterval(ciWatchdog);
     server.close(); server.closeIdleConnections();
     infrastructureServer?.close(); infrastructureServer?.closeIdleConnections();

@@ -25,7 +25,7 @@ function configuration(input) {
   if (config.stateStorage !== "sqlite") throw Error("stateStorage must be sqlite; legacy JSON is imported once on startup");
   if (!path.isAbsolute(config.stateDirectory || "")) throw new Error("stateDirectory must be absolute");
   if (!path.isAbsolute(config.binary)) throw new Error("binary must be absolute");
-  if (!Array.isArray(config.repositories) || !config.repositories.length) throw new Error("Configure at least one repository");
+  if (!Array.isArray(config.repositories) || (!config.repositories.length && !config.dynamicConfiguration)) throw new Error("Configure at least one repository or a dynamic configuration source");
   const seen = new Set();
   for (const repo of config.repositories) {
     if (typeof repo.name !== "string" || !REPOSITORY.test(repo.name) ||
@@ -65,15 +65,25 @@ class ReviewService {
     this.commitStatusWrites = new Map();
     this.admissionReconciliation = new (require("./admission-reconciliation.js").AdmissionReconciliation)(this);
     this.workers = new Map(); this.stopping = false; this.lastPoll = null; this.pollError = null;
+    if (this.config.dynamicConfiguration) this.dynamicConfiguration = new (require("./dynamic-configuration.js").DynamicConfiguration)(this);
     fs.mkdirSync(path.join(this.config.stateDirectory, "runs"), { recursive: true, mode: 0o700 });
   }
 
   repo(name) {
+    const dynamic = this.dynamicConfiguration?.resolve(name);
+    return dynamic !== undefined ? dynamic : this.staticRepo(name);
+  }
+  staticRepo(name) {
     if (typeof name !== "string" || !REPOSITORY.test(name)) return null;
     const explicit = this.config.repositories.find((repo) => repo.name === name.toLowerCase() || repo.githubName === name.toLowerCase());
     if (explicit) return explicit;
     const org = this.config.infrastructure?.organizations?.find((item) => item.name.toLowerCase() === name.split("/")[0].toLowerCase());
     return org ? { ...org, name: name.toLowerCase(), baseBranches: org.baseBranches || ["*"], discovered: true } : null;
+  }
+  enrolledRepositories() {
+    const names = new Set(this.config.repositories.map(repo => repo.name));
+    for (const entry of this.dynamicConfiguration?.entries.values() || []) names.add(entry.repository.name.toLowerCase());
+    return [...names].map(name => this.repo(name)).filter(Boolean);
   }
   refresh(job, pr) {
     if (job.state === "cancelled") return null;
@@ -93,15 +103,15 @@ class ReviewService {
     return this.accept(job.repository, pr);
   }
   get active() { return this.workers.values().next().value || null; }
-  coordinates(name) { const [owner, repo] = (this.repo(name)?.githubName || name).split("/"); return { owner, repo }; }
-  targetAllowed(repository, pr) {
-    const repo = this.repo(repository);
+  coordinates(name) { const [owner, repo] = (this.repo(name)?.githubName || this.staticRepo(name)?.githubName || name).split("/"); return { owner, repo }; }
+  targetAllowed(repository, pr, policy) {
+    const repo = policy || this.repo(repository);
     const target = !this.config.gitea && typeof pr.stack?.base?.ref === "string" ? pr.stack.base.ref : pr.base?.ref;
     return !!repo && (repo.baseBranches.includes("*") || repo.baseBranches.includes(target));
   }
   eligible(repository, pr, job = {}) {
-    const repo = this.repo(repository);
-    return repo && pr.state === "open" && (job.ciRequestId || !pr.draft) && this.targetAllowed(repository, pr) &&
+    const repo = job.settings?.enrollmentPolicy || this.repo(repository);
+    return repo && (!repo.repositoryId || String(pr.base?.repo?.id) === repo.repositoryId) && pr.state === "open" && (job.ciRequestId || !pr.draft) && this.targetAllowed(repository, pr, repo) &&
       sameRepository(this, pr.base?.repo?.full_name, repo.name) && SHA.test(pr.head?.sha) && SHA.test(pr.base?.sha);
   }
 
@@ -127,6 +137,7 @@ class ReviewService {
     const pendingBaseChanged = pending && pending.base !== pr.base.sha;
     const previous = this.config.gitea && this.state.data.jobs.findLast((job) => job.key === `${repository}#${pr.number}`);
     const giteaBaseChanged = previous && previous.base !== pr.base.sha;
+    if (this.repo(repository)?.configurationRevision && options.settings) options = { ...options, settings: { ...options.settings, enrollmentPolicy: structuredClone(this.repo(repository)) } };
     const job = this.state.enqueue(repository, pr, { ...options, force: options.force || pendingBaseChanged || giteaBaseChanged,
       fullReview: options.fullReview ?? (options.force === true || Boolean(giteaBaseChanged)) });
     this.abortSuperseded();
@@ -170,7 +181,7 @@ class ReviewService {
     if (this.polling || this.stopping) return;
     this.polling = true;
     try {
-      for (const repository of this.config.repositories) {
+      for (const repository of this.enrolledRepositories()) {
         const pulls = [];
         for (let page = 1; ; page++) {
           const { data } = await this.github.rest.pulls.list({ ...this.coordinates(repository.name), page, per_page: 100 });
