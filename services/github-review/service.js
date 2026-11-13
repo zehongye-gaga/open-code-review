@@ -313,9 +313,13 @@ class ReviewService {
           const entry = job.resumeFallbacks?.at(-1);
           if (entry?.state === "authorized") { entry.state = "started"; entry.pid = pid; entry.startedAt = new Date().toISOString(); this.state.save(); }
         };
-        await this.run({ core, directory: job.directory, cwd, binary: this.config.binary,
+        const execution = await this.run({ core, directory: job.directory, cwd, binary: this.config.binary,
           provider: effective.provider, model: effective.model, budget: effective.budget,
           timeoutMs: effective.timeoutSeconds * 1000, signal, resume, requireResume, onResumeFallback, onFreshStart, options });
+        if (execution?.termination) {
+          job.executionOutcomes ||= [];
+          job.executionOutcomes.push({ ...execution.termination, attempt: job.attempt });
+        }
       } finally {
         require("./resume-recovery.js").captureRecovery(job, job.directory);
         this.captureProgress(job);

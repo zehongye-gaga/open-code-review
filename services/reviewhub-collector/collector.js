@@ -10,6 +10,8 @@ const { hostResources } = require("../github-review/monitor-data.js");
 const { bootstrapAudit } = require("./database/bootstrap.js");
 const { readState } = require("./database/state-source.js");
 const { normalize } = require("./normalize.js");
+const { collectActions, policyOptions } = require("./actions.js");
+const { backendAdmissions } = require("./backend-admission.js");
 const group = (records, prefix) =>
   Object.fromEntries(
     [...records]
@@ -29,6 +31,7 @@ function optionsFromFile(file) {
     )
   )
     throw Error("Invalid collector source configuration");
+  options.policy = policyOptions(options.policy);
   options.intervalSeconds ??= 300;
   if (
     !Number.isInteger(options.intervalSeconds) ||
@@ -82,10 +85,7 @@ async function repositoryMetadata(config, previous, now, request = fetch) {
   for (const repository of config.repositories) {
     const name = repository.name.toLowerCase();
     const previousRow = previous[name];
-    if (
-      previousRow?.checkedAt &&
-      now - Date.parse(previousRow.checkedAt) < 3600000
-    ) {
+    if (previousRow?.checkedAt && now - Date.parse(previousRow.checkedAt) < 3600000) {
       if (previousRow.access !== "available")
         warnings.push(
           previousRow.access === "unavailable"
@@ -154,7 +154,8 @@ async function collect({
   saved,
   now = Date.now(),
   metadataReader = repositoryMetadata,
-  resourcesReader = hostResources
+  resourcesReader = hostResources,
+  actionsReader = collectActions
 }) {
   const records = saved.records;
   const sourceRows = new Map(Object.entries(group(records, "state:")));
@@ -240,7 +241,40 @@ async function collect({
     warnings,
     historicalAudits
   });
+  const actionInput = {
+    config,
+    options: options.policy || undefined,
+    repositories: batch.repositories,
+    previous: new Map(Object.entries(group(records, "actions:"))),
+    now
+  };
+  let actions;
+  try {
+    actions = await actionsReader(actionInput);
+  } catch {
+    // Log discovery must not prevent publication of the independent task source.
+    actions = await collectActions({ ...actionInput, options: { enabled: false } });
+    actions.coverage = actions.coverage.map((row) => ({
+      ...row,
+      status: "error",
+      errorCode: "ACTIONS_UNAVAILABLE"
+    }));
+    actions.warnings = ["POLICY_LOGS_UNAVAILABLE"];
+  }
+  const backend = backendAdmissions(input.state, batch);
+  batch.clientAttempts = actions.attempts.map((row) => ({
+    ...row,
+    backend: backend.associate(row)
+  }));
+  const associations = new Map(batch.clientAttempts.map((row) => [row.id, row.backend]));
+  for (const entry of actions.records.values())
+    if (entry.row)
+      entry.row.backend = associations.get(entry.row.id) || entry.row.backend;
+  batch.clientCoverage = actions.coverage;
+  batch.events.push(...backend.events);
+  batch.warnings = [...new Set([...batch.warnings, ...actions.warnings])];
   const next = new Map();
+  for (const [key, value] of actions.records) next.set("actions:" + key, value);
   for (const [key, value] of input.rows) next.set("state:" + key, value);
   const { jobs, sessions, artifacts, ...ledgerMeta } = analytics.ledger;
   next.set("ledger:meta", ledgerMeta);

@@ -1,10 +1,27 @@
 {
   "ocrConfig": "/etc/ocr-review/config.json",
   "stateSource": "/data/crg/ocr-review/state/state.db",
-  "organizations": ["lexmount"],
+  "organizations": [
+    "lexmount"
+  ],
   "intervalSeconds": 300,
   "analytics": {
     "sessionDirectory": "/data/crg/ocr-review/state/home/.opencodereview/sessions"
   },
-  "volumes": [{ "label": "Review data", "path": "/data/crg/ocr-review" }]
+  "volumes": [
+    {
+      "label": "Review data",
+      "path": "/data/crg/ocr-review"
+    }
+  ],
+  "policy": {
+    "enabled": false,
+    "lookbackDays": 90,
+    "maxRequestsPerCycle": 80,
+    "maxSecondsPerCycle": 60,
+    "workflowNames": [
+      "OCR Dispatch",
+      "OCR Code Review"
+    ]
+  }
 }

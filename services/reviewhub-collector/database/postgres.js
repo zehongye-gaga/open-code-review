@@ -14,7 +14,9 @@ const tables = {
   events: "audit_events",
   findings: "audit_findings",
   usage: "audit_usage",
-  resources: "audit_resources"
+  resources: "audit_resources",
+  clientAttempts: "audit_client_attempts",
+  clientCoverage: "audit_client_coverage"
 };
 class PostgresStore {
   constructor(connectionString, sourceId) {
@@ -44,9 +46,9 @@ class PostgresStore {
       throw Error("Another collector owns this source");
     this.locked = true;
     const migration = await this.client.query(
-      "SELECT 1 FROM schema_migrations WHERE version='004_audit.sql'"
+      "SELECT 1 FROM schema_migrations WHERE version IN ('004_audit.sql','005_client_audit.sql')"
     );
-    if (!migration.rowCount)
+    if (migration.rowCount !== 2)
       throw Error(
         "Apply ReviewHub audit migration before starting the collector"
       );
@@ -82,7 +84,7 @@ class PostgresStore {
       );
     for (const kind of Object.keys(tables)) {
       const ids = new Set();
-      for (const row of batch[kind]) {
+      for (const row of batch[kind] || []) {
         if (ids.has(row.id)) throw Error("Duplicate audit record identity");
         ids.add(row.id);
       }
@@ -90,7 +92,7 @@ class PostgresStore {
     const normalized = new Map();
     const updates = {};
     for (const kind of Object.keys(tables))
-      updates[kind] = batch[kind].filter((row) => {
+      updates[kind] = (batch[kind] || []).filter((row) => {
         const key = kind + ":" + row.id,
           hash = createHash("sha256").update(JSON.stringify(row)).digest("hex");
         normalized.set(key, hash);
@@ -133,7 +135,7 @@ class PostgresStore {
               [this.sourceId, page]
             );
           } else {
-            const field = kind === "runs" ? "createdAt" : "at";
+            const field = kind === "runs" ? "createdAt" : kind === "clientCoverage" ? "checkedAt" : "at";
             await this.client.query(
               `INSERT INTO ${table}(source_id,id,repository_id,occurred_at,data)
               SELECT $1,j->>'id',j->>'repositoryId',(j->>'${field}')::timestamptz,j FROM jsonb_array_elements($2::jsonb) j
@@ -160,7 +162,8 @@ class PostgresStore {
         "audit_events",
         "audit_findings",
         "audit_usage",
-        "audit_resources"
+        "audit_resources",
+        "audit_client_attempts"
       ]) {
         await this.client.query(
           `DELETE FROM ${table} WHERE source_id=$1 AND occurred_at < $2::timestamptz - interval '90 days'`,
