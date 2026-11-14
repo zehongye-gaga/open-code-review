@@ -54,6 +54,30 @@ test("agent routing checks the real agent client and retains scope validation", 
 test("dynamic client IDs must still identify configured external clients", t => {
   assert.throws(() => fixture(t, config => { config.infrastructure.clients = []; }), /client IDs/);
 });
+test("refresh verifies repository identity through the real GitHub adapter", async t => {
+  const { service, dynamic } = fixture(t, config => {
+    config.infrastructure.orgCI.agentReady = true;
+    config.infrastructure.agentDispatch = { clientId: "review-agent" };
+    config.infrastructure.clients = [{ id: "review-agent", role: "agent", repositories: [], tokenFile: "/tmp/unused" }];
+    config.dynamicConfiguration.clientIds = ["review-agent"];
+  });
+  let id = 42, revision = 1, requests = 0;
+  service.github = require("./github.js").createGitHub({ token: "test-token", fetchImpl: async (url, options) => {
+    requests++;
+    assert.equal(url, "https://api.github.com/repos/lexmount/new-repo");
+    assert.equal(options.method, "GET");
+    assert.equal(options.headers.authorization, "Bearer test-token");
+    return new Response(JSON.stringify({ id, full_name: "lexmount/new-repo", visibility: "private", default_branch: "main", archived: false, disabled: false }));
+  } });
+  dynamic.transport = async () => new Response(JSON.stringify(snapshot(true, revision)));
+  await dynamic.refresh();
+  assert.equal(requests, 1);
+  assert.equal(service.repo("lexmount/new-repo").repositoryId, "42");
+  id = 99; revision = 2;
+  await assert.rejects(dynamic.refresh(), /identity changed/);
+  assert.equal(requests, 2);
+  assert.equal(dynamic.observation("42").configuration.revision, 1);
+});
 test("hot enrollment and explicit pause override organization fallback without restarting", t => {
   const { service, dynamic } = fixture(t);
   assert.equal(service.repo("lexmount/old"), null);
