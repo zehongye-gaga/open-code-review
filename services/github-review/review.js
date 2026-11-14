@@ -105,7 +105,7 @@ async function prepareReview({ github, context, core, prNumber, cwd = process.cw
 async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd = process.cwd(),
   model = process.env.OCR_CODEX_MODEL || "gpt-6-astra",
   budget = process.env.OCR_MAX_TOKENS_BUDGET || "0", provider = "openai-codex",
-  signal, timeoutMs = 25 * 60 * 1000, resume, requireResume = false, onResumeFallback, onFreshStart, options = {} }) {
+  signal, timeoutMs = 25 * 60 * 1000, resume, requireResume = false, onResumeFallback, onFreshStart, beforeNativeStart, options = {} }) {
   const metadata = JSON.parse(fs.readFileSync(path.join(directory, "metadata.json"), "utf8"));
   const from = metadata.range?.from || metadata.merge_base;
   if (!SHA.test(metadata.head) || !SHA.test(from)) throw new Error("Invalid review range");
@@ -122,6 +122,7 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
     fs.writeFileSync(rule, JSON.stringify({ rules: [], include: ["*.md", "**/*.md", "*.markdown", "**/*.markdown"] }), { mode: 0o600 });
     options = { ...options, rule };
   }
+  if (beforeNativeStart) await beforeNativeStart();
   const stdout = fs.openSync(path.join(directory, "result.json"), "w", 0o600);
   const stderr = fs.openSync(path.join(directory, "stderr.log"), "w", 0o600);
   const env = childEnvironment();
@@ -182,7 +183,7 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
         metadata.documentationFallback = true;
         fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify(metadata, null, 2), { mode: 0o600 });
         core.notice("Retrying the unchanged documentation-only range with Markdown enabled; explicit exclusions still apply");
-        return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, onResumeFallback, onFreshStart, options });
+        return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, onResumeFallback, onFreshStart, beforeNativeStart, options });
       }
     }
   }
@@ -195,7 +196,7 @@ async function runReview({ core, directory, binary = "/usr/local/bin/ocr", cwd =
     }
     core.notice("The saved session could not be resumed; starting this snapshot afresh");
     if (metadata.incrementalExclude?.length) options = { ...options, exclude: options.exclude.split(",").filter((p) => !metadata.incrementalExclude.includes(p)).join(",") };
-    return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, onResumeFallback, onFreshStart, options });
+    return runReview({ core, directory, binary, cwd, model, budget, provider, signal, timeoutMs, onResumeFallback, onFreshStart, beforeNativeStart, options });
   }
   return { termination: termination || null };
 }

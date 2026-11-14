@@ -351,3 +351,17 @@ test("failure to persist a fresh recovery stops the child and propagates the per
   assert.ok(pid);
   assert.throws(() => process.kill(pid, 0), e => e.code === "ESRCH");
 });
+
+test("the native start gate also prevents a fourth spawn through resume fallback", async t => {
+  const directory = temp(t), h = harness(); saveResult(directory);
+  const binary = path.join(directory, "ocr");
+  fs.writeFileSync(binary, `#!${process.execPath}\nrequire('fs').appendFileSync('invocations','x');process.stderr.write('Error: resume rejected: missing session');process.exitCode=1;\n`, { mode: 0o700 });
+  let executions = 2;
+  const error = Object.assign(new Error("Context recovery exhausted"), { retryable: false });
+  await assert.rejects(runReview({ ...h, directory, binary, cwd: directory, requireResume: true,
+    resume: "11111111-2222-3333-4444-555555555555", onResumeFallback: () => {},
+    beforeNativeStart: () => { if (executions >= 3) throw error; executions++; } }), e => e === error);
+  assert.equal(executions, 3);
+  assert.equal(fs.readFileSync(path.join(directory, "invocations"), "utf8"), "x");
+  assert.match(fs.readFileSync(path.join(directory, "resume-rejected-stderr.log"), "utf8"), /resume rejected/);
+});

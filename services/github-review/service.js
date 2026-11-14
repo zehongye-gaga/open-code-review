@@ -11,6 +11,9 @@ const { retireAgentFeedback } = require("./agent-session.js");
 const { prepareReview, runReview, publishReview } = require("./review.js");
 const { planReview, readProgress, checkpointFor } = require("./progress.js");
 const { repositoryKey, sameRepository } = require("./repositories.js");
+const { readNativeFailure } = require("./native-failure.js");
+const { contextRetryConfiguration, configuredMaxTokens, contextSettings, contextTokenLimit,
+  nextContextRetry, MAX_CONTEXT_ATTEMPTS } = require("./context-retry.js");
 
 const { executionOptions, validateInfrastructure, resolveOptions } = require("./options.js");
 
@@ -22,6 +25,7 @@ function configuration(input) {
     binary: "/usr/local/bin/ocr", provider: "openai-codex", model: "gpt-6-astra",
     budget: 0, timeoutSeconds: 1500, fetchTimeoutSeconds: 600, maxAttempts: 3, publicationMaxAttempts: 3, retrySeconds: 60,
     retentionDays: 7, prConcurrency: 1, dispatchConcurrency: 8, statusContext: "ocr-review", blockSeverity: "high", stateStorage: "sqlite", ...input };
+  config.contextRetry = contextRetryConfiguration(config.contextRetry);
   if (config.stateStorage !== "sqlite") throw Error("stateStorage must be sqlite; legacy JSON is imported once on startup");
   if (!path.isAbsolute(config.stateDirectory || "")) throw new Error("stateDirectory must be absolute");
   if (!path.isAbsolute(config.binary)) throw new Error("binary must be absolute");
@@ -55,13 +59,15 @@ function configuration(input) {
 }
 
 class ReviewService {
-  constructor({ config, github, state, log = console.log, prepare = prepareReview, run = runReview, publish = publishReview }) {
+  constructor({ config, github, state, log = console.log, prepare = prepareReview, run = runReview, publish = publishReview,
+    resolveContextTokens = configuredMaxTokens }) {
     this.config = configuration(config);
     this.github = github;
     this.state = state || new State(this.config.stateDirectory);
     this.log = (event, details = {}) => log(JSON.stringify({ time: new Date().toISOString(), event, ...details }));
     retireAgentFeedback(this);
     this.prepare = prepare; this.run = run; this.publish = publish;
+    this.resolveContextTokens = resolveContextTokens;
     this.commitStatusWrites = new Map();
     this.admissionReconciliation = new (require("./admission-reconciliation.js").AdmissionReconciliation)(this);
     this.workers = new Map(); this.stopping = false; this.lastPoll = null; this.pollError = null;
@@ -232,7 +238,7 @@ class ReviewService {
     this.state.save();
   }
 
-  async execute(job, signal, slot = 0) {
+  async execute(job, signal, slot = 0, allowNative = true) {
     const options = executionOptions(job.settings);
     if (job.retryBudget != null) {
       const infra = this.config.infrastructure || {};
@@ -240,13 +246,21 @@ class ReviewService {
       const { Infrastructure } = require("./infrastructure.js");
       const actor = job.ciRequestId ? { id: job.requestedBy, role: "admin" } : infra.clients?.find((c) => c.id === job.requestedBy);
       if (!actor) throw Object.assign(new Error("Budget retry client is no longer authorized"), { retryable: false });
-      new Infrastructure(this).authorize(job.repository, actor, true);
+      try { new Infrastructure(this).authorize(job.repository, actor, true); }
+      catch (error) { if (job.retryMaxTokens != null) error.retryable = false; throw error; }
       resolveOptions(this.config, this.repo(job.repository), job.settings.profile, { ...job.settings.options, budget: job.retryBudget });
       options.budget = job.retryBudget;
     }
-    const effective = { ...this.config, ...options, reviewSettings: job.settings || null };
+    if (job.retryMaxTokens != null) {
+      this.validateContextOverride(job, job.retryMaxTokens);
+      options.maxTokens = job.retryMaxTokens;
+    }
+    const effective = { ...this.config, ...options, reviewSettings: contextSettings(job.settings, job.retryMaxTokens) };
     // A crash can leave a closed native report on disk before progress was saved.
     this.captureProgress(job);
+    if (!allowNative && !job.progress?.complete && !job.progress?.skipped) {
+      throw await this.contextAttemptsExhausted(job);
+    }
     const outputs = {}, failures = [];
     const core = {
       info: (message) => this.log("review", { id: job.id, message }),
@@ -258,7 +272,7 @@ class ReviewService {
     const context = { repo: this.coordinates(job.repository), eventName: "ocr_service",
       issue: { number: job.number }, allowDraft: !!job.ciRequestId, runId: job.id, runAttempt: job.attempt };
     const current = await this.github.rest.pulls.get({ ...context.repo, pull_number: job.number });
-    if (!this.eligible(job.repository, current.data, job) || ((!job.snapshot || job.retryBudget != null) &&
+    if (!this.eligible(job.repository, current.data, job) || ((!job.snapshot || job.retryBudget != null || job.retryMaxTokens != null) &&
         (current.data.head.sha !== job.head || current.data.base.sha !== job.base || current.data.base.ref !== job.baseRef))) {
       this.refresh(job, current.data);
       return { stale: true };
@@ -301,9 +315,10 @@ class ReviewService {
       job.directory = job.progress.directory;
       this.log("reuse_completed_review", { id: job.id, sessionId: saved.sessionId });
     } else {
+      if (!allowNative) throw await this.contextAttemptsExhausted(job);
       try {
         job.phase = "review"; this.state.save();
-        let requireResume = job.resumeOnly || (job.budgetRetries || []).length > 0;
+        let requireResume = job.resumeOnly || (job.budgetRetries || []).length > 0 || (job.contextRetries || []).length > 0;
         const onResumeFallback = reason => {
           if (job.resumeOnly) throw Object.assign(new Error(`Resume-only recovery stopped: ${reason}`), { retryable: false, code: "RESUME_REQUIRED" });
           return require("./resume-recovery.js").recordResumeFallback(this, job, reason);
@@ -313,9 +328,18 @@ class ReviewService {
           const entry = job.resumeFallbacks?.at(-1);
           if (entry?.state === "authorized") { entry.state = "started"; entry.pid = pid; entry.startedAt = new Date().toISOString(); this.state.save(); }
         };
+        job.effectiveMaxTokens = this.resolveContextTokens(options);
+        this.state.save();
+        const beforeNativeStart = async () => {
+          if (job.contextRetries?.length && job.nativeAttempts >= MAX_CONTEXT_ATTEMPTS) {
+            throw await this.contextAttemptsExhausted(job);
+          }
+          job.nativeAttempts = (job.nativeAttempts || 0) + 1;
+          this.state.save();
+        };
         const execution = await this.run({ core, directory: job.directory, cwd, binary: this.config.binary,
           provider: effective.provider, model: effective.model, budget: effective.budget,
-          timeoutMs: effective.timeoutSeconds * 1000, signal, resume, requireResume, onResumeFallback, onFreshStart, options });
+          timeoutMs: effective.timeoutSeconds * 1000, signal, resume, requireResume, onResumeFallback, onFreshStart, beforeNativeStart, options });
         if (execution?.termination) {
           job.executionOutcomes ||= [];
           job.executionOutcomes.push({ ...execution.termination, attempt: job.attempt });
@@ -345,8 +369,13 @@ class ReviewService {
     // Retry incomplete native runs before any findings or diagnostics reach the PR.
     const progress = readProgress(job.directory, job.snapshot);
     if (!progress?.complete && !progress?.skipped) {
-      if (progress?.budgetExceeded) throw Object.assign(new Error("Token budget guard stopped review before full coverage"), { retryable: false, budgetExceeded: true });
-      throw new Error("Native review incomplete; inspect job artifacts");
+      const diagnostics = await readNativeFailure({ directory: job.directory, cwd,
+        sessionDirectory: this.config.analytics?.sessionDirectory });
+      if (progress?.budgetExceeded && !diagnostics.contextExceeded) throw Object.assign(
+        new Error("Token budget guard stopped review before full coverage"), { retryable: false, budgetExceeded: true, diagnostics });
+      throw Object.assign(new Error("Native review incomplete; inspect job artifacts"), {
+        contextExceeded: diagnostics.contextExceeded, diagnostics,
+        ...(diagnostics.contextExceeded ? { code: "NATIVE_CONTEXT_LIMIT" } : {}) });
     }
     job.phase = "publication"; job.publicationAttempts = (job.publicationAttempts || 0) + 1; this.state.save();
     const result = await this.publish({ github: this.github, context, core, directory: job.directory, blockSeverity: effective.blockSeverity });
@@ -384,13 +413,56 @@ class ReviewService {
       const job = this.state.next(Date.now(), busy, (candidate) => !candidate.snapshot || candidate.slot === slot ||
         !Number.isInteger(candidate.slot) || candidate.slot >= this.config.prConcurrency);
       if (!job) continue;
-      job.state = "running"; job.attempt++; job.startedAt = new Date().toISOString();
+      const allowNative = !(job.contextRetries?.length && (job.nativeAttempts ?? job.attempt) >= MAX_CONTEXT_ATTEMPTS);
+      job.state = "running"; if (allowNative) job.attempt++; job.startedAt = new Date().toISOString();
       this.state.save();
       const controller = new AbortController();
       this.workers.set(slot, { job, controller });
-      tasks.push(this.runJob(job, controller, slot));
+      tasks.push(this.runJob(job, controller, slot, allowNative));
     }
     await Promise.all(tasks);
+  }
+
+  async contextAttemptsExhausted(job) {
+    const reason = `Context recovery stopped after ${MAX_CONTEXT_ATTEMPTS} native executions; no further execution is allowed`;
+    const observed = job.directory && job.workspace ? await readNativeFailure({ directory: job.directory,
+      cwd: job.workspace, sessionDirectory: this.config.analytics?.sessionDirectory }) : job.failureDiagnostics;
+    const diagnostics = { ...observed, message: [...new Set([job.failureDiagnostics?.message, observed?.message])].filter(Boolean).join("\n") };
+    return Object.assign(new Error(reason), { retryable: false, code: "CONTEXT_ATTEMPTS_EXHAUSTED",
+      diagnostics: { ...diagnostics, message: [diagnostics?.message, reason].filter(Boolean).join("\n") } });
+  }
+
+  validateContextOverride(job, value) {
+    const repository = this.repo(job.repository), infra = this.config.infrastructure || {};
+    if (!this.config.contextRetry.enabled || !repository || !Number.isSafeInteger(value) || value < 1 ||
+        value > contextTokenLimit(this.config, repository)) {
+      throw Object.assign(new Error("Context retry is disabled or exceeds repository policy"), { retryable: false });
+    }
+    if (job.settings) {
+      if (!require("./review-policy.js").currentPolicy(this, job)) {
+        throw Object.assign(new Error("Review policy changed; submit a new task"), { retryable: false });
+      }
+      if (infra.dispatchEnabled === false && !job.ciRequestId) throw Object.assign(new Error("Context retry dispatch is disabled"), { retryable: false });
+      const actor = job.ciRequestId ? { id: job.requestedBy, role: "admin" } : infra.clients?.find(client => client.id === job.requestedBy);
+      if (!actor) throw Object.assign(new Error("Context retry client is no longer authorized"), { retryable: false });
+      try { new (require("./infrastructure.js").Infrastructure)(this).authorize(job.repository, actor, true); }
+      catch (error) { throw Object.assign(error, { retryable: false }); }
+      resolveOptions(this.config, repository, job.settings.profile, { ...job.settings.options,
+        ...(job.retryBudget == null ? {} : { budget: job.retryBudget }), maxTokens: value });
+    }
+  }
+
+  increaseContextBudget(job, failure) {
+    const increase = nextContextRetry(job, this.config, this.repo(job.repository), failure);
+    if (!increase) return false;
+    this.validateContextOverride(job, increase.to);
+    job.contextRetries ||= [];
+    if (job.contextRetries.some(entry => entry.attempt === increase.attempt)) throw new Error("Context expansion was already recorded for this execution");
+    job.contextRetries.push(increase);
+    job.retryMaxTokens = increase.to;
+    this.log("context_retry_scheduled", { id: job.id, from: increase.from, to: increase.to, attempt: job.attempt,
+      maxAttempts: MAX_CONTEXT_ATTEMPTS });
+    return true;
   }
 
   increaseRetryBudget(job) {
@@ -414,33 +486,56 @@ class ReviewService {
     return true;
   }
 
-  async runJob(job, controller, slot) {
+  async runJob(job, controller, slot, allowNative = true) {
     this.log("started", { id: job.id, repository: job.repository, number: job.number, head: job.head, slot });
+    const nativeAtStart = job.nativeAttempts || 0;
     try {
       job.phase = "preparation";
-      const result = await this.execute(job, controller.signal, slot);
+      const result = await this.execute(job, controller.signal, slot, allowNative);
       if (!["superseded", "cancelled"].includes(job.state)) {
-        if (this.stopping) { job.state = "queued"; job.nextAt = 0; job.attempt--; }
+        if (this.stopping) { job.state = "queued"; job.nextAt = 0; if (!job.contextRetries?.length) job.attempt--; }
         else job.state = result.stale ? (result.checkpoint ? "checkpointed" : "superseded") : "complete";
       }
       if (job.state !== "cancelled") job.result = result;
-      delete job.error; delete job.errorCode; delete job.failurePhase;
+      delete job.error; delete job.errorCode; delete job.failurePhase; delete job.failureDiagnostics;
     } catch (error) {
       if (error.persistence) throw error;
       job.error = error.message; job.errorCode = error.code || null; job.failurePhase = job.phase || "execution";
+      if (error.diagnostics) job.failureDiagnostics = error.diagnostics;
+      else if (job.contextRetries?.length && job.failureDiagnostics) job.failureDiagnostics = { ...job.failureDiagnostics,
+        message: `${job.failureDiagnostics.message}\nContext retry stopped: ${error.message}` };
+      else delete job.failureDiagnostics;
       if (!["superseded", "cancelled"].includes(job.state)) {
-        if (this.stopping) { job.state = "queued"; job.nextAt = 0; job.attempt--; }
+        if (this.stopping) { job.state = "queued"; job.nextAt = 0; if (!job.contextRetries?.length) job.attempt--; }
         else {
-          let budgetRetry = false;
-          if (error.budgetExceeded) {
+          let budgetRetry = false, contextRetry = false, contextRejected = false;
+          const contextRecovery = error.contextExceeded || (job.contextRetries || []).length > 0;
+          if (error.contextExceeded) {
+            try { contextRetry = this.increaseContextBudget(job, error.diagnostics); }
+            catch (policyError) {
+              contextRejected = true;
+              job.failureDiagnostics = { ...error.diagnostics,
+                message: `${error.diagnostics.message}\nContext retry rejected: ${policyError.message}` };
+              this.log("context_retry_rejected", { id: job.id, error: policyError.message });
+            }
+          }
+          const nativeAttempts = job.nativeAttempts ?? job.attempt;
+          if (contextRecovery && job.failurePhase !== "publication" && (job.nativeAttempts || 0) === nativeAtStart) {
+            job.contextPreparationFailures = (job.contextPreparationFailures || 0) + 1;
+          }
+          if (error.budgetExceeded && (!contextRecovery || nativeAttempts < MAX_CONTEXT_ATTEMPTS)) {
             try { budgetRetry = this.increaseRetryBudget(job); }
             catch (policyError) { job.error = `Budget retry rejected: ${policyError.message}`; }
           }
-          const attemptsRemain = budgetRetry || (job.failurePhase === "publication"
-            ? (job.publicationAttempts || 1) < this.config.publicationMaxAttempts : job.attempt < this.config.maxAttempts);
-          job.state = (budgetRetry || error.retryable !== false) && attemptsRemain ? "queued" : "failed";
+          const attemptsRemain = contextRecovery && job.failurePhase !== "publication" ? nativeAttempts < MAX_CONTEXT_ATTEMPTS &&
+            (job.contextPreparationFailures || 0) < this.config.maxAttempts :
+            budgetRetry || (job.failurePhase === "publication"
+              ? (job.publicationAttempts || 1) < this.config.publicationMaxAttempts : job.attempt < this.config.maxAttempts);
+          const mayRetry = error.contextExceeded ? contextRetry : budgetRetry || error.retryable !== false;
+          job.state = !contextRejected && mayRetry && attemptsRemain ? "queued" : "failed";
           if (budgetRetry) job.pendingSent = false;
           job.nextAt = Date.now() + this.config.retrySeconds * 1000 * 2 ** Math.min(5, (job.failurePhase === "publication" ? job.publicationAttempts || 1 : job.attempt) - 1);
+          if (contextRecovery) this.state.save();
           try { await this.status(job, job.state === "queued" ? "pending" : "error",
             budgetRetry ? `OCR budget guard; retry scheduled with ${job.retryBudget === 0 ? "unlimited tokens" : `${job.retryBudget} tokens`}` :
               job.state === "queued" ? "OCR incomplete; retry scheduled" : job.error); }
