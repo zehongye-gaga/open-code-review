@@ -12,7 +12,7 @@ function snapshot(enabled = true, revision = 1) {
     policy: { enabled, baseBranches: ["main"] }, revision,
   }] };
 }
-function fixture(t) {
+function fixture(t, configure = () => {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ocr-config-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const config = { binary: "/bin/echo", stateDirectory: directory, repositories: [{ name: "lexmount/old", baseBranches: ["main"] }],
@@ -20,11 +20,40 @@ function fixture(t) {
       organizations: [{ name: "lexmount", baseBranches: ["main"] }],
       clients: [{ id: "org-ci-dispatcher", role: "dispatcher", repositories: [], tokenFile: "/tmp/unused" }] },
     dynamicConfiguration: { organization: "lexmount", snapshotUrl: "https://reviewhub.example/internal/v1/repository-configurations", tokenFile: path.join(directory, "token"), clientIds: ["org-ci-dispatcher"] } };
+  configure(config);
   fs.writeFileSync(config.dynamicConfiguration.tokenFile, "x".repeat(40));
   const state = { data: { jobs: [], sequence: 0 }, save() {} };
   const service = new ReviewService({ config, github: { rest: { repos: { get: async () => ({ data: { id: 42, full_name: "lexmount/new-repo", visibility: "private", default_branch: "main" } }) } } }, state, log() {} });
   return { service, dynamic: service.dynamicConfiguration };
 }
+test("direct CI enrollment does not require an external client for its internal dispatcher", t => {
+  const { service, dynamic } = fixture(t, config => {
+    config.infrastructure.clients = [];
+    delete config.dynamicConfiguration.clientIds;
+  });
+  dynamic.apply(snapshot());
+  assert.equal(service.repo("lexmount/new-repo").repositoryId, "42");
+  assert.throws(() => new Infrastructure(service).authorizeScope("lexmount/new-repo", { id: "org-ci-dispatcher", role: "dispatcher" }), /client scope/);
+});
+test("agent routing checks the real agent client and retains scope validation", t => {
+  const { service, dynamic } = fixture(t, config => {
+    config.infrastructure.orgCI.agentReady = true;
+    config.infrastructure.agentDispatch = { clientId: "review-agent" };
+    config.infrastructure.clients = [{ id: "review-agent", role: "agent", repositories: [], tokenFile: "/tmp/unused" }];
+    config.dynamicConfiguration.clientIds = [];
+  });
+  assert.throws(() => dynamic.apply(snapshot()), /client scope/);
+  assert.equal(dynamic.loaded, false);
+  dynamic.config.clientIds = ["review-agent"];
+  dynamic.apply(snapshot());
+  new Infrastructure(service).authorizeScope("lexmount/new-repo", { id: "review-agent", role: "agent" });
+  service.config.infrastructure.clients = [];
+  assert.throws(() => dynamic.apply(snapshot(true, 2)), /client scope/);
+  assert.equal(dynamic.observation("42").configuration.revision, 1);
+});
+test("dynamic client IDs must still identify configured external clients", t => {
+  assert.throws(() => fixture(t, config => { config.infrastructure.clients = []; }), /client IDs/);
+});
 test("hot enrollment and explicit pause override organization fallback without restarting", t => {
   const { service, dynamic } = fixture(t);
   assert.equal(service.repo("lexmount/old"), null);

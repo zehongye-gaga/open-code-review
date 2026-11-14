@@ -79,12 +79,12 @@ class DynamicConfiguration {
         githubName: c.repository.name.toLowerCase(), baseBranches: c.policy.baseBranches, repositoryId: c.repository.id,
         configurationRevision: c.revision };
       resolveOptions(this.service.config, repository, repository.defaultProfile || "standard");
-      if (c.policy.enabled) {
+      if (c.policy.enabled && this.service.config.infrastructure.orgCI?.agentReady) {
         const infra = this.service.config.infrastructure;
-        for (const clientId of ["org-ci-dispatcher", ...(infra.orgCI?.agentReady ? [infra.agentDispatch?.clientId] : [])]) {
-          const client = infra.clients?.find(item => item.id === clientId);
-          if (!client || client.role !== "admin" && !this.config.clientIds?.includes(clientId) && !client.repositories?.some(p => [c.repository.name.toLowerCase(), `${this.config.organization.toLowerCase()}/*`].includes(p.toLowerCase()))) throw Error("Configuration client scope does not include repository");
-        }
+        // Direct CI dispatch uses an internal actor authenticated by the CI gateway.
+        const clientId = infra.agentDispatch?.clientId;
+        const client = infra.clients?.find(item => item.id === clientId);
+        if (!client || client.role !== "admin" && !this.config.clientIds?.includes(clientId) && !client.repositories?.some(p => [c.repository.name.toLowerCase(), `${this.config.organization.toLowerCase()}/*`].includes(p.toLowerCase()))) throw Error("Configuration client scope does not include repository");
       }
       entries.set(c.repository.id, structuredClone(c));
       const value = { enabled: c.policy.enabled, repository };
