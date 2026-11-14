@@ -51,6 +51,7 @@ function createGitHub({ tokenFile, token, githubAuth, api = "https://api.github.
     checks: { listForRef: (p) => request("GET", `${repoPath(p)}/commits/${encodeURIComponent(p.ref)}/check-runs${page(p)}`) },
     users: { getAuthenticated: () => auth.app ? auth.user() : request("GET", "/user") },
     repos: {
+      get: (p) => request("GET", repoPath(p)),
       getCombinedStatusForRef: (p) => request("GET", `${repoPath(p)}/commits/${encodeURIComponent(p.ref)}/status${page(p)}`),
       createCommitStatus: (p) => request("POST", `${repoPath(p)}/statuses/${p.sha}`, omit(p, ["owner", "repo", "sha"])),
     },
