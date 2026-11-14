@@ -233,6 +233,14 @@ class PostgresStore {
       throw error;
     }
   }
+  async repositoryScope(organizations) {
+    if (this.failed) throw Error("Collector database connection was lost");
+    const result = await this.client.query(
+      "SELECT data FROM reviewhub_audit_repository_scope_v1 WHERE organization=ANY($1::text[]) ORDER BY repository_id LIMIT 10001",
+      [organizations],
+    );
+    return result.rows.map(row => row.data);
+  }
   async saveMetric(sample) {
     if (!validateMetric(sample) || sample.sourceId !== this.sourceId)
       throw Error("Invalid metric sample");

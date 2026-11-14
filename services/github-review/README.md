@@ -421,3 +421,8 @@ Missing data is not converted to zero. The wait table measures oldest queued
 job age (including retry backoff), while queue P95 is the recorded rolling
 24-hour first-attempt executor statistic, not a concurrency-group percentile.
 Only the dashboard service needs restarting for this feature.
+
+## Dynamic repository enrollment
+
+For optional ReviewHub configuration snapshots, online enable/pause/resume and
+instance-specific acknowledgements, see [dynamic configuration](DYNAMIC_CONFIGURATION.md).

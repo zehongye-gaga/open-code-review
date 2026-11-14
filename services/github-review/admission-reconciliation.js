@@ -71,9 +71,9 @@ class AdmissionReconciliation {
     try {
       meta.startedAt = now; meta.nextScanAt = now + c.intervalSeconds * 1000;
       this.s.state.save();
-      const names = c.repositories || this.s.config.repositories.map(r => r.name);
-      const offset = (meta.repositoryOffset || 0) % names.length;
-      meta.repositoryOffset = (offset + 1) % names.length;
+      const names = (c.repositories || this.s.enrolledRepositories().map(r => r.name)).filter(name => this.s.repo(name));
+      const offset = names.length ? (meta.repositoryOffset || 0) % names.length : 0;
+      meta.repositoryOffset = names.length ? (offset + 1) % names.length : 0;
       for (const repository of [...names.slice(offset), ...names.slice(0, offset)]) {
         if (this.s.stopping) break;
         try {
@@ -83,7 +83,7 @@ class AdmissionReconciliation {
             if (!Array.isArray(items)) throw Error("Invalid PR list response");
             pulls.push(...items.map(pr => ({ number: pr.number, state: pr.state, draft: pr.draft, stack: pr.stack,
               head: { sha: pr.head?.sha }, base: { sha: pr.base?.sha, ref: pr.base?.ref,
-                repo: { full_name: pr.base?.repo?.full_name } } })));
+                repo: { id: pr.base?.repo?.id, full_name: pr.base?.repo?.full_name } } })));
             if (items.length < 100) break;
             if (page >= 100) throw Error("Reconciliation PR page limit reached");
           }

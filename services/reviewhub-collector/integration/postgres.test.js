@@ -55,6 +55,40 @@ async function database(t) {
   };
   return { client, open };
 }
+test("PG scope includes staged and paused repositories, retains history, survives restart and refuses malformed reads", async t => {
+  const f = fixture(t), db = await database(t);
+  f.config.repositories = [];
+  let configuration = { repository: { id: "42", name: "company/repo", visibility: "private",
+    defaultBranch: "main", observedAt: new Date().toISOString() }, revision: 1,
+    policy: { enabled: true, baseBranches: ["main"] } };
+  await db.client.query("INSERT INTO repository_enrollments(repository_id,organization,revision,configuration,sync_requested) VALUES('42','company',1,$1,false)", [configuration]);
+  let store = db.open(), saved = await store.connect();
+  const cycle = async () => {
+    const result = await collect({ ...f, options: { ...f.options, repositorySource: "reviewhub" }, store, saved, resourcesReader: () => null });
+    saved = result.saved; return result;
+  };
+  const staged = await cycle();
+  assert.equal(staged.batch.repositories[0].id, "github:42");
+  assert.equal(staged.batch.repositories[0].enabled, null);
+  assert.equal(staged.batch.runs.length, 1);
+  const id = staged.batch.runs[0].id;
+  await db.client.query("UPDATE repository_enrollments SET state='applied',applied_revision=revision WHERE repository_id='42'");
+  assert.equal((await cycle()).batch.repositories[0].enabled, true);
+  configuration = { ...configuration, revision: 2, policy: { ...configuration.policy, enabled: false } };
+  await db.client.query("UPDATE repository_enrollments SET revision=2,configuration=$1,state='pending' WHERE repository_id='42'", [configuration]);
+  assert.equal((await cycle()).batch.repositories[0].enabled, null);
+  await db.client.query("UPDATE repository_enrollments SET state='applied',applied_revision=revision WHERE repository_id='42'");
+  await store.close(); store = db.open(); saved = await store.connect();
+  const paused = await cycle();
+  assert.equal(paused.batch.repositories[0].enabled, false);
+  assert.equal(paused.batch.runs[0].id, id);
+  assert.equal((await db.client.query("SELECT in_scope FROM audit_repositories WHERE id='github:42'")).rows[0].in_scope, true);
+  const before = (await db.client.query("SELECT checkpoint FROM audit_sources")).rows;
+  await db.client.query("UPDATE repository_enrollments SET configuration='{}'");
+  await assert.rejects(cycle(), /contract/);
+  assert.deepEqual((await db.client.query("SELECT checkpoint FROM audit_sources")).rows, before);
+  assert.equal((await db.client.query("SELECT count(*)::int AS n FROM audit_runs")).rows[0].n, 1);
+});
 test("telemetry start persists excluded attempts across restart without changing review history", async (t) => {
   const f = fixture(t),
     db = await database(t),

@@ -13,6 +13,22 @@ const config = {
 };
 const body = { id: 42, full_name: "company/new", default_branch: "main" };
 
+test("PG repository identity overrides a stale metadata cache and survives a GitHub metadata outage", async () => {
+  const scoped = { ...config, repositories: [{ name: "company/new", repositoryId: "42", defaultBranch: "master", baseBranches: ["master"] }] };
+  const calls = [];
+  const result = await repositoryMetadata(scoped,
+    { "company/new": { providerId: "99", name: "company/replaced", checkedAt: new Date(now).toISOString(), access: "available" } },
+    now, async url => { calls.push(url); return new Response(null, { status: 503 }); });
+  assert.deepEqual(calls, ["https://api.github.com/repositories/42"]);
+  const batch = normalize({ config: scoped, metadata: result.metadata, state: { jobs: [] },
+    ledger: { jobs: {}, sessions: {}, artifacts: {} }, sourceId: "test", intervalSeconds: 300, now });
+  assert.equal(batch.repositories[0].id, "github:42");
+  assert.equal(batch.repositories[0].providerId, "42");
+  assert.equal(batch.repositories[0].name, "company/new");
+  assert.equal(batch.repositories[0].defaultBranch, "master");
+  assert.equal(batch.repositories[0].access, "unknown");
+});
+
 test("resolves renamed repositories through fixed IDs and merges both configured names without losing history", async () => {
   const calls = [];
   const response = await repositoryMetadata(

@@ -52,7 +52,7 @@ class Infrastructure {
   authorizeScope(name, actor) {
     validate({ repository: name }, { type: "object", properties: { repository: repo }, required: ["repository"] });
     name = name.toLowerCase();
-    if (actor.role !== "admin" && !(actor.repositories || []).some((p) => sameRepository(this.service, p, name) || p.toLowerCase() === `${name.split("/")[0]}/*`)) fail("Repository is outside client scope", 403, "CLIENT_SCOPE_DENIED");
+    if (actor.role !== "admin" && !this.service.dynamicConfiguration?.authorizes(actor.id, name) && !(actor.repositories || []).some((p) => sameRepository(this.service, p, name) || p.toLowerCase() === `${name.split("/")[0]}/*`)) fail("Repository is outside client scope", 403, "CLIENT_SCOPE_DENIED");
   }
   authorize(name, actor, mutation = false) {
     this.authorizeScope(name, actor);
@@ -65,12 +65,15 @@ class Infrastructure {
   find(id, actor, mutation = false) {
     const j = this.service.state.data.jobs.find((entry) => entry.id === id);
     if (!j) fail("Job not found or retention expired", 404);
+    // Pausing stops admissions; existing clients can still observe accepted jobs.
+    if (!mutation && j.settings?.enrollmentPolicy && (actor.role === "admin" || this.service.dynamicConfiguration?.authorizesJob(actor.id, j))) return j;
     this.authorize(j.repository, actor, mutation);
     return j;
   }
   async current(args, actor, mutation = false) {
     const repository = this.authorize(args.repository, actor, mutation);
     const { data } = await this.service.github.rest.pulls.get({ ...this.service.coordinates(repository.name), pull_number: args.pull_number });
+    if (repository.repositoryId && String(data.base?.repo?.id) !== repository.repositoryId) fail("Repository identity changed", 403, "REPOSITORY_ID_CHANGED");
     if (args.head_sha && (data.head?.sha !== args.head_sha || data.base?.sha !== args.base_sha)) fail("PR changed; fetch context and decide again", 409, "PR_SNAPSHOT_CHANGED");
     return { repository, pr: data };
   }

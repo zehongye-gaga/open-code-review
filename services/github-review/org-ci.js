@@ -61,13 +61,15 @@ class OrgCI {
   }
   owns(r, generation) { return this.receipts[r.request_id] === r && r.admissionGeneration === generation && !r.pendingAdmission && !r.successorReceipt; }
   async current(r) {
+    const job = r.jobId && this.s.state.data.jobs.find(item => item.id === r.jobId);
+    const policy = job?.settings?.enrollmentPolicy;
     const { data } = await this.s.github.rest.pulls.get({ ...this.s.coordinates(r.repository), pull_number: r.pull_number });
-    if (data.state !== "open" || !this.s.repo(r.repository) || !sameRepository(this.s, data.base?.repo?.full_name, r.repository) ||
+    if (data.state !== "open" || (!policy && !this.s.repo(r.repository)) || !sameRepository(this.s, data.base?.repo?.full_name, r.repository) ||
         data.head?.sha !== r.head_sha || data.base?.sha !== r.base_sha || data.base?.ref !== r.base_ref) {
       const error = new Error("PR snapshot is no longer current");
       error.status = 409; error.code = "PR_SNAPSHOT_CHANGED"; error.prClosed = data.state !== "open"; throw error;
     }
-    if (!this.s.eligible(r.repository, data, { ciRequestId: r.request_id })) {
+    if (!this.s.eligible(r.repository, data, { ciRequestId: r.request_id, ...(policy ? { settings: { enrollmentPolicy: policy } } : {}) })) {
       fail("PR target is outside the configured review branches", 409, "PR_TARGET_BRANCH_NOT_ALLOWED");
     }
     return data;
