@@ -45,29 +45,32 @@ function repositories(config, previous, metadata, organizations) {
     const name = repoName(configured.name),
       githubName = repoName(configured.githubName);
     if (!allowed(name) || (githubName && !allowed(githubName))) continue;
-    const remote = metadata[name] || metadata[githubName];
+    const candidate = metadata[name] || metadata[githubName];
+    const remote = configured.repositoryId && candidate?.providerId && candidate.providerId !== configured.repositoryId
+      ? undefined : candidate;
+    const providerId = configured.repositoryId || remote?.providerId;
     const currentName = repoName(remote?.name) || githubName || name;
     if (!allowed(currentName)) continue;
     const candidates = [...result.values(), ...previous],
       names = [name, githubName, currentName].filter(Boolean);
     const existing =
       candidates.find(
-        (r) => remote?.providerId && r.providerId === remote.providerId
+        (r) => providerId && r.providerId === providerId
       ) ||
       candidates.find(
         (r) =>
-          (!remote?.providerId || !r.providerId) &&
+          (!providerId || !r.providerId) &&
           names.some((n) => r.name === n || r.aliases.includes(n))
       );
     const id =
       existing?.id ||
-      (remote?.providerId
-        ? "github:" + remote.providerId
+      (providerId
+        ? "github:" + providerId
         : "repository:" + digest(name));
     result.set(id, {
       id,
       provider: "github",
-      providerId: remote?.providerId || existing?.providerId || null,
+      providerId: providerId || existing?.providerId || null,
       name: currentName,
       organization: currentName.split("/")[0],
       aliases: [
@@ -84,7 +87,7 @@ function repositories(config, previous, metadata, organizations) {
         )
       ],
       defaultBranch:
-        remote?.defaultBranch || existing?.defaultBranch || null,
+        configured.defaultBranch || remote?.defaultBranch || existing?.defaultBranch || null,
       targetBranches:
         configured?.baseBranches?.filter((v) => typeof v === "string") ||
         existing?.targetBranches ||

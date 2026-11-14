@@ -10,6 +10,7 @@ const crypto = require("node:crypto");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const { resolveCheckpointRange } = require("../../scripts/github-actions/post-review-comments.js");
+const { contextSettings } = require("./context-retry.js");
 
 const exec = promisify(execFile);
 const UUID = /^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -66,6 +67,14 @@ async function planReview({ config, job, checkpoint, directory, cwd, signal, ide
     if (increase) compatible = previous.fingerprint === await identify({
       config: { ...config, budget: increase.from }, metadata, cwd,
     });
+  }
+  if (!compatible && previous) {
+    const increase = (job.contextRetries || []).find(retry => retry.directory === previous.directory &&
+      retry.sessionId === previous.sessionId && Number.isSafeInteger(retry.from) && retry.from > 0 &&
+      retry.to === retry.from * 2 && retry.to === config.reviewSettings?.options?.maxTokens &&
+      (retry.previousOverride === null || retry.previousOverride === retry.from));
+    if (increase) compatible = previous.fingerprint === await identify({ config: { ...config,
+      reviewSettings: contextSettings(job.settings, increase.previousOverride) }, metadata, cwd });
   }
   compatible &&= previous?.head === metadata.head && previous?.base === metadata.base;
   if (!compatible) delete metadata.incrementalExclude;

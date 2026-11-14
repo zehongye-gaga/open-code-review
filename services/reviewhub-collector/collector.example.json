@@ -5,6 +5,7 @@
     "lexmount"
   ],
   "intervalSeconds": 300,
+  "repositorySource": "configuration",
   "analytics": {
     "sessionDirectory": "/data/crg/ocr-review/state/home/.opencodereview/sessions"
   },

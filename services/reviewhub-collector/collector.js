@@ -17,6 +17,7 @@ const {
   hostMetrics,
 } = require("./observability.js");
 const { backendAdmissions } = require("./backend-admission.js");
+const { repositoryScope, source } = require("./repository-scope.js");
 const group = (records, prefix) =>
   Object.fromEntries(
     [...records]
@@ -37,6 +38,7 @@ function optionsFromFile(file) {
   )
     throw Error("Invalid collector source configuration");
   options.policy = policyOptions(options.policy);
+  options.repositorySource = source(options.repositorySource);
   options.intervalSeconds ??= 300;
   if (
     !Number.isInteger(options.intervalSeconds) ||
@@ -94,6 +96,8 @@ async function collect({
 }) {
   const cycleStart = performance.now();
   const records = saved.records;
+  const scope = await repositoryScope(config, options, store, records);
+  config = scope.config;
   const stateStart = performance.now();
   const sourceRows = new Map(Object.entries(group(records, "state:")));
   const input = readState(
@@ -221,6 +225,7 @@ async function collect({
   batch.signals = operationalSignals(input.state, batch);
   batch.metrics = hostMetrics(store.sourceId, resources, now);
   const next = new Map();
+  if (scope.snapshot) next.set("scope:snapshot", scope.snapshot);
   for (const [key, value] of actions.records) next.set("actions:" + key, value);
   for (const [key, value] of input.rows) next.set("state:" + key, value);
   const { jobs, sessions, artifacts, ...ledgerMeta } = analytics.ledger;

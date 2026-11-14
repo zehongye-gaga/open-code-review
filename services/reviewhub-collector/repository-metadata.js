@@ -9,7 +9,8 @@ async function repositoryMetadata(config, previous, now, request = fetch) {
     warnings = [];
   for (const repository of config.repositories) {
     const name = repository.name.toLowerCase(),
-      saved = previous[name],
+      prior = previous[name],
+      saved = repository.repositoryId && prior?.providerId && repository.repositoryId !== prior.providerId ? undefined : prior,
       refreshMs = saved?.access === "available" ? 3600000 : 300000;
     if (saved?.checkedAt && now - Date.parse(saved.checkedAt) < refreshMs) {
       if (saved.access !== "available")
@@ -21,7 +22,7 @@ async function repositoryMetadata(config, previous, now, request = fetch) {
       continue;
     }
     try {
-      let expectedId = saved?.providerId || null;
+      let expectedId = repository.repositoryId || saved?.providerId || null;
       if (expectedId && !/^[1-9]\d*$/.test(expectedId))
         throw Error("Invalid stored repository ID");
       let url = expectedId
