@@ -13,7 +13,7 @@ Add a `dynamicConfiguration` object to the existing service configuration:
     "organization": "lexmount",
     "snapshotUrl": "https://reviewhub.example/internal/v1/repository-configurations",
     "tokenFile": "/run/secrets/reviewhub-config-token",
-    "clientIds": ["org-ci-dispatcher"]
+    "clientIds": ["insightflow-agent"]
   }
 }
 ```
@@ -31,6 +31,10 @@ explicitly enabled dynamic repositories. Include the actual Agent client when
 enabled entry checks that the required clients have scope; refreshing a new
 revision also checks that this service's GitHub credentials can read the exact
 repository ID, visibility and default branch.
+The internal `org-ci-dispatcher` actor uses the existing organization CI gateway
+credential and needs no external client entry. Omit `clientIds` for direct-only
+CI when no external clients need dynamic scope; otherwise use IDs already
+declared in `infrastructure.clients`.
 
 The service loads `reviewhub-config/v1` snapshots atomically, on startup and every
 30 seconds. Same-version retries must have identical content. Stale revisions,
