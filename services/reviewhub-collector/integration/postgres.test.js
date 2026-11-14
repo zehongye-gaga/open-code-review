@@ -535,3 +535,104 @@ test("operational signals and resource metrics are idempotent, retain identity a
     ).rows[0].n > 0,
   );
 });
+
+for (const terminal of ["complete", "failed"]) {
+  test(`context retry evidence survives ${terminal} collection and writer restart`, async (t) => {
+    const f = fixture(t),
+      db = await database(t);
+    const first = {
+      attempt: 1,
+      maxAttempts: 3,
+      from: 200000,
+      to: 400000,
+      at: new Date(f.now - 2000).toISOString(),
+      directory: f.directory,
+      reason: "prompt tokens (162461) exceed 80% of max_tokens(200000)",
+      artifacts: [path.join(f.directory, "result.json"), f.file],
+    };
+    f.job.state = "queued";
+    f.job.contextRetries = [first];
+    f.database.save(f.value);
+    let store = db.open(),
+      saved = await store.connect();
+    let result = await collect({
+      ...f,
+      store,
+      saved,
+      resourcesReader: () => null,
+    });
+    saved = result.saved;
+    const initial = (
+      await db.client.query("SELECT data FROM audit_alert_signals")
+    ).rows[0].data;
+    assert.equal(initial.state, "queued");
+    assert.equal(initial.retryEvents.length, 1);
+    f.job.contextRetries.push({
+      ...first,
+      attempt: 2,
+      from: 400000,
+      to: 800000,
+      at: new Date(f.now - 1000).toISOString(),
+      reason: "second original\ncontext failure",
+    });
+    f.job.state = terminal;
+    f.job.attempt = 3;
+    f.job.updatedAt = new Date(f.now + 1000).toISOString();
+    if (terminal === "failed") {
+      f.job.error = "Native review incomplete; inspect job artifacts";
+      f.job.failureDiagnostics = {
+        message: "third original\ncontext failure",
+        artifacts: first.artifacts,
+      };
+    }
+    f.database.save(f.value);
+    result = await collect({
+      ...f,
+      now: f.now + 1000,
+      store,
+      saved,
+      resourcesReader: () => null,
+    });
+    const settled = (
+      await db.client.query("SELECT data,collected_at FROM audit_alert_signals")
+    ).rows[0];
+    assert.equal(settled.data.retryEvents.length, 2);
+    assert.equal(settled.data.retryEvents[0].id, initial.retryEvents[0].id);
+    assert.notEqual(
+      settled.data.retryEvents[0].id,
+      settled.data.retryEvents[1].id,
+    );
+    assert.equal(
+      settled.data.state,
+      terminal === "complete" ? "succeeded" : "failed",
+    );
+    assert.equal(
+      settled.data.failureDiagnostic?.message,
+      terminal === "failed" ? "third original\ncontext failure" : undefined,
+    );
+    if (terminal === "failed")
+      assert.deepEqual(
+        settled.data.failureDiagnostic.artifacts,
+        first.artifacts,
+      );
+    await store.close();
+    store = db.open();
+    saved = await store.connect();
+    await collect({
+      ...f,
+      now: f.now + 2000,
+      store,
+      saved,
+      resourcesReader: () => null,
+    });
+    const repeated = (
+      await db.client.query("SELECT data,collected_at FROM audit_alert_signals")
+    ).rows;
+    assert.equal(repeated.length, 1);
+    assert.deepEqual(repeated[0].data, settled.data);
+    assert.equal(
+      repeated[0].collected_at.getTime(),
+      settled.collected_at.getTime(),
+    );
+  });
+}
